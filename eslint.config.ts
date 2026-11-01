@@ -17,9 +17,19 @@ import obsidianmd from "eslint-plugin-obsidianmd";
  * `eslint` exits non-zero exactly when the directory would fail. `bun run lint:review`
  * runs it locally and `bun run verify` runs it as the `review` gate.
  *
- * This file is itself scanned by the directory (its ignore list covers `.mjs`, `.cjs`,
- * `.mts` and `.cts`, not `.ts`), so it is listed in `tsconfig.scripts.json` to keep the
- * type-aware rules resolvable, and it has to stay clean under them.
+ * It runs over the **published** packages only — `packages/plugin`, `packages/engine` and
+ * `packages/shared` — because that is exactly the tree the directory scans: the plugin is
+ * published from a generated repository that holds nothing else
+ * (see `scripts/mirror-plugin.ts`). Scanning the server, the CLI and the suites here would
+ * report findings against code the directory never sees, and that cannot be made to
+ * satisfy Obsidian's plugin rules.
+ *
+ * This file is not part of the published tree, so it is not scanned; it stays in
+ * `tsconfig.scripts.json` for the type-aware rules to resolve it.
+ *
+ * The gate currently fails on **errors** only, which is what the directory rejects a
+ * release for. `--max-warnings 0` is the target, and it is one line away — the remaining
+ * findings are listed in the `review` gate's output rather than hidden.
  *
  * Two things must stay in step with the directory:
  *
