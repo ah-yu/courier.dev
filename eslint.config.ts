@@ -111,6 +111,7 @@ const DIRECTORY_IGNORES: string[] = [
    */
   "eslint.config.ts",
   "vitest.config.ts",
+  "stylelint.config.ts",
   "package.json",
 ];
 
