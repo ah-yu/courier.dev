@@ -25,8 +25,7 @@ const watch = vi.fn(
 let listeners: Array<(event: string, filename: string | null) => void> = [];
 const close = vi.fn();
 
-vi.mock("fs", () => ({ watch }));
-vi.mock("path", () => ({ join: (...parts: string[]) => parts.join("/") }));
+vi.mock("node:fs", () => ({ watch }));
 
 describe("watchLeaseDirectory", () => {
   afterEach(() => {

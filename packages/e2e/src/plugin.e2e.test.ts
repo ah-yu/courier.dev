@@ -270,13 +270,23 @@ function settingsIn(root: FakeEl): Setting[] {
 }
 
 /** The settings tab the plugin registered on load, with the container it renders into. */
-function settingsTabOf(plugin: CourierPlugin): { containerEl: FakeEl; display(): void } {
+function settingsTabOf(plugin: CourierPlugin): {
+  containerEl: FakeEl;
+  display(): void;
+  getSettingDefinitions(): Array<{ name?: string }>;
+} {
   const tab = recordedSurface(plugin).settingTabs[0] as unknown as {
     containerEl: FakeEl;
     display(): void;
+    getSettingDefinitions(): Array<{ name?: string }>;
   };
   if (!tab?.containerEl) throw new Error("the plugin registered no settings tab");
   return tab;
+}
+
+/** The names the settings tab declares for the step it is on (the app keys items by them). */
+function definitionNames(tab: { getSettingDefinitions(): Array<{ name?: string }> }): string[] {
+  return tab.getSettingDefinitions().map((item) => item.name ?? "");
 }
 
 /** The plugin's single status-bar item (it is created once, in `onload`). */
@@ -5576,6 +5586,11 @@ describe("plugin e2e — the real plugin against a real server", () => {
       // What the user typed is kept, so the fix is one field away.
       expect(plugin.settings.userKey).toBe("ck_this_key_does_not_exist");
       expect(plugin.settings.serverUrl).toBe(server.serverUrl);
+
+      // The app keys a setting item by its name, so two items may never share one: the error
+      // line is part of the form's row for exactly this reason.
+      const names = definitionNames(tab);
+      expect(new Set(names).size).toBe(names.length);
     });
 
     it("moves to the account row once the key is accepted, and keeps the list behind one button", async () => {

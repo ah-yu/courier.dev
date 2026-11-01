@@ -148,29 +148,33 @@ tree, and this repository's release is what writes it:
 
 #### The review scanner, mirrored
 
-The directory's automated review scans the **whole repository**, not only `packages/plugin/`, with
-`eslint-plugin-obsidianmd` and its own fixed ignore list; it does not read this repository's
-config. A monorepo therefore cannot opt out of that scan, and an error anywhere can fail the
-plugin's review.
+The directory's automated review scans the repository the plugin is published from with
+`eslint-plugin-obsidianmd` and its own fixed ignore list, and it scans the release's `styles.css`
+with Obsidian's Stylelint config. It does not read this repository's config; what it reads is the
+[publishing mirror](#the-publishing-mirror), which holds only the three published packages.
 
-[`eslint.config.ts`](../eslint.config.ts) reproduces that scan (`bun run lint:review`, a default
-`bun run verify` gate). The gate prints errors only; `bunx eslint .` prints the warnings too. The
-config is a `.ts` file, so the directory scans it as well (its ignore list covers `.mjs`, `.cjs`,
-`.mts` and `.cts`, not `.ts`): it is listed in `tsconfig.scripts.json` so the type-aware rules can
-resolve it, and it has to stay clean under them.
+[`eslint.config.ts`](../eslint.config.ts) reproduces the ESLint half and
+[`stylelint.config.ts`](../stylelint.config.ts) the stylesheet half; `bun run lint:review` runs
+both, as a default `bun run verify` gate. Both name their scope themselves rather than in the
+command, so an editor's linter and the gate report the same files:
 
-- it runs the same rule set (`eslint-plugin-obsidianmd`, pinned in `package.json`);
-- it applies the directory's fixed ignore list (in the config; the list comes from its FAQ);
-- it fails only on the rules the directory reports as **Error** — everything it reports as a
-  warning stays a warning, because a warning never fails the review.
+- the same rule set (`eslint-plugin-obsidianmd` / `stylelint-config-obsidianmd`, pinned in
+  `package.json`);
+- the directory's fixed ignore list, plus this repository's own: the packages the plugin is not
+  published from (`server`, `cli`, `e2e`, `build`, `testing`) and the repository's tooling. Those
+  are exactly the files the mirror does not contain, so the scan here covers the tree the directory
+  will read;
+- `--max-warnings 0`. The directory splits its findings into errors and warnings; this gate fails
+  on both, which is stricter than the review — the three packages are clean of both, and the flag is
+  what keeps them that way.
 
 Three things must stay in step with the directory: the ignore list and `DIRECTORY_ERROR_RULES` in
-the config, and the `eslint-plugin-obsidianmd` version. The mirror cannot judge the directory's
-non-ESLint checks (manifest, release assets, build verification) — `scripts/check-release.ts` owns
-the manifest half, and the release workflow builds the assets.
+the ESLint config, and the two plugin versions. The mirror cannot judge the directory's non-ESLint
+checks (manifest, release assets, build verification) — `scripts/check-release.ts` owns the
+manifest half, and the release workflow builds the assets.
 
-Because that scan covers the whole repository and cannot be configured, the plugin is published from
-a repository that holds only the plugin — [the publishing mirror](#the-publishing-mirror).
+Because that scan cannot be configured, the plugin is published from a repository that holds only
+the plugin — [the publishing mirror](#the-publishing-mirror).
 
 ### The publishing mirror
 

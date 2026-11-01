@@ -1,301 +1,49 @@
-@media (width <= 600px) {
-  .courier-reload-notice {
-    /* Obsidian's own floating nav keeps `max(safe-area, 12px)` clear of the bottom edge
-     * (`--navbar-bottom-offset`); using the raw safe-area would tuck the sheet under the
-     * nav on a device that reports no inset (Android). */
-    --courier-safe-bottom: max(
-      var(--safe-area-inset-bottom, 0px),
-      env(safe-area-inset-bottom, 0px),
-      12px
-    );
+/*
+ * Courier's own styles: the status-bar state icon, the conflict-copy action in the
+ * file explorer, the comparison view, and the floating "settings synced" card.
+ * Everything else in the plugin is inline-styled by the component that builds it or
+ * uses Obsidian's components.
+ */
 
-    right: 12px;
-    bottom: calc(var(--mobile-toolbar-height, 0px) + var(--courier-safe-bottom) + 8px);
-    left: 12px;
-    width: auto;
-
-    /* `100vh` is the fallback for a WebView without `dvh`; the `@supports` block below
-     * applies where `dvh` is supported. */
-    max-height: calc(100vh - var(--mobile-toolbar-height, 0px) - var(--courier-safe-bottom) - 24px);
-    padding: 16px;
-    border-radius: 16px;
-    overflow-y: auto;
-    animation: courier-reload-notice-sheet-in 220ms cubic-bezier(0.2, 0.7, 0.3, 1);
-  }
-
-  @supports (height: 100dvh) {
-    .courier-reload-notice {
-      max-height: calc(
-        100dvh - var(--mobile-toolbar-height, 0px) - var(--courier-safe-bottom) - 24px
-      );
-    }
-  }
-
-  .courier-reload-notice-icon {
-    width: 36px;
-    height: 36px;
-    border-radius: 10px;
-  }
-
-  .courier-reload-notice-icon svg {
-    width: 18px;
-    height: 18px;
-  }
-
-  .courier-reload-notice-message {
-    margin-top: 10px;
-    margin-left: 46px; /* 36px icon + 10px gap */
-    line-height: 1.55;
-  }
-
-  .courier-reload-notice-actions {
-    margin-top: 16px;
-  }
-
-  .courier-reload-notice-actions button {
-    flex: 1 1 0;
-    min-height: 44px;
-    font-size: var(--font-ui-small);
-  }
-
-  .courier-reload-notice-reload {
-    min-width: 0;
-  }
-}
-
-@media (width <= 520px) {
-  .modal.courier-setup-connection-modal {
-    width: 92vw;
-  }
-
-  .courier-setup-lead-icon {
-    display: none;
-  }
-
-  .courier-setup-chips {
-    padding-left: 0;
-  }
-
-  .courier-setup-footer {
-    flex-wrap: wrap;
-  }
-
-  .courier-setup-footer-hint {
-    width: 100%;
-  }
-
-  .courier-setup-actions {
-    width: 100%;
-  }
-
-  .courier-setup-actions button {
-    flex: 1 1 0;
-  }
-}
-
-@media (width <= 520px) {
-  .courier-history-list {
-    max-height: 50vh;
-  }
-
-  .courier-history-action {
-    padding: 1px 6px;
-  }
-}
-
-@media (width <= 520px) {
-  .courier-deleted-icon {
-    display: none;
-  }
-
-  .courier-recycle-bin-list {
-    max-height: 48vh;
-  }
-
-  /*
-   * The hint is the only warning before an irreversible action, so a phone keeps it:
-   * the footer stacks it above a full-width button instead of hiding it.
-   */
-  .courier-recycle-bin-footer {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .courier-recycle-bin-clear {
-    width: 100%;
-    min-width: 0;
-  }
-}
-
-@media (width <= 520px) {
-  .courier-file-preview-header {
-    align-items: flex-start;
-  }
-
-  .courier-file-preview-icon,
-  .courier-file-preview-kind {
-    display: none;
-  }
-
-  .courier-file-preview {
-    padding: 12px;
-  }
-}
-
-@supports (height: 100dvh) {
-  body.is-phone .courier-reload-notice {
-    max-height: calc(
-      100dvh - var(--mobile-toolbar-height, 0px) - var(--courier-safe-bottom) - 24px
-    );
-  }
-}
+/* ── The always-visible sync state, bottom-right ── */
 
 /*
- * A narrow tab (a phone, or the page itself split into a column): the list goes above the
- * pane instead of beside it, and gives up most of its height to the content — reading the
- * version is what the surface is for, picking one is one click.
+ * One icon in Obsidian's status bar. The state is carried by the icon shape and its
+ * colour alone — there is no room for a label next to every other plugin's status item —
+ * so the four rules below are the whole visual language. Colours are theme variables, and
+ * the accent is only used for the healthy state; nothing animates, because "syncing" is a
+ * connection state rather than a spinner for one transfer.
  */
-@container (max-width: 680px) {
-  .courier-vh-body {
-    flex-direction: column;
-    gap: 10px;
-  }
-
-  .courier-vh-list {
-    flex: 0 0 auto;
-    max-height: 30vh;
-  }
-
-  .courier-vh-pane {
-    flex: 1 1 auto;
-  }
-
-  .courier-vh-pane-head {
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-
-  .courier-vh-count {
-    display: none;
-  }
+.courier-status-bar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  border-radius: var(--radius-s);
+  color: var(--text-muted);
+  cursor: pointer;
 }
 
-/* ── A narrow page: the header reflows instead of clipping ── */
+/* ── The read-only rows inside the status menu ── */
 
-/*
- * A comparison can be split into a column a few hundred pixels wide (the screenshot that
- * prompted this was 379 px). Below 520 px the header stops pretending to be one line: the
- * names take a row of their own, and the counts and the two controls sit under them, right
- * aligned — so the replace button is never the part that gets cut off.
- *
- * The rows themselves keep the two columns: their lines now wrap between words, which is what
- * a narrow diff can honestly do.
- */
-@container (max-width: 520px) {
-  .courier-conflict-diff {
-    padding: 0 10px 10px;
-  }
-
-  .courier-conflict-diff-header {
-    flex-wrap: wrap;
-    gap: 8px;
-    padding-bottom: 8px;
-  }
-
-  .courier-conflict-diff-title {
-    flex: 1 1 100%;
-  }
-
-  /* The counts and the layout control take the row under the names; the counts stay at its left
-   * end and `margin-left: auto` takes the controls to its right. */
-  .courier-conflict-diff-stats {
-    margin-left: 0;
-  }
-
-  .courier-conflict-diff-actions {
-    margin-left: auto;
-  }
-
-  /* Both the layout control and the write may wrap onto a row of their own, and each stays at
-   * the pane's right end instead of being clipped by its edge. The write is a header child (not
-   * part of `.courier-conflict-diff-actions`), so it needs the auto margin itself. */
-  .courier-conflict-diff-actions,
-  .courier-conflict-diff-header-actions,
-  .courier-conflict-diff-header-actions .setting-item-control {
-    flex: 0 1 auto;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-  }
-
-  .courier-conflict-diff-header > .courier-conflict-diff-header-actions {
-    margin-left: auto;
-  }
-
-  /* The one write keeps its words on one line rather than breaking mid-sentence. */
-  .courier-conflict-diff-header-actions button {
-    white-space: nowrap;
-  }
+/* Obsidian's label rows are a size larger and muted; these are readings, not headings, so
+ * they take the same typography as the actionable rows below the separator. */
+.courier-status-menu-row,
+.courier-status-menu-storage {
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  font-weight: 400;
+  line-height: 1.3;
 }
 
-@keyframes courier-reload-notice-in {
-  from {
-    opacity: 0;
-    transform: translateY(8px) scale(0.98);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-
-@keyframes courier-reload-notice-sheet-in {
-  from {
-    opacity: 0;
-    transform: translateY(16px);
-  }
-
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .courier-reload-notice {
-    animation: none;
-  }
-}
-
-@keyframes courier-recycle-pulse {
-  0%,
-  100% {
-    opacity: 0.35;
-  }
-
-  50% {
-    opacity: 0.75;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .courier-recycle-bin-skeleton-icon,
-  .courier-recycle-bin-skeleton-line {
-    opacity: 0.45;
-    animation: none;
-  }
-}
-
-@supports (background: color-mix(in srgb, red 10%, transparent)) {
-  .courier-reload-notice-icon {
-    background: color-mix(in srgb, var(--interactive-accent) 14%, transparent);
-  }
-}
-
-@supports (background: color-mix(in srgb, red 10%, transparent)) {
-  body.is-phone .courier-conflict-diff-icon {
-    background: color-mix(in srgb, var(--interactive-accent) 14%, transparent);
-  }
+/* A quota bar followed by `used/limit`: the bar is the part a label could not say at a
+ * glance, and the numbers stay beside it so a nearly-empty bar is still readable. Shared
+ * by the status menu and the settings page. */
+.courier-storage-usage {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
 .courier-storage-usage-bar {
@@ -316,6 +64,14 @@
 .courier-storage-usage-value {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+/* The settings page's account row: server, then the two readings aligned label/value. */
+.courier-account-details {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  line-height: 1.5;
 }
 
 .courier-account-detail {
@@ -340,16 +96,80 @@
   color: var(--text-normal);
 }
 
+/* ── The "settings synced — reload" card ── */
+
+/*
+ * A non-modal card, not Obsidian's `Notice`: it carries a decision (reload now or
+ * later), so it waits for the user instead of expiring. Desktop keeps it in the
+ * bottom-right corner, out of the way of the ribbon and the note. A phone gets a
+ * bottom sheet above the app's own mobile chrome, where a thumb can reach it and
+ * where it does not cover the floating nav.
+ *
+ * Every colour, radius and shadow below comes from an Obsidian theme variable, so
+ * light, dark and community themes colour it without a second rule. The phone
+ * layout is stated twice on purpose: `body.is-phone` also covers a landscape phone
+ * (wider than the media query), while the width query covers a desktop window
+ * squeezed to phone size — the way the preview harness simulates a device.
+ */
+
+.courier-reload-notice {
+  position: fixed;
+  right: 16px;
+  bottom: 40px;
+
+  /* Obsidian's own notification layer: above the app and its modals, below menus
+   * and tooltips. */
+  z-index: var(--layer-notice, 60);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  width: min(360px, calc(100vw - 32px));
+  padding: 14px 16px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-l, 12px);
+  background: var(--background-primary);
+  box-shadow: var(--shadow-l);
+  color: var(--text-normal);
+  animation: courier-reload-notice-in 180ms cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+
 .courier-reload-notice-head {
   display: flex;
   align-items: center;
   gap: 10px;
 }
 
+/* The accent tile is what makes this read as a status card rather than a paragraph. */
+.courier-reload-notice-icon {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+
+  /* The solid colour is the fallback for a WebView without `color-mix`; the override below
+   * applies where it is supported. */
+  background: var(--background-secondary);
+  color: var(--interactive-accent);
+}
+
 .courier-reload-notice-title {
   font-size: var(--font-ui-medium);
   font-weight: 600;
   line-height: 1.35;
+}
+
+/* Aligned with the title, not the icon: the icon is a marker, the sentence belongs
+ * to the heading. */
+.courier-reload-notice-message {
+  margin-top: 8px;
+  margin-left: 42px; /* 32px icon + 10px gap */
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .courier-reload-notice-actions {
@@ -360,9 +180,40 @@
   margin-top: 14px;
 }
 
+/* A text action, so the one filled button is unambiguous. */
+.courier-reload-notice-later {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+}
+
 .courier-reload-notice-reload {
   min-width: 96px;
   font-weight: 600;
+}
+
+/* ── The two-state segmented control (shared by both views) ── */
+
+/*
+ * One track, one raised pill for the state that is on. Both main-area views offer a two-way
+ * choice — the comparison's 并排 / 统一 and the version history's 完整内容 / 差异 — and they
+ * look the same on purpose: it is the same decision ("how do I read this page"), and a
+ * dropdown next to a segmented control would be two languages for it.
+ *
+ * `button.courier-segmented-option`, not the bare class: the app styles its own buttons with
+ * a rule that outranks a single class on the properties it sets (padding and size among
+ * them), which left the two states looking like two raised buttons on the desktop while a
+ * phone's flatter button styles hid the problem. The track is the parent, so `>` costs
+ * nothing and cannot match elsewhere.
+ */
+.courier-segmented {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  padding: 2px;
+  border-radius: var(--radius-s, 6px);
+  background: var(--background-secondary);
 }
 
 .courier-conflict-diff {
@@ -388,6 +239,32 @@
   container-type: inline-size;
 }
 
+/* ── Header: one line — the names on the left, how much differs and the two controls on the
+ *    right, all vertically centred on that line ── */
+
+.courier-conflict-diff-header {
+  display: flex;
+
+  /* One line, never two: a narrow tab ellipsizes the names rather than pushing the replace
+   * button onto a row of its own. */
+  flex-wrap: nowrap;
+
+  /* The names are two lines tall; the counts and the controls sit on the block's centre line,
+   * so the row reads as one band rather than hugging the second line's foot. */
+  align-items: center;
+  gap: 16px;
+  padding: 2px 0 12px;
+}
+
+/* The names take the room the controls do not, and a long name ellipsizes. */
+.courier-conflict-diff-title {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
 .courier-conflict-diff-title-text {
   overflow: hidden;
   color: var(--text-normal);
@@ -396,6 +273,81 @@
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The parked copy is the file the tab is about, so it is the one line of secondary text —
+ * with a quiet marker that says which of the two it is. */
+.courier-conflict-diff-subtitle {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The diff icon the phone's title block carries; the desktop header is one text band. */
+.courier-conflict-diff-icon {
+  display: none;
+}
+
+/* The two sides' legend, which only the phone's one-column page draws (see the phone block). */
+.courier-conflict-diff-legend {
+  display: none;
+}
+
+/* The line counts, in the colours a diff uses: added, then removed. */
+.courier-conflict-diff-stats {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The layout control and the replace button ride on one row laid out horizontally
+ * in the header itself: no border, no padding and no margin of its own — Obsidian gives a
+ * settings row a margin under it that would otherwise pull the pair off the header's centre
+ * line. */
+.courier-conflict-diff-header-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+/* The layout control: one group, with the write as its own header child so a phone can give
+ * it a full-width band without a second wrapper. */
+.courier-conflict-diff-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 0;
+}
+
+/* ── The body: the framed box that holds the rows, and the two-column gutter ── */
+
+/* The body is what the divider is measured against, so the line runs the **box's** full
+ * height — a three-line note leaves a full-height gutter, not a stub beside the text. The
+ * rows inside it scroll, which keeps the frame still while a long note is read. */
+.courier-diff-body {
+  display: flex;
+  position: relative;
+  flex: 1 1 auto;
+
+  /* A flex item's default `min-width: auto` is its min-content width, which the widest row
+   * would push past the tab's edge; `0` keeps the frame inside the page and lets the rows'
+   * own `overflow: auto` do the scrolling. */
+  min-width: 0;
+  min-height: 0;
 }
 
 .courier-diff-rows {
@@ -409,6 +361,12 @@
   font-family: var(--font-monospace);
   font-size: var(--font-ui-smaller);
   line-height: 1.7;
+}
+
+/* A split row is one flex line whose two cells each take half. */
+.courier-diff-row {
+  display: flex;
+  align-items: stretch;
 }
 
 .courier-diff-cell {
@@ -425,9 +383,35 @@
   word-break: normal;
 }
 
+/* The line number is a fixed gutter, so the code starts at the same x on every row. */
+.courier-diff-no {
+  flex: 0 0 3.2em;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  user-select: none;
+}
+
+/* The `−`/`+` a text diff would print, in the same colours as the row wash. */
+.courier-diff-sigil {
+  flex: 0 0 1ch;
+  color: var(--text-faint);
+  user-select: none;
+}
+
 .courier-diff-text {
   flex: 1 1 auto;
   min-width: 0;
+}
+
+/* ── The unified presentation: one stream, one wash per line ── */
+
+.courier-diff-line {
+  display: flex;
+  gap: 8px;
+  padding: 0 10px 0 calc(10px + 3.2em + 8px);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
 }
 
 .courier-diff-line-add {
@@ -436,6 +420,31 @@
 
 .courier-diff-line-remove {
   background-color: color-mix(in srgb, var(--color-red) 12%, transparent);
+}
+
+/* ── The states without a table ── */
+
+.courier-conflict-diff-status {
+  padding: 8px 2px;
+  color: var(--text-muted);
+}
+
+/* ── The replace confirmation ── */
+
+/*
+ * The spacing is Obsidian's own confirmation dialog's (`删除文件`), measured: the sentence
+ * keeps the app's paragraph margins and the row under it starts 1.5em below, with the row's
+ * own 8px gap.
+ *
+ * Built without a `Setting` row, which is what used to put a `border-top` between the
+ * sentence and the choice — a line directly under the sentence, reading as an underline —
+ * and left the two of them cramped together.
+ */
+.courier-conflict-replace-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 1.5em;
 }
 
 .courier-conflict-replace-choice {
@@ -452,6 +461,21 @@
   display: flex;
   flex: 0 0 auto;
   gap: 8px;
+}
+
+/* ── The excluded-folder tree ── */
+
+/**
+ * The dialog is built from rows rather than `Setting` rows: a tree needs indentation and
+ * a checkbox/icon/name order, and Obsidian's settings rows put the label left and the
+ * control right. The spacing here is what keeps the tree from feeling like a dense list —
+ * one comfortable row height, a hover surface that shows which row the pointer is on, and
+ * a bordered, subtly filled scroll area.
+ */
+.courier-excluded-folders-summary {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  margin: 0 0 12px;
 }
 
 .courier-excluded-folders-tree {
@@ -549,6 +573,14 @@
   overflow: hidden;
 }
 
+/* Only the form scrolls; the footer with Start syncing is always on screen. */
+.courier-setup-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
 /* ── Lead ── */
 
 .courier-setup-lead {
@@ -614,6 +646,14 @@
   line-height: 1.5;
 }
 
+/* ── Sections and cards ── */
+
+.courier-setup-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
 .courier-setup-card,
 .courier-setup-folders {
   border: 1px solid var(--background-modifier-border);
@@ -623,6 +663,15 @@
 
 .courier-setup-card {
   padding: 2px 14px;
+}
+
+/* ── The folder draft ── */
+
+.courier-setup-folders {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 11px 14px 12px;
 }
 
 .courier-setup-folders-header {
@@ -698,6 +747,21 @@
   color: var(--text-faint);
 }
 
+/* ── Error and footer ── */
+
+.courier-setup-error {
+  display: none;
+  margin-top: 14px;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--text-error) 35%, var(--background-modifier-border));
+  border-radius: var(--radius-s, 6px);
+  background: color-mix(in srgb, var(--text-error) 9%, transparent);
+  color: var(--text-error);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 .courier-setup-footer {
   display: flex;
   flex: 0 0 auto;
@@ -727,6 +791,49 @@
   flex: 0 0 auto;
   gap: 8px;
   margin-left: auto;
+}
+
+/* ── The version history view (a main-area tab) ── */
+
+/*
+ * The chain on the left, the selected version on the right.
+ *
+ * The same page shape as the comparison next to it — a header that says what file this is,
+ * and a body that scrolls instead of the tab — but the body is split: a narrow list of
+ * versions and a wide reading pane, because the question is "what did this look like then"
+ * and the answer belongs beside the list of whens. The list is newest first, grouped by
+ * local day; the pane shows that version's content or its diff against the version before it.
+ *
+ * Everything is Obsidian's own variables, so a light, dark or community theme colours it
+ * without this file knowing which is in use. The page itself is the container the narrow
+ * rules query: a leaf-level container would be shadowed by it and never asked.
+ */
+.courier-version-history-view {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+
+  /* A `View`'s content element is sized by the leaf; `min-height: 0` lets the list and the
+   * pane shrink into a tab that was split vertically instead of pushing the header out of
+   * view, and `min-width: 0` keeps a long line from widening the page. */
+  box-sizing: border-box;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  padding: 0 16px 14px;
+  overflow: hidden;
+  container-type: inline-size;
+}
+
+/* ── Header: the file on the left, the count and the refresh on the right ── */
+
+.courier-vh-header {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 0 0;
 }
 
 .courier-vh-icon {
@@ -759,6 +866,16 @@
   white-space: nowrap;
 }
 
+/* The full path, at a size that does not compete with the name above it. */
+.courier-vh-subtitle {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .courier-vh-actions {
   display: flex;
   flex: 0 0 auto;
@@ -773,6 +890,16 @@
   white-space: nowrap;
 }
 
+/* ── The body: the list and the reading pane ── */
+
+.courier-vh-body {
+  display: flex;
+  flex: 1 1 auto;
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+}
+
 .courier-vh-list {
   flex: 0 0 264px;
   min-height: 0;
@@ -784,12 +911,39 @@
   background: var(--background-primary-alt);
 }
 
+/* A day header stays at the top of the list while its own rows scroll past it. */
+.courier-vh-day-title {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 8px 12px 4px;
+  background: var(--background-primary-alt);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
 .courier-vh-version {
   display: flex;
   align-items: flex-start;
   gap: 10px;
   padding: 8px 10px 8px 12px;
   border-left: 2px solid transparent;
+}
+
+/* The action's marker: the only colour in the list, tinted from the theme's own palette. */
+.courier-vh-marker {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-top: 1px;
+  border-radius: var(--radius-s, 6px);
+  background: var(--background-secondary);
+  color: var(--text-muted);
 }
 
 .courier-vh-info {
@@ -840,11 +994,35 @@
   line-height: 1.4;
 }
 
+/* The path a version lived at, only where it differs from the chain's path today. */
+.courier-vh-path {
+  margin-top: 2px;
+  color: var(--text-faint);
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 .courier-vh-warning {
   margin-top: 2px;
   color: var(--text-error);
   font-size: var(--font-ui-smaller);
   line-height: 1.4;
+}
+
+/* ── The reading pane ── */
+
+.courier-vh-pane {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m, 8px);
+  background: var(--background-primary);
 }
 
 .courier-vh-pane-head {
@@ -855,6 +1033,25 @@
   padding: 6px 10px 6px 12px;
   border-bottom: 1px solid var(--background-modifier-border);
   background: var(--background-primary-alt);
+}
+
+/*
+ * The facts stay on **one** line, and the device name is what gives way when the pane is
+ * narrow: a wrapped line pushed the header to three rows, which moved the content down on
+ * every selection. The time, the action and the size are the facts a reader scans for, so
+ * they keep their width; the device label — already on the row that is selected — ellipsizes.
+ */
+.courier-vh-pane-facts {
+  display: flex;
+  flex: 1 1 auto;
+  flex-wrap: nowrap;
+  align-items: baseline;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.4;
+  white-space: nowrap;
 }
 
 .courier-vh-pane-time {
@@ -868,6 +1065,16 @@
   flex: 0 0 auto;
   align-items: center;
   gap: 8px;
+}
+
+/* The segmented control in the pane head is described with the shared block above. */
+
+.courier-vh-pane-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 14px 16px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .courier-vh-diff-caption {
@@ -884,6 +1091,17 @@
   color: var(--text-muted);
   font-size: var(--font-ui-small);
   line-height: 1.6;
+}
+
+/* The states with nothing to split: one sentence, centred in the page. */
+.courier-vh-status {
+  margin: auto;
+  max-width: 56ch;
+  padding: 32px 16px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  line-height: 1.6;
+  text-align: center;
 }
 
 .courier-history {
@@ -940,11 +1158,42 @@
   background: var(--background-primary-alt);
 }
 
+/* A day header stays at the top of the list while its own rows scroll past it. */
+.courier-history-day-title {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: 0;
+  padding: 8px 12px 6px;
+  background: var(--background-primary-alt);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
 .courier-history-row {
   display: flex;
   align-items: flex-start;
   gap: 10px;
   padding: 7px 12px;
+}
+
+/*
+ * The two directions, told apart by colour and by the glyph itself (up/down), so the
+ * meaning survives a colour-blind reader and a monochrome theme: green is "this device
+ * sent it", blue is "another device sent it". Both are muted circles rather than
+ * saturated icons — the log is scanned, not stared at.
+ */
+.courier-history-arrow {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin-top: 1px;
+  border-radius: 50%;
 }
 
 .courier-history-body {
@@ -967,6 +1216,21 @@
   font-variant-numeric: tabular-nums;
 }
 
+/*
+ * "Not applied here" / "Not sent", on a row the engine deliberately left alone.
+ *
+ * Deliberately quiet: it is an explanation, not a warning, and it is the switch that fired
+ * at the time of the event — not a fresh question asked of today's settings. `text-faint`
+ * keeps it below the path and the clock reading in the visual order; no bullet, because
+ * the line is a sentence rather than a second path.
+ */
+.courier-history-outcome {
+  margin-top: 3px;
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.4;
+}
+
 .courier-history-action {
   flex: 0 0 auto;
   margin-top: 1px;
@@ -976,6 +1240,16 @@
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
   line-height: 1.6;
+}
+
+/* The three states that have no rows: one icon, one title, one explanation. */
+.courier-history-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 32px 16px;
+  text-align: center;
 }
 
 .courier-history-placeholder-icon {
@@ -1392,578 +1666,6 @@
   line-height: 1.5;
 }
 
-/* The line counts, in the colours a diff uses: added, then removed. */
-.courier-conflict-diff-stats {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 10px;
-  font-family: var(--font-monospace);
-  font-size: var(--font-ui-smaller);
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-/* ── Sections and cards ── */
-
-.courier-setup-form {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-/* ── The folder draft ── */
-
-.courier-setup-folders {
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-  padding: 11px 14px 12px;
-}
-
-/* ── Error and footer ── */
-
-.courier-setup-error {
-  display: none;
-  margin-top: 14px;
-  padding: 9px 11px;
-  border: 1px solid color-mix(in srgb, var(--text-error) 35%, var(--background-modifier-border));
-  border-radius: var(--radius-s, 6px);
-  background: color-mix(in srgb, var(--text-error) 9%, transparent);
-  color: var(--text-error);
-  font-size: var(--font-ui-smaller);
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-}
-
-/* ── The reading pane ── */
-
-.courier-vh-pane {
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: var(--radius-m, 8px);
-  background: var(--background-primary);
-}
-
-/* The three states that have no rows: one icon, one title, one explanation. */
-.courier-history-placeholder {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  padding: 32px 16px;
-  text-align: center;
-}
-
-/*
- * The two directions, told apart by colour and by the glyph itself (up/down), so the
- * meaning survives a colour-blind reader and a monochrome theme: green is "this device
- * sent it", blue is "another device sent it". Both are muted circles rather than
- * saturated icons — the log is scanned, not stared at.
- */
-.courier-history-arrow {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  margin-top: 1px;
-  border-radius: 50%;
-}
-
-/* ── The unified presentation: one stream, one wash per line ── */
-
-.courier-diff-line {
-  display: flex;
-  gap: 8px;
-  padding: 0 10px 0 calc(10px + 3.2em + 8px);
-  white-space: pre-wrap;
-  overflow-wrap: break-word;
-}
-
-/* ── The states without a table ── */
-
-.courier-conflict-diff-status {
-  padding: 8px 2px;
-  color: var(--text-muted);
-}
-
-/* ── The excluded-folder tree ── */
-
-/**
- * The dialog is built from rows rather than `Setting` rows: a tree needs indentation and
- * a checkbox/icon/name order, and Obsidian's settings rows put the label left and the
- * control right. The spacing here is what keeps the tree from feeling like a dense list —
- * one comfortable row height, a hover surface that shows which row the pointer is on, and
- * a bordered, subtly filled scroll area.
- */
-.courier-excluded-folders-summary {
-  color: var(--text-muted);
-  font-size: var(--font-ui-small);
-  margin: 0 0 12px;
-}
-
-/* The states with nothing to split: one sentence, centred in the page. */
-.courier-vh-status {
-  margin: auto;
-  max-width: 56ch;
-  padding: 32px 16px;
-  color: var(--text-muted);
-  font-size: var(--font-ui-small);
-  line-height: 1.6;
-  text-align: center;
-}
-
-/* The names take the room the controls do not, and a long name ellipsizes. */
-.courier-conflict-diff-title {
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-}
-
-/* The settings page's account row: server, then the two readings aligned label/value. */
-.courier-account-details {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  line-height: 1.5;
-}
-
-/* Aligned with the title, not the icon: the icon is a marker, the sentence belongs
- * to the heading. */
-.courier-reload-notice-message {
-  margin-top: 8px;
-  margin-left: 42px; /* 32px icon + 10px gap */
-  color: var(--text-muted);
-  font-size: var(--font-ui-small);
-  line-height: 1.5;
-  overflow-wrap: anywhere;
-}
-
-/* ── Header: one line — the names on the left, how much differs and the two controls on the
- *    right, all vertically centred on that line ── */
-
-.courier-conflict-diff-header {
-  display: flex;
-
-  /* One line, never two: a narrow tab ellipsizes the names rather than pushing the replace
-   * button onto a row of its own. */
-  flex-wrap: nowrap;
-
-  /* The names are two lines tall; the counts and the controls sit on the block's centre line,
-   * so the row reads as one band rather than hugging the second line's foot. */
-  align-items: center;
-  gap: 16px;
-  padding: 2px 0 12px;
-}
-
-/* The action's marker: the only colour in the list, tinted from the theme's own palette. */
-.courier-vh-marker {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  margin-top: 1px;
-  border-radius: var(--radius-s, 6px);
-  background: var(--background-secondary);
-  color: var(--text-muted);
-}
-
-/* A text action, so the one filled button is unambiguous. */
-.courier-reload-notice-later {
-  border-color: transparent;
-  background: transparent;
-  box-shadow: none;
-  color: var(--text-muted);
-}
-
-/* ── The body: the list and the reading pane ── */
-
-.courier-vh-body {
-  display: flex;
-  flex: 1 1 auto;
-  gap: 12px;
-  min-width: 0;
-  min-height: 0;
-}
-
-/* The `−`/`+` a text diff would print, in the same colours as the row wash. */
-.courier-diff-sigil {
-  flex: 0 0 1ch;
-  color: var(--text-faint);
-  user-select: none;
-}
-
-/* ── Header: the file on the left, the count and the refresh on the right ── */
-
-.courier-vh-header {
-  display: flex;
-  flex: 0 0 auto;
-  flex-wrap: nowrap;
-  align-items: center;
-  gap: 10px;
-  padding: 2px 0 0;
-}
-
-/* The path a version lived at, only where it differs from the chain's path today. */
-.courier-vh-path {
-  margin-top: 2px;
-  color: var(--text-faint);
-  font-family: var(--font-monospace);
-  font-size: var(--font-ui-smaller);
-  line-height: 1.4;
-  overflow-wrap: anywhere;
-}
-
-/* The two sides' legend, which only the phone's one-column page draws (see the phone block). */
-.courier-conflict-diff-legend {
-  display: none;
-}
-
-/* ── The body: the framed box that holds the rows, and the two-column gutter ── */
-
-/* The body is what the divider is measured against, so the line runs the **box's** full
- * height — a three-line note leaves a full-height gutter, not a stub beside the text. The
- * rows inside it scroll, which keeps the frame still while a long note is read. */
-.courier-diff-body {
-  display: flex;
-  position: relative;
-  flex: 1 1 auto;
-
-  /* A flex item's default `min-width: auto` is its min-content width, which the widest row
-   * would push past the tab's edge; `0` keeps the frame inside the page and lets the rows'
-   * own `overflow: auto` do the scrolling. */
-  min-width: 0;
-  min-height: 0;
-}
-
-/* The line number is a fixed gutter, so the code starts at the same x on every row. */
-.courier-diff-no {
-  flex: 0 0 3.2em;
-  color: var(--text-faint);
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-  user-select: none;
-}
-
-/* Only the form scrolls; the footer with Start syncing is always on screen. */
-.courier-setup-body {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  padding-right: 2px;
-}
-
-/*
- * "Not applied here" / "Not sent", on a row the engine deliberately left alone.
- *
- * Deliberately quiet: it is an explanation, not a warning, and it is the switch that fired
- * at the time of the event — not a fresh question asked of today's settings. `text-faint`
- * keeps it below the path and the clock reading in the visual order; no bullet, because
- * the line is a sentence rather than a second path.
- */
-.courier-history-outcome {
-  margin-top: 3px;
-  color: var(--text-faint);
-  font-size: var(--font-ui-smaller);
-  line-height: 1.4;
-} /*
- * Courier's own styles: the status-bar state icon, the conflict-copy action in the
- * file explorer, the comparison view, and the floating "settings synced" card.
- * Everything else in the plugin is inline-styled by the component that builds it or
- * uses Obsidian's components.
- */
-
-/* ── The always-visible sync state, bottom-right ── */
-
-/*
- * One icon in Obsidian's status bar. The state is carried by the icon shape and its
- * colour alone — there is no room for a label next to every other plugin's status item —
- * so the four rules below are the whole visual language. Colours are theme variables, and
- * the accent is only used for the healthy state; nothing animates, because "syncing" is a
- * connection state rather than a spinner for one transfer.
- */
-.courier-status-bar {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 4px;
-  border-radius: var(--radius-s);
-  color: var(--text-muted);
-  cursor: pointer;
-}
-
-/* A split row is one flex line whose two cells each take half. */
-.courier-diff-row {
-  display: flex;
-  align-items: stretch;
-}
-
-/* The full path, at a size that does not compete with the name above it. */
-.courier-vh-subtitle {
-  overflow: hidden;
-  color: var(--text-muted);
-  font-family: var(--font-monospace);
-  font-size: var(--font-ui-smaller);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* ── The read-only rows inside the status menu ── */
-
-/* Obsidian's label rows are a size larger and muted; these are readings, not headings, so
- * they take the same typography as the actionable rows below the separator. */
-.courier-status-menu-row,
-.courier-status-menu-storage {
-  color: var(--text-normal);
-  font-size: var(--font-ui-small);
-  font-weight: 400;
-  line-height: 1.3;
-}
-
-/* The segmented control in the pane head is described with the shared block above. */
-
-.courier-vh-pane-body {
-  flex: 1 1 auto;
-  min-height: 0;
-  padding: 14px 16px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
-
-/* ── The two-state segmented control (shared by both views) ── */
-
-/*
- * One track, one raised pill for the state that is on. Both main-area views offer a two-way
- * choice — the comparison's 并排 / 统一 and the version history's 完整内容 / 差异 — and they
- * look the same on purpose: it is the same decision ("how do I read this page"), and a
- * dropdown next to a segmented control would be two languages for it.
- *
- * `button.courier-segmented-option`, not the bare class: the app styles its own buttons with
- * a rule that outranks a single class on the properties it sets (padding and size among
- * them), which left the two states looking like two raised buttons on the desktop while a
- * phone's flatter button styles hid the problem. The track is the parent, so `>` costs
- * nothing and cannot match elsewhere.
- */
-.courier-segmented {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  padding: 2px;
-  border-radius: var(--radius-s, 6px);
-  background: var(--background-secondary);
-}
-
-/* The diff icon the phone's title block carries; the desktop header is one text band. */
-.courier-conflict-diff-icon {
-  display: none;
-}
-
-/* The accent tile is what makes this read as a status card rather than a paragraph. */
-.courier-reload-notice-icon {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 9px;
-
-  /* The solid colour is the fallback for a WebView without `color-mix`; the override below
-   * applies where it is supported. */
-  background: var(--background-secondary);
-  color: var(--interactive-accent);
-}
-
-/* ── The replace confirmation ── */
-
-/*
- * The spacing is Obsidian's own confirmation dialog's (`删除文件`), measured: the sentence
- * keeps the app's paragraph margins and the row under it starts 1.5em below, with the row's
- * own 8px gap.
- *
- * Built without a `Setting` row, which is what used to put a `border-top` between the
- * sentence and the choice — a line directly under the sentence, reading as an underline —
- * and left the two of them cramped together.
- */
-.courier-conflict-replace-footer {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 1.5em;
-}
-
-/* A day header stays at the top of the list while its own rows scroll past it. */
-.courier-vh-day-title {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  padding: 8px 12px 4px;
-  background: var(--background-primary-alt);
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-
-/*
- * The facts stay on **one** line, and the device name is what gives way when the pane is
- * narrow: a wrapped line pushed the header to three rows, which moved the content down on
- * every selection. The time, the action and the size are the facts a reader scans for, so
- * they keep their width; the device label — already on the row that is selected — ellipsizes.
- */
-.courier-vh-pane-facts {
-  display: flex;
-  flex: 1 1 auto;
-  flex-wrap: nowrap;
-  align-items: baseline;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
-  line-height: 1.4;
-  white-space: nowrap;
-}
-
-/* A day header stays at the top of the list while its own rows scroll past it. */
-.courier-history-day-title {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  margin: 0;
-  padding: 8px 12px 6px;
-  background: var(--background-primary-alt);
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-
-/* A quota bar followed by `used/limit`: the bar is the part a label could not say at a
- * glance, and the numbers stay beside it so a nearly-empty bar is still readable. Shared
- * by the status menu and the settings page. */
-.courier-storage-usage {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-/* The parked copy is the file the tab is about, so it is the one line of secondary text —
- * with a quiet marker that says which of the two it is. */
-.courier-conflict-diff-subtitle {
-  overflow: hidden;
-  color: var(--text-muted);
-  font-family: var(--font-monospace);
-  font-size: var(--font-ui-smaller);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* The layout control: one group, with the write as its own header child so a phone can give
- * it a full-width band without a second wrapper. */
-.courier-conflict-diff-actions {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 8px;
-  min-height: 0;
-}
-
-/* ── The "settings synced — reload" card ── */
-
-/*
- * A non-modal card, not Obsidian's `Notice`: it carries a decision (reload now or
- * later), so it waits for the user instead of expiring. Desktop keeps it in the
- * bottom-right corner, out of the way of the ribbon and the note. A phone gets a
- * bottom sheet above the app's own mobile chrome, where a thumb can reach it and
- * where it does not cover the floating nav.
- *
- * Every colour, radius and shadow below comes from an Obsidian theme variable, so
- * light, dark and community themes colour it without a second rule. The phone
- * layout is stated twice on purpose: `body.is-phone` also covers a landscape phone
- * (wider than the media query), while the width query covers a desktop window
- * squeezed to phone size — the way the preview harness simulates a device.
- */
-
-.courier-reload-notice {
-  position: fixed;
-  right: 16px;
-  bottom: 40px;
-
-  /* Obsidian's own notification layer: above the app and its modals, below menus
-   * and tooltips. */
-  z-index: var(--layer-notice, 60);
-  box-sizing: border-box;
-  display: flex;
-  flex-direction: column;
-  width: min(360px, calc(100vw - 32px));
-  padding: 14px 16px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: var(--radius-l, 12px);
-  background: var(--background-primary);
-  box-shadow: var(--shadow-l);
-  color: var(--text-normal);
-  animation: courier-reload-notice-in 180ms cubic-bezier(0.2, 0.7, 0.3, 1);
-}
-
-/* The layout control and the replace button ride on one row laid out horizontally
- * in the header itself: no border, no padding and no margin of its own — Obsidian gives a
- * settings row a margin under it that would otherwise pull the pair off the header's centre
- * line. */
-.courier-conflict-diff-header-actions {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  min-height: 0;
-  margin: 0;
-  padding: 0;
-  border: none;
-}
-
-/* ── The version history view (a main-area tab) ── */
-
-/*
- * The chain on the left, the selected version on the right.
- *
- * The same page shape as the comparison next to it — a header that says what file this is,
- * and a body that scrolls instead of the tab — but the body is split: a narrow list of
- * versions and a wide reading pane, because the question is "what did this look like then"
- * and the answer belongs beside the list of whens. The list is newest first, grouped by
- * local day; the pane shows that version's content or its diff against the version before it.
- *
- * Everything is Obsidian's own variables, so a light, dark or community theme colours it
- * without this file knowing which is in use. The page itself is the container the narrow
- * rules query: a leaf-level container would be shadowed by it and never asked.
- */
-.courier-version-history-view {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-
-  /* A `View`'s content element is sized by the leaf; `min-height: 0` lets the list and the
-   * pane shrink into a tab that was split vertically instead of pushing the header out of
-   * view, and `min-width: 0` keeps a long line from widening the page. */
-  box-sizing: border-box;
-  height: 100%;
-  min-height: 0;
-  min-width: 0;
-  padding: 0 16px 14px;
-  overflow: hidden;
-  container-type: inline-size;
-}
-
 /*
  * A settings row that hosts something that is not a settings row: the sign-in form and the
  * step's error line. The app still creates the row — every definition is one — so its own
@@ -1984,6 +1686,11 @@
 .courier-reload-notice-actions button {
   min-height: 32px;
   padding: 0 14px;
+}
+
+.courier-conflict-diff-subtitle::before {
+  content: "↳ ";
+  color: var(--text-faint);
 }
 
 .courier-excluded-folder-icon svg,
@@ -2060,6 +1767,14 @@
   height: 20px;
 }
 
+.courier-restore-lead::before {
+  content: "⚠";
+  position: absolute;
+  top: 9px;
+  left: 12px;
+  color: var(--color-orange, var(--text-muted));
+}
+
 .courier-file-preview-icon svg {
   width: 20px;
   height: 20px;
@@ -2071,25 +1786,19 @@
   height: 20px;
 }
 
-.courier-conflict-diff-subtitle::before {
-  content: "↳ ";
-  color: var(--text-faint);
-}
-
-.courier-restore-lead::before {
-  content: "⚠";
-  position: absolute;
-  top: 9px;
-  left: 12px;
-  color: var(--color-orange, var(--text-muted));
-}
-
 /* One separator between the facts, drawn rather than baked into the copy. */
 .courier-vh-row-meta > span + span::before,
 .courier-vh-pane-facts > span + span::before {
   content: "·";
   margin: 0 5px;
   color: var(--text-faint);
+}
+
+/* The background marks the hit target; the state colour stays, because it is the only
+ * thing the icon has to say. */
+.courier-status-bar:hover,
+.courier-status-bar:focus-visible {
+  background: var(--background-modifier-hover);
 }
 
 .courier-status-bar:focus-visible {
@@ -2127,230 +1836,6 @@
   color: var(--text-warning, var(--color-yellow));
 }
 
-.nav-file-title .courier-version-history-action {
-  position: absolute;
-  top: 50%;
-  right: 6px;
-  z-index: 1;
-  display: inline-flex;
-  align-items: center;
-  transform: translateY(-50%);
-  padding: 0 6px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 4px;
-  background: var(--nav-item-background-hover, var(--background-modifier-hover));
-  color: var(--text-muted);
-  font-family: var(--font-interface);
-  font-size: 10px;
-  line-height: 1.7;
-  white-space: nowrap;
-  cursor: pointer;
-  user-select: none;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.1s ease-in-out;
-}
-
-.courier-reload-notice-later:hover {
-  background: var(--background-modifier-hover);
-  color: var(--text-normal);
-}
-
-.courier-conflict-diff-stat.is-added {
-  color: var(--color-green);
-}
-
-.courier-conflict-diff-stat.is-removed {
-  color: var(--color-red);
-}
-
-.courier-conflict-diff-header-actions .setting-item-info {
-  /* The row's own label is not drawn: the control's two option words say what it is, and the
-   * header has one line to keep. The control carries "布局" as its `aria-label` instead
-   * (`ui/conflict-diff-view.ts`). */
-  display: none;
-}
-
-.courier-diff-line-add .courier-diff-sigil {
-  color: var(--color-green);
-}
-
-.courier-diff-line-remove .courier-diff-sigil {
-  color: var(--color-red);
-}
-
-.courier-excluded-folder-row:hover {
-  background: var(--background-modifier-hover);
-}
-
-.courier-excluded-folder-toggle:hover {
-  background: var(--background-modifier-hover);
-}
-
-.courier-excluded-folder-row.is-missing {
-  padding: 2px 0;
-  cursor: default;
-}
-
-.courier-setup-card .setting-item-name {
-  color: var(--text-normal);
-  font-size: var(--font-ui-small);
-  font-weight: 600;
-}
-
-.courier-setup-card .setting-item-description {
-  margin-top: 2px;
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
-  line-height: 1.45;
-}
-
-.courier-setup-field .setting-item-info {
-  margin-bottom: 7px;
-}
-
-.courier-setup-field .setting-item-control {
-  justify-content: stretch;
-}
-
-.courier-setup-toggle .setting-item-control {
-  flex: 0 0 auto;
-}
-
-.courier-setup-chip.is-more {
-  border-style: dashed;
-  color: var(--text-faint);
-}
-
-.courier-setup-error.is-visible {
-  display: block;
-}
-
-.courier-vh-version.is-selectable {
-  cursor: pointer;
-}
-
-.courier-vh-marker.is-create {
-  background: color-mix(in srgb, var(--color-green) 15%, transparent);
-  color: var(--color-green);
-}
-
-.courier-vh-marker.is-modify {
-  background: color-mix(in srgb, var(--color-blue) 15%, transparent);
-  color: var(--color-blue);
-}
-
-.courier-vh-marker.is-rename {
-  background: color-mix(in srgb, var(--color-yellow) 18%, transparent);
-  color: var(--color-yellow);
-}
-
-.courier-vh-marker.is-delete {
-  background: color-mix(in srgb, var(--color-red) 15%, transparent);
-  color: var(--color-red);
-}
-
-.courier-vh-marker.is-restore {
-  background: color-mix(in srgb, var(--interactive-accent) 15%, transparent);
-  color: var(--interactive-accent);
-}
-
-.courier-history-note.is-error {
-  color: var(--text-error);
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-.courier-history-row:hover {
-  background: var(--background-modifier-hover);
-}
-
-.courier-history-arrow.is-out {
-  background: rgb(var(--color-green-rgb, 8, 185, 78), 0.14);
-  color: var(--color-green, #08b94e);
-}
-
-.courier-history-arrow.is-in {
-  background: rgb(var(--color-blue-rgb, 8, 109, 221), 0.14);
-  color: var(--color-blue, #086ddd);
-}
-
-.courier-recycle-bin-header .extra-setting-button {
-  flex: 0 0 auto;
-}
-
-.courier-deleted-file-item + .courier-deleted-file-item {
-  border-top: 1px solid var(--background-modifier-border);
-}
-
-.courier-deleted-file-item:hover {
-  background: var(--background-modifier-hover);
-}
-
-.courier-deleted-info.is-clickable {
-  cursor: pointer;
-}
-
-.courier-recycle-bin-skeleton + .courier-recycle-bin-skeleton {
-  border-top: 1px solid var(--background-modifier-border);
-}
-
-.courier-recycle-bin-skeleton-line.is-title {
-  width: 46%;
-}
-
-.courier-recycle-bin-skeleton-line.is-meta {
-  width: 68%;
-  height: 8px;
-}
-
-.courier-restore-name.setting-item {
-  display: block;
-  padding: 0;
-  border-top: none;
-}
-
-.courier-restore-name .setting-item-info {
-  margin: 0 0 6px;
-}
-
-.courier-restore-name .setting-item-name {
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
-  font-weight: 500;
-}
-
-.courier-restore-name .setting-item-control {
-  justify-content: stretch;
-}
-
-.courier-file-preview.is-media {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--background-secondary);
-}
-
-.courier-login-row .setting-item-info,
-.courier-settings-error-row .setting-item-info,
-.courier-login-row .setting-item-control,
-.courier-settings-error-row .setting-item-control {
-  display: none;
-}
-
-/* The remember choice stays a row: label and description left, switch right. */
-.courier-setup-toggle .setting-item-info {
-  margin-right: 12px;
-}
-
-/* A media player gets the pane's quiet surface and the centre, not the reading inset. */
-.courier-vh-pane-body.is-media {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--background-secondary);
-}
-
 /* ── The action chips on a file-explorer row ── */
 
 .nav-file-title .courier-conflict-action {
@@ -2383,19 +1868,77 @@
 }
 
 /*
- * The header's two optional lines. `display: none` rather than an empty element: an empty
- * span still costs its gap, so the count would sit off-centre in the header.
+ * The version-history chip is **not** in the row's flow: it is laid over the row's right end
+ * and only drawn on hover. A chip in the flow would reserve its width on every row of the
+ * explorer (the conflict chip above accepts that for the few parked copies there are), and
+ * file names would truncate half a word earlier for a button most rows never show. Docking
+ * it over the extension tag is the trade: while the pointer is on the row, the tag is not
+ * what the user is looking at.
+ *
+ * The row gets `position: relative` from the decorator's own class, so a theme's own
+ * positioning of `.nav-file-title` is not overridden for every row in the vault.
  */
-.courier-history-count-label.is-hidden,
-.courier-history-note.is-hidden {
-  display: none;
+.nav-file-title.courier-has-version-action {
+  position: relative;
 }
 
-/* The background marks the hit target; the state colour stays, because it is the only
- * thing the icon has to say. */
-.courier-status-bar:hover,
-.courier-status-bar:focus-visible {
+.nav-file-title .courier-version-history-action {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  transform: translateY(-50%);
+  padding: 0 6px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--nav-item-background-hover, var(--background-modifier-hover));
+  color: var(--text-muted);
+  font-family: var(--font-interface);
+  font-size: 10px;
+  line-height: 1.7;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.1s ease-in-out;
+}
+
+.courier-reload-notice-later:hover {
   background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+/* ── The comparison view (a main-area tab) ── */
+
+/*
+ * The comparison is a page, not a dialog: it fills the tab it was opened in, keeps its
+ * header still, and scrolls only the rows. Everything here is expressed in Obsidian's own
+ * theme variables, so a light theme, a dark theme and a community theme all colour it
+ * without this file knowing which is in use.
+ */
+
+/* The leaf is the query container as well as the page: a container cannot query its own
+ * width, and the narrow rules below change the page's own padding as well as its header. */
+.workspace-leaf-content[data-type="courier-conflict-diff"] {
+  container-type: inline-size;
+}
+
+.courier-conflict-diff-stat.is-added {
+  color: var(--color-green);
+}
+
+.courier-conflict-diff-stat.is-removed {
+  color: var(--color-red);
+}
+
+.courier-conflict-diff-header-actions .setting-item-info {
+  /* The row's own label is not drawn: the control's two option words say what it is, and the
+   * header has one line to keep. The control carries "布局" as its `aria-label` instead
+   * (`ui/conflict-diff-view.ts`). */
+  display: none;
 }
 
 /* Centred as one pair: the 并排/统一 control and the write share one centre line. */
@@ -2406,21 +1949,25 @@
   gap: 8px;
 }
 
-/* Rows inside a card keep the app's rhythm but not its page-level rules. */
-.courier-setup-card .setting-item {
-  padding: 10px 0;
-  border-top: none;
+.courier-diff-line-add .courier-diff-sigil {
+  color: var(--color-green);
 }
 
-/* ── The file-content preview ── */
+.courier-diff-line-remove .courier-diff-sigil {
+  color: var(--color-red);
+}
 
-/*
- * A header card above one content card. The header names the file (icon, path, facts,
- * kind); the card is the only scrolling part, so a long note or a tall image cannot
- * carry the path out of view, and the note gets the same inset as the rest of the UI.
- */
-.modal.courier-file-preview-modal {
-  width: min(760px, 92vw);
+.courier-excluded-folder-row:hover {
+  background: var(--background-modifier-hover);
+}
+
+.courier-excluded-folder-toggle:hover {
+  background: var(--background-modifier-hover);
+}
+
+.courier-excluded-folder-row.is-missing {
+  padding: 2px 0;
+  cursor: default;
 }
 
 /* ── The connection setup dialog ── */
@@ -2440,19 +1987,92 @@
   max-height: 88vh;
 }
 
-/* ── The comparison view (a main-area tab) ── */
+/* Rows inside a card keep the app's rhythm but not its page-level rules. */
+.courier-setup-card .setting-item {
+  padding: 10px 0;
+  border-top: none;
+}
 
-/*
- * The comparison is a page, not a dialog: it fills the tab it was opened in, keeps its
- * header still, and scrolls only the rows. Everything here is expressed in Obsidian's own
- * theme variables, so a light theme, a dark theme and a community theme all colour it
- * without this file knowing which is in use.
- */
+.courier-setup-card .setting-item-name {
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  font-weight: 600;
+}
 
-/* The leaf is the query container as well as the page: a container cannot query its own
- * width, and the narrow rules below change the page's own padding as well as its header. */
-.workspace-leaf-content[data-type="courier-conflict-diff"] {
-  container-type: inline-size;
+.courier-setup-card .setting-item-description {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.45;
+}
+
+.courier-setup-field .setting-item-info {
+  margin-bottom: 7px;
+}
+
+.courier-setup-field .setting-item-control {
+  justify-content: stretch;
+}
+
+/* The remember choice stays a row: label and description left, switch right. */
+.courier-setup-toggle .setting-item-info {
+  margin-right: 12px;
+}
+
+.courier-setup-toggle .setting-item-control {
+  flex: 0 0 auto;
+}
+
+.courier-setup-chip.is-more {
+  border-style: dashed;
+  color: var(--text-faint);
+}
+
+.courier-setup-error.is-visible {
+  display: block;
+}
+
+.courier-vh-version.is-selectable {
+  cursor: pointer;
+}
+
+/* The selected row is the pane's subject: a wash plus the one accent stripe on the page. */
+.courier-vh-version.is-selected {
+  background: var(--background-modifier-hover);
+  border-left-color: var(--interactive-accent);
+}
+
+.courier-vh-marker.is-create {
+  background: color-mix(in srgb, var(--color-green) 15%, transparent);
+  color: var(--color-green);
+}
+
+.courier-vh-marker.is-modify {
+  background: color-mix(in srgb, var(--color-blue) 15%, transparent);
+  color: var(--color-blue);
+}
+
+.courier-vh-marker.is-rename {
+  background: color-mix(in srgb, var(--color-yellow) 18%, transparent);
+  color: var(--color-yellow);
+}
+
+.courier-vh-marker.is-delete {
+  background: color-mix(in srgb, var(--color-red) 15%, transparent);
+  color: var(--color-red);
+}
+
+.courier-vh-marker.is-restore {
+  background: color-mix(in srgb, var(--interactive-accent) 15%, transparent);
+  color: var(--interactive-accent);
+}
+
+/* A media player gets the pane's quiet surface and the centre, not the reading inset. */
+.courier-vh-pane-body.is-media {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--background-secondary);
 }
 
 /* The diff fills the pane: its own frame would be a second border inside this one. */
@@ -2480,38 +2100,23 @@
   width: min(620px, 92vw);
 }
 
-/* ── The recycle bin ── */
-
 /*
- * The dialog is a header stat, one framed scroll area and a footer that never scrolls
- * away. The frame and the row paddings are what the old bare rows were missing: the
- * list reads as one surface, the actions line up in a column, and the one destructive
- * button sits below the list instead of looking like another row.
+ * The header's two optional lines. `display: none` rather than an empty element: an empty
+ * span still costs its gap, so the count would sit off-centre in the header.
  */
-.modal.courier-recycle-bin-modal {
-  width: min(640px, 92vw);
+.courier-history-count-label.is-hidden,
+.courier-history-note.is-hidden {
+  display: none;
 }
 
-/* No injected icon means no tile to align with; the sentence starts at the card's edge. */
-.courier-reload-notice-no-icon .courier-reload-notice-message {
-  margin-left: 0;
+.courier-history-note.is-error {
+  color: var(--text-error);
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
-/* The selected row is the pane's subject: a wash plus the one accent stripe on the page. */
-.courier-vh-version.is-selected {
-  background: var(--background-modifier-hover);
-  border-left-color: var(--interactive-accent);
-}
-
-/* ── The password prompt's rows ── */
-
-/*
- * A row pairs a one-line label with a taller field, and a two-line explanation with a small
- * switch. Obsidian aligns a row's **top** edges, which leaves the control above the middle
- * of the text; both halves of a row share one horizontal line here.
- */
-.courier-password-prompt .setting-item {
-  align-items: center;
+.courier-recycle-bin-header .extra-setting-button {
+  flex: 0 0 auto;
 }
 
 /*
@@ -2529,6 +2134,57 @@
   color: var(--text-muted);
 }
 
+.courier-history-row:hover {
+  background: var(--background-modifier-hover);
+}
+
+.courier-history-arrow.is-out {
+  background: rgb(var(--color-green-rgb, 8, 185, 78), 0.14);
+  color: var(--color-green, #08b94e);
+}
+
+.courier-history-arrow.is-in {
+  background: rgb(var(--color-blue-rgb, 8, 109, 221), 0.14);
+  color: var(--color-blue, #086ddd);
+}
+
+/* ── The recycle bin ── */
+
+/*
+ * The dialog is a header stat, one framed scroll area and a footer that never scrolls
+ * away. The frame and the row paddings are what the old bare rows were missing: the
+ * list reads as one surface, the actions line up in a column, and the one destructive
+ * button sits below the list instead of looking like another row.
+ */
+.modal.courier-recycle-bin-modal {
+  width: min(640px, 92vw);
+}
+
+.courier-deleted-file-item + .courier-deleted-file-item {
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.courier-deleted-file-item:hover {
+  background: var(--background-modifier-hover);
+}
+
+.courier-deleted-info.is-clickable {
+  cursor: pointer;
+}
+
+.courier-recycle-bin-skeleton + .courier-recycle-bin-skeleton {
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.courier-recycle-bin-skeleton-line.is-title {
+  width: 46%;
+}
+
+.courier-recycle-bin-skeleton-line.is-meta {
+  width: 68%;
+  height: 8px;
+}
+
 /* ── The restore-name dialog ── */
 
 /*
@@ -2538,6 +2194,44 @@
  */
 .modal.courier-restore-path-modal {
   width: min(520px, 92vw);
+}
+
+.courier-restore-name.setting-item {
+  display: block;
+  padding: 0;
+  border-top: none;
+}
+
+.courier-restore-name .setting-item-info {
+  margin: 0 0 6px;
+}
+
+.courier-restore-name .setting-item-name {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-weight: 500;
+}
+
+.courier-restore-name .setting-item-control {
+  justify-content: stretch;
+}
+
+/* ── The file-content preview ── */
+
+/*
+ * A header card above one content card. The header names the file (icon, path, facts,
+ * kind); the card is the only scrolling part, so a long note or a tall image cannot
+ * carry the path out of view, and the note gets the same inset as the rest of the UI.
+ */
+.modal.courier-file-preview-modal {
+  width: min(760px, 92vw);
+}
+
+.courier-file-preview.is-media {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--background-secondary);
 }
 
 /* ── The settings page's bound-but-stopped steps ── */
@@ -2552,19 +2246,78 @@
   align-items: center;
 }
 
+/* ── The password prompt's rows ── */
+
 /*
- * The version-history chip is **not** in the row's flow: it is laid over the row's right end
- * and only drawn on hover. A chip in the flow would reserve its width on every row of the
- * explorer (the conflict chip above accepts that for the few parked copies there are), and
- * file names would truncate half a word earlier for a button most rows never show. Docking
- * it over the extension tag is the trade: while the pointer is on the row, the tag is not
- * what the user is looking at.
- *
- * The row gets `position: relative` from the decorator's own class, so a theme's own
- * positioning of `.nav-file-title` is not overridden for every row in the vault.
+ * A row pairs a one-line label with a taller field, and a two-line explanation with a small
+ * switch. Obsidian aligns a row's **top** edges, which leaves the control above the middle
+ * of the text; both halves of a row share one horizontal line here.
  */
-.nav-file-title.courier-has-version-action {
-  position: relative;
+.courier-password-prompt .setting-item {
+  align-items: center;
+}
+
+.courier-login-row .setting-item-info,
+.courier-settings-error-row .setting-item-info,
+.courier-login-row .setting-item-control,
+.courier-settings-error-row .setting-item-control {
+  display: none;
+}
+
+/* No injected icon means no tile to align with; the sentence starts at the card's edge. */
+.courier-reload-notice-no-icon .courier-reload-notice-message {
+  margin-left: 0;
+}
+
+/* Tablets keep the card: a sheet would span a width the eye reads as a page. */
+body.is-tablet .courier-reload-notice {
+  right: 24px;
+  bottom: 24px;
+  width: min(400px, calc(100vw - 48px));
+  padding: 16px;
+}
+
+/* A phone in landscape is wider than the query above; the platform class still says
+ * what it is. Same declarations, kept in one place per selector. */
+body.is-phone .courier-reload-notice {
+  --courier-safe-bottom: max(
+    var(--safe-area-inset-bottom, 0px),
+    env(safe-area-inset-bottom, 0px),
+    12px
+  );
+
+  right: 12px;
+  bottom: calc(var(--mobile-toolbar-height, 0px) + var(--courier-safe-bottom) + 8px);
+  left: 12px;
+  width: auto;
+
+  /* `100vh` is the fallback for a WebView without `dvh`; the `@supports` block below
+   * applies where `dvh` is supported. */
+  max-height: calc(100vh - var(--mobile-toolbar-height, 0px) - var(--courier-safe-bottom) - 24px);
+  padding: 16px;
+  border-radius: 16px;
+  overflow-y: auto;
+  animation: courier-reload-notice-sheet-in 220ms cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+
+body.is-phone .courier-reload-notice-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+}
+
+body.is-phone .courier-reload-notice-message {
+  margin-top: 10px;
+  margin-left: 46px;
+  line-height: 1.55;
+}
+
+body.is-phone .courier-reload-notice-actions {
+  margin-top: 16px;
+}
+
+body.is-phone .courier-reload-notice-reload {
+  min-width: 0;
 }
 
 .courier-segmented > button.courier-segmented-option {
@@ -2588,38 +2341,35 @@
   white-space: nowrap;
 }
 
-.courier-setup-field input[type="text"],
-.courier-setup-field input[type="password"] {
-  width: 100%;
-  height: 34px;
+/* The gutter is one line drawn over the box, in a split view only: in the unified
+ * presentation there is one stream and nothing to divide. */
+.courier-diff-body.is-split::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  left: 50%;
+  width: 1px;
+  background-color: var(--background-modifier-border);
+  pointer-events: none;
 }
 
-.courier-setup-actions button.is-loading {
-  opacity: 0.75;
-}
+/* ── A phone: one column, a compact header and a full-width write ── */
 
-.courier-restore-name input[type="text"] {
-  width: 100%;
-}
-
-body.is-phone .courier-reload-notice-icon {
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
-}
-
-body.is-phone .courier-reload-notice-message {
-  margin-top: 10px;
-  margin-left: 46px;
-  line-height: 1.55;
-}
-
-body.is-phone .courier-reload-notice-actions {
-  margin-top: 16px;
-}
-
-body.is-phone .courier-reload-notice-reload {
-  min-width: 0;
+/*
+ * The comparison is the same page on a phone, laid out for a thumb: the names become a card
+ * head with an icon tile, the counts become pills, and the one write takes a full-width band
+ * of its own under the counts and the layout control. The unified stream — the phone's
+ * default (`defaultConflictDiffMode`) — is what a one-column page can read.
+ *
+ * `body.is-phone` rather than a width query: a phone in landscape is wider than the narrow
+ * breakpoint above, while a desktop window squeezed to 380 px already has its own reflow
+ * (and is still a pointer, not a finger). A tablet keeps the desktop layout — `is-phone` is
+ * false there, and it has the width for two columns. The platform class is also what the
+ * preview harness sets for a phone-shaped render.
+ */
+body.is-phone .courier-conflict-diff {
+  padding: 0 12px 12px;
 }
 
 body.is-phone .courier-conflict-diff-header {
@@ -2627,6 +2377,17 @@ body.is-phone .courier-conflict-diff-header {
   align-items: center;
   gap: 10px 8px;
   padding: 6px 0 12px;
+}
+
+/* The title block: a tinted icon tile beside the two names, drawn as one unit. The grid
+ * places the tile across both text rows, so the name and the copy line share one left edge. */
+body.is-phone .courier-conflict-diff-title {
+  display: grid;
+  flex: 1 1 100%;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  gap: 1px 10px;
+  align-items: center;
 }
 
 body.is-phone .courier-conflict-diff-icon {
@@ -2654,11 +2415,45 @@ body.is-phone .courier-conflict-diff-subtitle {
   line-height: 1.35;
 }
 
+/* The counts as pills: the same green/red a diff uses, at a touch-readable size. */
+body.is-phone .courier-conflict-diff-stats {
+  gap: 6px;
+}
+
 body.is-phone .courier-conflict-diff-stat {
   padding: 2px 9px;
   border-radius: 999px;
   font-size: 11.5px;
   line-height: 1.6;
+}
+
+/* The group becomes a wrapping row of its own: the layout control keeps the counts' row and
+ * moves to its far end, while the write takes the full-width band below it. (`display: contents`
+ * would dissolve the group, but it is only partially supported in the app's Chromium.) */
+body.is-phone .courier-conflict-diff-actions {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+/* The write: its own full-width band. 46 px is the app's touch height, and the radius matches
+ * the icon tile and the rows' frame. */
+body.is-phone .courier-conflict-diff-header-actions {
+  flex: 1 1 100%;
+}
+
+/* The legend above the rows: which side is which, once, in the colours the rows carry. */
+body.is-phone .courier-conflict-diff-legend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 0 8px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.4;
 }
 
 body.is-phone .courier-conflict-diff-legend-part {
@@ -2672,6 +2467,25 @@ body.is-phone .courier-conflict-diff-legend-sigil {
   flex: 0 0 auto;
   font-family: var(--font-monospace);
   font-weight: 700;
+}
+
+/* A half-missing or oversized page keeps the same header card and gives its one action the
+ * full band, so the state reads as the same page rather than a stray sentence. */
+body.is-phone .courier-conflict-diff-status {
+  padding: 4px 4px 8px;
+  font-size: var(--font-ui-small);
+  line-height: 1.55;
+}
+
+/*
+ * On a phone the confirmation becomes one column: the choice is a touch row of its own, and
+ * the two buttons split the width below it, so the destructive confirmation reads as one
+ * decision rather than a row of small controls. The dialog itself is Obsidian's mobile
+ * modal; this only owns what is inside it.
+ */
+body.is-phone .courier-conflict-replace-question {
+  font-size: var(--font-ui-medium);
+  line-height: 1.55;
 }
 
 body.is-phone .courier-conflict-replace-footer {
@@ -2693,101 +2507,14 @@ body.is-phone .courier-conflict-replace-actions {
   gap: 10px;
 }
 
-/* The counts as pills: the same green/red a diff uses, at a touch-readable size. */
-body.is-phone .courier-conflict-diff-stats {
-  gap: 6px;
-}
-
-/* A phone in landscape is wider than the query above; the platform class still says
- * what it is. Same declarations, kept in one place per selector. */
-body.is-phone .courier-reload-notice {
-  --courier-safe-bottom: max(
-    var(--safe-area-inset-bottom, 0px),
-    env(safe-area-inset-bottom, 0px),
-    12px
-  );
-
-  right: 12px;
-  bottom: calc(var(--mobile-toolbar-height, 0px) + var(--courier-safe-bottom) + 8px);
-  left: 12px;
-  width: auto;
-
-  /* `100vh` is the fallback for a WebView without `dvh`; the `@supports` block below
-   * applies where `dvh` is supported. */
-  max-height: calc(100vh - var(--mobile-toolbar-height, 0px) - var(--courier-safe-bottom) - 24px);
-  padding: 16px;
-  border-radius: 16px;
-  overflow-y: auto;
-  animation: courier-reload-notice-sheet-in 220ms cubic-bezier(0.2, 0.7, 0.3, 1);
-}
-
-/* The legend above the rows: which side is which, once, in the colours the rows carry. */
-body.is-phone .courier-conflict-diff-legend {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 0 8px;
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
-  line-height: 1.4;
-}
-
-/* The group becomes a wrapping row of its own: the layout control keeps the counts' row and
- * moves to its far end, while the write takes the full-width band below it. (`display: contents`
- * would dissolve the group, but it is only partially supported in the app's Chromium.) */
-body.is-phone .courier-conflict-diff-actions {
-  display: flex;
-  flex: 1 1 100%;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
+.courier-setup-field input[type="text"],
+.courier-setup-field input[type="password"] {
   width: 100%;
+  height: 34px;
 }
 
-/* The title block: a tinted icon tile beside the two names, drawn as one unit. The grid
- * places the tile across both text rows, so the name and the copy line share one left edge. */
-body.is-phone .courier-conflict-diff-title {
-  display: grid;
-  flex: 1 1 100%;
-  grid-template-columns: auto minmax(0, 1fr);
-  grid-template-rows: auto auto;
-  gap: 1px 10px;
-  align-items: center;
-}
-
-/* The write: its own full-width band. 46 px is the app's touch height, and the radius matches
- * the icon tile and the rows' frame. */
-body.is-phone .courier-conflict-diff-header-actions {
-  flex: 1 1 100%;
-}
-
-/* A half-missing or oversized page keeps the same header card and gives its one action the
- * full band, so the state reads as the same page rather than a stray sentence. */
-body.is-phone .courier-conflict-diff-status {
-  padding: 4px 4px 8px;
-  font-size: var(--font-ui-small);
-  line-height: 1.55;
-}
-
-/* Tablets keep the card: a sheet would span a width the eye reads as a page. */
-body.is-tablet .courier-reload-notice {
-  right: 24px;
-  bottom: 24px;
-  width: min(400px, calc(100vw - 48px));
-  padding: 16px;
-}
-
-/* The gutter is one line drawn over the box, in a split view only: in the unified
- * presentation there is one stream and nothing to divide. */
-.courier-diff-body.is-split::after {
-  content: "";
-  position: absolute;
-  top: 1px;
-  bottom: 1px;
-  left: 50%;
-  width: 1px;
-  background-color: var(--background-modifier-border);
-  pointer-events: none;
+.courier-setup-actions button.is-loading {
+  opacity: 0.75;
 }
 
 /* Two classes on the device span: the `> span` rule above outranks a bare class, so the one
@@ -2799,33 +2526,8 @@ body.is-tablet .courier-reload-notice {
   text-overflow: ellipsis;
 }
 
-/* ── A phone: one column, a compact header and a full-width write ── */
-
-/*
- * The comparison is the same page on a phone, laid out for a thumb: the names become a card
- * head with an icon tile, the counts become pills, and the one write takes a full-width band
- * of its own under the counts and the layout control. The unified stream — the phone's
- * default (`defaultConflictDiffMode`) — is what a one-column page can read.
- *
- * `body.is-phone` rather than a width query: a phone in landscape is wider than the narrow
- * breakpoint above, while a desktop window squeezed to 380 px already has its own reflow
- * (and is still a pointer, not a finger). A tablet keeps the desktop layout — `is-phone` is
- * false there, and it has the width for two columns. The platform class is also what the
- * preview harness sets for a phone-shaped render.
- */
-body.is-phone .courier-conflict-diff {
-  padding: 0 12px 12px;
-}
-
-/*
- * On a phone the confirmation becomes one column: the choice is a touch row of its own, and
- * the two buttons split the width below it, so the destructive confirmation reads as one
- * decision rather than a row of small controls. The dialog itself is Obsidian's mobile
- * modal; this only owns what is inside it.
- */
-body.is-phone .courier-conflict-replace-question {
-  font-size: var(--font-ui-medium);
-  line-height: 1.55;
+.courier-restore-name input[type="text"] {
+  width: 100%;
 }
 
 body.is-tablet .courier-reload-notice-actions button {
@@ -2867,6 +2569,11 @@ body.is-phone .courier-conflict-replace-actions button {
   font-weight: 600;
 }
 
+/* The tag stays the rightmost item; the action sits just before it. */
+.nav-file-title .courier-conflict-action + .nav-file-tag {
+  margin-left: 6px;
+}
+
 .nav-file-title:hover .courier-conflict-action,
 .nav-file-title.is-active .courier-conflict-action,
 .nav-file-title.is-selected .courier-conflict-action,
@@ -2891,6 +2598,18 @@ body.is-phone .courier-conflict-replace-actions button {
   color: var(--text-normal);
 }
 
+/* Everything but the body keeps its natural height, so the body absorbs what is left. */
+.courier-conflict-diff > *:not(.courier-diff-body) {
+  flex: 0 0 auto;
+}
+
+/* The changed lines: a wash on the side that changed, and a stronger left edge so a block
+ * of changes reads as one block. `same` rows stay transparent — the paper is the content. */
+.courier-diff-row-change .courier-diff-cell.courier-diff-left,
+.courier-diff-row-remove .courier-diff-cell.courier-diff-left {
+  background-color: color-mix(in srgb, var(--color-red) 12%, transparent);
+}
+
 .courier-diff-row-change .courier-diff-cell.courier-diff-right,
 .courier-diff-row-add .courier-diff-cell.courier-diff-right {
   background-color: color-mix(in srgb, var(--color-green) 12%, transparent);
@@ -2911,6 +2630,28 @@ body.is-phone .courier-conflict-replace-actions button {
 
 .courier-setup-card .setting-item + .setting-item {
   border-top: 1px solid var(--background-modifier-border);
+}
+
+/* The two text fields are forms: label above, full-width control. */
+.courier-setup-card .setting-item.courier-setup-field {
+  display: block;
+}
+
+/* ── Excluded folders in the file explorer ── */
+
+/*
+ * Applied by `ui/file-explorer-excluded-folders.ts` to the rows of a folder this device
+ * excludes: the folder's own `.nav-folder-title` and the `.nav-file-title` of every file
+ * inside it. That is exactly the engine's prefix rule. The decoration follows the saved
+ * exclusion list — it is not a separate preference — and removing the class is all a
+ * list change has to do, so no rule here needs a state of its own.
+ */
+.nav-folder-title.courier-excluded-path-dimmed,
+.nav-folder-title.courier-excluded-path-dimmed .nav-folder-title-content,
+.nav-folder-title.courier-excluded-path-dimmed .nav-folder-collapse-indicator,
+.nav-file-title.courier-excluded-path-dimmed,
+.nav-file-title.courier-excluded-path-dimmed .nav-file-title-content {
+  color: var(--text-faint);
 }
 
 .courier-vh-day + .courier-vh-day .courier-vh-day-title {
@@ -2965,49 +2706,6 @@ body.is-phone .courier-conflict-replace-actions button {
   animation-delay: 0.3s;
 }
 
-/* The two text fields are forms: label above, full-width control. */
-.courier-setup-card .setting-item.courier-setup-field {
-  display: block;
-}
-
-/* Everything but the body keeps its natural height, so the body absorbs what is left. */
-.courier-conflict-diff > *:not(.courier-diff-body) {
-  flex: 0 0 auto;
-}
-
-/* The tag stays the rightmost item; the action sits just before it. */
-.nav-file-title .courier-conflict-action + .nav-file-tag {
-  margin-left: 6px;
-}
-
-/* The changed lines: a wash on the side that changed, and a stronger left edge so a block
- * of changes reads as one block. `same` rows stay transparent — the paper is the content. */
-.courier-diff-row-change .courier-diff-cell.courier-diff-left,
-.courier-diff-row-remove .courier-diff-cell.courier-diff-left {
-  background-color: color-mix(in srgb, var(--color-red) 12%, transparent);
-}
-
-/* ── Excluded folders in the file explorer ── */
-
-/*
- * Applied by `ui/file-explorer-excluded-folders.ts` to the rows of a folder this device
- * excludes: the folder's own `.nav-folder-title` and the `.nav-file-title` of every file
- * inside it. That is exactly the engine's prefix rule. The decoration follows the saved
- * exclusion list — it is not a separate preference — and removing the class is all a
- * list change has to do, so no rule here needs a state of its own.
- */
-.nav-folder-title.courier-excluded-path-dimmed,
-.nav-folder-title.courier-excluded-path-dimmed .nav-folder-title-content,
-.nav-folder-title.courier-excluded-path-dimmed .nav-folder-collapse-indicator,
-.nav-file-title.courier-excluded-path-dimmed,
-.nav-file-title.courier-excluded-path-dimmed .nav-file-title-content {
-  color: var(--text-faint);
-}
-
-.courier-restore-path-error:not(:empty)::before {
-  content: "⚠ ";
-}
-
 .courier-segmented > button.courier-segmented-option:focus-visible {
   outline: 2px solid var(--interactive-accent);
   outline-offset: 1px;
@@ -3044,6 +2742,15 @@ body.is-phone .courier-conflict-diff-legend.is-unified {
   gap: 18px;
 }
 
+/* The rows on a phone: airier, rounded like the header's cards, and with the line-number
+ * gutter narrowed so the text keeps the width. Scoped to the comparison: the version history
+ * draws the same row model in its own pane, and that pane's frame is its business. */
+body.is-phone .courier-conflict-diff .courier-diff-rows {
+  border-radius: 12px;
+  font-size: var(--font-ui-small);
+  line-height: 1.65;
+}
+
 body.is-phone .courier-conflict-diff .courier-diff-cell {
   gap: 6px;
   padding: 0 8px;
@@ -3058,13 +2765,8 @@ body.is-phone .courier-conflict-diff .courier-diff-line {
   gap: 6px;
 }
 
-/* The rows on a phone: airier, rounded like the header's cards, and with the line-number
- * gutter narrowed so the text keeps the width. Scoped to the comparison: the version history
- * draws the same row model in its own pane, and that pane's frame is its business. */
-body.is-phone .courier-conflict-diff .courier-diff-rows {
-  border-radius: 12px;
-  font-size: var(--font-ui-small);
-  line-height: 1.65;
+.courier-restore-path-error:not(:empty)::before {
+  content: "⚠ ";
 }
 
 /* The phone selector is separate because `body.is-phone` outweighs a plain class pair. */
@@ -3117,4 +2819,304 @@ body.is-phone .courier-conflict-diff-legend-part.is-current .courier-conflict-di
 /* The unified stream has no line-number gutter, so its lines start at the frame's edge. */
 body.is-phone .courier-conflict-diff .courier-diff-rows.is-unified .courier-diff-line {
   padding-left: 10px;
+}
+
+@supports (height: 100dvh) {
+  body.is-phone .courier-reload-notice {
+    max-height: calc(
+      100dvh - var(--mobile-toolbar-height, 0px) - var(--courier-safe-bottom) - 24px
+    );
+  }
+}
+
+/* ── A narrow page: the header reflows instead of clipping ── */
+
+/*
+ * A comparison can be split into a column a few hundred pixels wide (the screenshot that
+ * prompted this was 379 px). Below 520 px the header stops pretending to be one line: the
+ * names take a row of their own, and the counts and the two controls sit under them, right
+ * aligned — so the replace button is never the part that gets cut off.
+ *
+ * The rows themselves keep the two columns: their lines now wrap between words, which is what
+ * a narrow diff can honestly do.
+ */
+@container (max-width: 520px) {
+  .courier-conflict-diff {
+    padding: 0 10px 10px;
+  }
+
+  .courier-conflict-diff-header {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding-bottom: 8px;
+  }
+
+  .courier-conflict-diff-title {
+    flex: 1 1 100%;
+  }
+
+  /* The counts and the layout control take the row under the names; the counts stay at its left
+   * end and `margin-left: auto` takes the controls to its right. */
+  .courier-conflict-diff-stats {
+    margin-left: 0;
+  }
+
+  .courier-conflict-diff-actions {
+    margin-left: auto;
+  }
+
+  /* Both the layout control and the write may wrap onto a row of their own, and each stays at
+   * the pane's right end instead of being clipped by its edge. The write is a header child (not
+   * part of `.courier-conflict-diff-actions`), so it needs the auto margin itself. */
+  .courier-conflict-diff-actions,
+  .courier-conflict-diff-header-actions,
+  .courier-conflict-diff-header-actions .setting-item-control {
+    flex: 0 1 auto;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .courier-conflict-diff-header > .courier-conflict-diff-header-actions {
+    margin-left: auto;
+  }
+
+  /* The one write keeps its words on one line rather than breaking mid-sentence. */
+  .courier-conflict-diff-header-actions button {
+    white-space: nowrap;
+  }
+}
+
+/*
+ * A narrow tab (a phone, or the page itself split into a column): the list goes above the
+ * pane instead of beside it, and gives up most of its height to the content — reading the
+ * version is what the surface is for, picking one is one click.
+ */
+@container (max-width: 680px) {
+  .courier-vh-body {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .courier-vh-list {
+    flex: 0 0 auto;
+    max-height: 30vh;
+  }
+
+  .courier-vh-pane {
+    flex: 1 1 auto;
+  }
+
+  .courier-vh-pane-head {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .courier-vh-count {
+    display: none;
+  }
+}
+
+@media (width <= 600px) {
+  .courier-reload-notice {
+    /* Obsidian's own floating nav keeps `max(safe-area, 12px)` clear of the bottom edge
+     * (`--navbar-bottom-offset`); using the raw safe-area would tuck the sheet under the
+     * nav on a device that reports no inset (Android). */
+    --courier-safe-bottom: max(
+      var(--safe-area-inset-bottom, 0px),
+      env(safe-area-inset-bottom, 0px),
+      12px
+    );
+
+    right: 12px;
+    bottom: calc(var(--mobile-toolbar-height, 0px) + var(--courier-safe-bottom) + 8px);
+    left: 12px;
+    width: auto;
+
+    /* `100vh` is the fallback for a WebView without `dvh`; the `@supports` block below
+     * applies where `dvh` is supported. */
+    max-height: calc(100vh - var(--mobile-toolbar-height, 0px) - var(--courier-safe-bottom) - 24px);
+    padding: 16px;
+    border-radius: 16px;
+    overflow-y: auto;
+    animation: courier-reload-notice-sheet-in 220ms cubic-bezier(0.2, 0.7, 0.3, 1);
+  }
+
+  @supports (height: 100dvh) {
+    .courier-reload-notice {
+      max-height: calc(
+        100dvh - var(--mobile-toolbar-height, 0px) - var(--courier-safe-bottom) - 24px
+      );
+    }
+  }
+
+  .courier-reload-notice-icon {
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+  }
+
+  .courier-reload-notice-icon svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  .courier-reload-notice-message {
+    margin-top: 10px;
+    margin-left: 46px; /* 36px icon + 10px gap */
+    line-height: 1.55;
+  }
+
+  .courier-reload-notice-actions {
+    margin-top: 16px;
+  }
+
+  .courier-reload-notice-actions button {
+    flex: 1 1 0;
+    min-height: 44px;
+    font-size: var(--font-ui-small);
+  }
+
+  .courier-reload-notice-reload {
+    min-width: 0;
+  }
+}
+
+@media (width <= 520px) {
+  .modal.courier-setup-connection-modal {
+    width: 92vw;
+  }
+
+  .courier-setup-lead-icon {
+    display: none;
+  }
+
+  .courier-setup-chips {
+    padding-left: 0;
+  }
+
+  .courier-setup-footer {
+    flex-wrap: wrap;
+  }
+
+  .courier-setup-footer-hint {
+    width: 100%;
+  }
+
+  .courier-setup-actions {
+    width: 100%;
+  }
+
+  .courier-setup-actions button {
+    flex: 1 1 0;
+  }
+}
+
+@media (width <= 520px) {
+  .courier-history-list {
+    max-height: 50vh;
+  }
+
+  .courier-history-action {
+    padding: 1px 6px;
+  }
+}
+
+@media (width <= 520px) {
+  .courier-deleted-icon {
+    display: none;
+  }
+
+  .courier-recycle-bin-list {
+    max-height: 48vh;
+  }
+
+  /*
+   * The hint is the only warning before an irreversible action, so a phone keeps it:
+   * the footer stacks it above a full-width button instead of hiding it.
+   */
+  .courier-recycle-bin-footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .courier-recycle-bin-clear {
+    width: 100%;
+    min-width: 0;
+  }
+}
+
+@media (width <= 520px) {
+  .courier-file-preview-header {
+    align-items: flex-start;
+  }
+
+  .courier-file-preview-icon,
+  .courier-file-preview-kind {
+    display: none;
+  }
+
+  .courier-file-preview {
+    padding: 12px;
+  }
+}
+
+@keyframes courier-reload-notice-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes courier-reload-notice-sheet-in {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .courier-reload-notice {
+    animation: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .courier-recycle-bin-skeleton-icon,
+  .courier-recycle-bin-skeleton-line {
+    opacity: 0.45;
+    animation: none;
+  }
+}
+
+@keyframes courier-recycle-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+
+  50% {
+    opacity: 0.75;
+  }
+}
+
+@supports (background: color-mix(in srgb, red 10%, transparent)) {
+  .courier-reload-notice-icon {
+    background: color-mix(in srgb, var(--interactive-accent) 14%, transparent);
+  }
+}
+
+@supports (background: color-mix(in srgb, red 10%, transparent)) {
+  body.is-phone .courier-conflict-diff-icon {
+    background: color-mix(in srgb, var(--interactive-accent) 14%, transparent);
+  }
 }

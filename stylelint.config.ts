@@ -5,13 +5,9 @@
  * lints its source, and this is the config that produces those findings. Running it here
  * means a stylesheet problem shows up in CI rather than on the plugin's scorecard.
  *
- * Only the plugin's sheet is in scope: `@courier/server` and the docs carry no plugin CSS.
+ * There is no `overrides` block: `bun run lint:review` names the one sheet this repository
+ * has, so the config only has to say which rules apply.
  */
 export default {
   extends: ["stylelint-config-obsidianmd"],
-  overrides: [
-    {
-      files: ["packages/plugin/styles.css"],
-    },
-  ],
 };

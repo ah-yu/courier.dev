@@ -5,7 +5,7 @@ import {
   type FileTypeGroup,
   type SettingsGroup,
 } from "@courier/engine";
-import { type UserSummary } from "@courier/shared";
+import { MAX_DEVICE_NAME_LENGTH, type UserSummary } from "@courier/shared";
 import { plural, t, type PluginMessageKey } from "../i18n";
 import type CourierPlugin from "../main";
 import { VaultPickerModal } from "./dialogs/vault-picker-modal";
@@ -198,8 +198,8 @@ export class CourierSettingTab extends PluginSettingTab {
    *
    * The two switch families cannot be a plain property write: flipping one restarts the sync
    * host (the engine and the adapter read the scope when they are built), which is what
-   * `setFileTypeEnabled` / `setSettingsGroupEnabled` do. The device name is debounced, so a
-   * burst of keystrokes is one save and the caret stays in the field.
+   * `setFileTypeEnabled` / `setSettingsGroupEnabled` do. (The device name is a `render` item,
+   * not a control: its own row owns the debounce and the blur.)
    */
   override setControlValue(key: string, value: unknown): void | Promise<void> {
     if (key.startsWith("fileTypes.")) {
@@ -214,10 +214,6 @@ export class CourierSettingTab extends PluginSettingTab {
         key.slice("settingsGroups.".length) as SettingsGroup,
         value === true,
       );
-      return;
-    }
-    if (key === "deviceName") {
-      this.queueDeviceName(typeof value === "string" ? value : "");
       return;
     }
     return super.setControlValue(key, value);
@@ -289,7 +285,11 @@ export class CourierSettingTab extends PluginSettingTab {
 
   // ── The steps, as definitions ──
 
-  /** Step 1: the sign-in form. A form is not a row, so it stays one imperative item. */
+  /**
+   * Step 1: the sign-in form. A form is not a row, so it stays one imperative item — and its
+   * own error line is drawn inside the card rather than as a second item, because two items
+   * would carry the same (empty) name, and the app keys an item by that name.
+   */
   private loginDefinitions(visible: () => boolean): SettingDefinitionItem[] {
     return [
       {
@@ -303,7 +303,6 @@ export class CourierSettingTab extends PluginSettingTab {
           this.renderLoginStage(setting.settingEl);
         },
       },
-      this.stageErrorItem(visible),
     ];
   }
 
@@ -413,7 +412,6 @@ export class CourierSettingTab extends PluginSettingTab {
     ];
   }
 
-  /** The one line a failed action leaves behind, where the user just looked. */
   /**
    * Step 4, the settings themselves: the connection, what this device syncs, and the
    * account it syncs with.
@@ -429,11 +427,10 @@ export class CourierSettingTab extends PluginSettingTab {
         name: t("settings.device.name"),
         desc: t("settings.device.desc"),
         visible,
-        control: {
-          type: "text",
-          key: "deviceName",
-          placeholder: t("settings.device.placeholder"),
-        },
+        // A `render` item, not a `text` control: the field caps what can be typed
+        // (`maxLength`, rather than a validation message after the fact) and commits when it
+        // loses focus, and a control has nowhere to hang either of those.
+        render: (setting) => this.buildDeviceNameRow(setting),
       },
 
       this.heading(t("settings.section.vault"), t("settings.section.vault.tooltip"), visible),
@@ -571,6 +568,15 @@ export class CourierSettingTab extends PluginSettingTab {
       input.addEventListener("keydown", (event) => {
         if (event.key === "Enter") void signIn();
       });
+    }
+
+    // The failure lands under the button that produced it. It is part of this item rather than
+    // an item of its own: a second item would carry the same (empty) name, and the app keys an
+    // item by its name.
+    if (this.stageError) {
+      const error = card.createDiv({ cls: "courier-settings-error" });
+      error.setCssStyles({ color: "var(--text-error)", margin: "4px 0" });
+      error.setText(`⚠ ${this.stageError}`);
     }
   }
 
@@ -805,12 +811,6 @@ export class CourierSettingTab extends PluginSettingTab {
     });
   }
 
-  // ── Vault file types ──
-
-  // ── Excluded folders ──
-
-  // ── Obsidian settings sync ──
-
   // ── Device label + sync history ──
 
   /** Debounced device-name save — one write per pause, not per keystroke. */
@@ -842,6 +842,28 @@ export class CourierSettingTab extends PluginSettingTab {
   }
 
   // ── The rows of the settings step ──
+
+  /**
+   * What this client calls itself.
+   *
+   * The field is built here rather than declared as a `control`, because it caps what can be
+   * typed (`maxLength`) and commits when it loses focus — a `control` has no hook for either.
+   * Leaving the field flushes the debounce, so a value the user typed and immediately left is
+   * written before any other action rebuilds the page from the stored one.
+   */
+  private buildDeviceNameRow(setting: Setting): void {
+    setting
+      .setName(t("settings.device.name"))
+      .setDesc(t("settings.device.desc"))
+      .addText((text) => {
+        text.inputEl.maxLength = MAX_DEVICE_NAME_LENGTH;
+        text
+          .setPlaceholder(t("settings.device.placeholder"))
+          .setValue(this.plugin.settings.deviceName ?? "");
+        text.onChange((value) => this.queueDeviceName(value));
+        text.inputEl.addEventListener("blur", () => this.flushDeviceName());
+      });
+  }
 
   /** The bound vault, its live state, and the way out of it. */
   private buildConnectionRow(setting: Setting): void {

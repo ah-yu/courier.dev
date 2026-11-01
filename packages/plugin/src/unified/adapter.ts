@@ -335,7 +335,9 @@ export class ObsidianVaultAdapter implements SyncAdapter {
         if (isSyncableDir(path, this.scope)) await walk(path, depth + 1);
       }
     };
-    await walk(this.scope.configDir, 0);
+    // A host with no config folder (the CLI) has nothing to walk; without this guard the
+    // walk would start at the vault root and enumerate every file a second time.
+    if (this.scope.configDir !== "") await walk(this.scope.configDir, 0);
     return out;
   }
 

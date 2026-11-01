@@ -95,6 +95,8 @@ export interface CliConfig {
  */
 export function syncScopeOf(vault: CliVault, maxFileBytes?: number): SyncScope {
   return normalizeScope({
+    // Named explicitly: the CLI has no Obsidian to ask for one, and every group is off.
+    configDir: "",
     fileTypes: vault.fileTypes,
     excludedFolders: vault.excludedFolders,
     maxFileBytes,

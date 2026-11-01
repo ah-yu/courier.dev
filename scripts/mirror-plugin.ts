@@ -143,6 +143,11 @@ function writeRootManifest(): void {
       "@types/bun": pin("@types/bun"),
       typescript: pin("typescript"),
     },
+    // The same pin the repository uses: typescript-eslint (which the local review gate runs)
+    // refuses TypeScript 7, and a mirror that resolved its own compiler could drift from it.
+    overrides: {
+      typescript: pin("typescript"),
+    },
   };
   writeFileSync(join(target, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`);
 }

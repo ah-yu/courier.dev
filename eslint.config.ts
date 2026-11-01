@@ -18,19 +18,19 @@ import obsidianmd from "eslint-plugin-obsidianmd";
  * The mirror drops `*.test.ts`; this scan keeps them, so the gate is stricter than the
  * directory on the code the mirror does publish.
  *
- * The directory reports only a known set of Obsidian rules as **Error** (traced from
- * its reviews); everything else it lists, including the typescript-eslint and
- * dependency findings, is a **Warning** and does not fail the review. This config
- * reproduces that split: every rule is a warning except the error set below, so
- * `eslint` exits non-zero exactly when the directory would fail. `bun run lint:review`
- * runs it locally and `bun run verify` runs it as the `review` gate.
+ * The directory reports only a known set of Obsidian rules as **Error** (traced from its
+ * reviews); everything else it lists, including the typescript-eslint and dependency
+ * findings, is a **Warning**. This config reproduces that split — every rule is a warning
+ * except the error set below — and the gate runs it with `--max-warnings 0`, so a warning
+ * fails `bun run verify` too. That is deliberate and stricter than the directory: the tree
+ * it scans is the tree that ships, and a warning there is a warning on the plugin's page.
+ * `bun run lint:review` runs it locally; `bun run verify` runs it as the `review` gate.
  *
  * This file is not part of the published tree, so the scan does not read it; it is
  * type-checked through `tsconfig.scripts.json` with the other repository tooling.
  *
- * The gate fails on **errors** only, which is what the directory rejects a release for.
- * `--max-warnings 0` is the target and is one line away; until then the remaining
- * warnings are printed by the gate rather than hidden (`--quiet` would suppress them).
+ * Errors and warnings both fail it: the packages are clean of both, and the flag is what
+ * keeps them that way.
  *
  * Two things must stay in step with the directory:
  *
@@ -163,15 +163,11 @@ export default defineConfig([
   {
     languageOptions: {
       parserOptions: {
-        // Type-checked rules need the nearest tsconfig for each file; the service
-        // resolves one per package in the workspace. These three files are not in a
-        // package project and are scanned anyway, so name them explicitly.
+        // Type-checked rules need the nearest tsconfig for each file; the service resolves
+        // one per package in the workspace. This one is not in a package project and is
+        // scanned anyway (the config files themselves are ignored, above), so name it here.
         projectService: {
-          allowDefaultProject: [
-            "eslint.config.ts",
-            "vitest.config.ts",
-            "packages/server/drizzle.config.ts",
-          ],
+          allowDefaultProject: ["packages/server/drizzle.config.ts"],
         },
       },
     },

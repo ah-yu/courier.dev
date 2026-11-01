@@ -38,3 +38,5 @@ reports/mutation/
 # What `bun run preview:ui` renders (`docs/plugin-ui-preview.md`): a PNG per look, plus the page
 # and stylesheet it was drawn from. Reproducible, and only interesting while iterating.
 .agents/ui-preview/
+# A stray console capture from a local run (the gate tees to .verify.log).
+*.log

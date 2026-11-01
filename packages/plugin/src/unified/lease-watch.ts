@@ -40,9 +40,10 @@ export async function watchLeaseDirectory(
     );
     watcher.on("error", () => {});
     return () => watcher.close();
-  } catch {
-    // The directory may not exist yet, or the runtime refuses those modules; the retry
-    // timer still covers it.
+  } catch (error) {
+    // The directory may not exist yet, or the runtime refuses those modules; the retry timer
+    // still covers it. Say so once: a silent failure here looks exactly like a slow release.
+    console.warn("Courier: could not watch the sync lease directory:", error);
     return () => {};
   }
 }
