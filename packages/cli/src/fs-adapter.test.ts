@@ -30,7 +30,7 @@ afterEach(() => {
 function scopeWith(...groups: SettingsGroup[]): SyncScope {
   const settingsGroups: Record<string, boolean> = { ...NO_SETTINGS_GROUPS };
   for (const group of groups) settingsGroups[group] = true;
-  return normalizeScope({ settingsGroups, fileTypes: NO_FILE_TYPES });
+  return normalizeScope({ configDir: ".obsidian", settingsGroups, fileTypes: NO_FILE_TYPES });
 }
 
 /** A scope with exactly the named vault file types on (no config-folder group). */
@@ -301,7 +301,8 @@ describe("FsAdapter", () => {
     writeFileSync(join(root, "notes", "notes.txt"), "not markdown");
     writeFileSync(join(root, ".obsidian", "app-2026-02-14-101530.conflict.md"), "a parked setting");
 
-    const adapter = new FsAdapter(root);
+    // The config folder is named by whoever owns the vault; this fixture is an Obsidian one.
+    const adapter = new FsAdapter(root, normalizeScope({ configDir: ".obsidian" }));
 
     expect(await adapter.listSyncableFiles()).toEqual(["notes/plan.md"]);
     // The walk enters the config folder's root (only its subfolders are pruned), so a copy
@@ -333,7 +334,11 @@ describe("FsAdapter", () => {
     writeFileSync(join(root, "private", "plan-2026-02-14-101530.conflict.md"), "the losing side");
     writeFileSync(join(root, "public.md"), "the public note");
 
-    const scope = normalizeScope({ fileTypes: NO_FILE_TYPES, excludedFolders: ["private"] });
+    const scope = normalizeScope({
+      configDir: ".obsidian",
+      fileTypes: NO_FILE_TYPES,
+      excludedFolders: ["private"],
+    });
     const adapter = new FsAdapter(root, scope);
 
     expect(await adapter.listSyncableFiles()).toEqual(["public.md"]);

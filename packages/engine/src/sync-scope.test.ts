@@ -43,7 +43,7 @@ import {
 function scopeWith(...groups: SettingsGroup[]): SyncScope {
   const settingsGroups: Record<string, boolean> = {};
   for (const group of groups) settingsGroups[group] = true;
-  return normalizeScope({ settingsGroups, fileTypes: NO_FILE_TYPES });
+  return normalizeScope({ settingsGroups, fileTypes: NO_FILE_TYPES, configDir: THE_CONFIG_DIR });
 }
 
 /**
@@ -53,8 +53,11 @@ function scopeWith(...groups: SettingsGroup[]): SyncScope {
 function scopeWithFileTypes(...types: FileTypeGroup[]): SyncScope {
   const fileTypes: Record<string, boolean> = { ...NO_FILE_TYPES };
   for (const type of types) fileTypes[type] = true;
-  return normalizeScope({ fileTypes });
+  return normalizeScope({ fileTypes, configDir: THE_CONFIG_DIR });
 }
+
+/** The config folder the fixtures describe; the app owns the real one. */
+const THE_CONFIG_DIR = ".obsidian";
 
 const OFF = scopeWith();
 const OBSIDIAN_DEFAULT = normalizeScope({
@@ -114,10 +117,13 @@ describe("normalizeScope", () => {
     expect(scope.settingsGroups.appearance).toBe(false);
   });
 
-  it("trims stray slashes off the config folder and keeps a usable default", () => {
-    expect(normalizeScope({ configDir: "/.obsidian/" }).configDir).toBe(".obsidian");
-    expect(normalizeScope({ configDir: "" }).configDir).toBe(".obsidian");
-    expect(normalizeScope({ configDir: "/" }).configDir).toBe(".obsidian");
+  it("trims stray slashes off the config folder, and reads a blank one as absent", () => {
+    expect(normalizeScope({ configDir: "/.config/" }).configDir).toBe(".config");
+    // The engine has no default of its own: the name is the app's, and a host without an
+    // Obsidian (the CLI) syncs no config folder at all.
+    expect(normalizeScope({ configDir: "" }).configDir).toBe("");
+    expect(normalizeScope({ configDir: "/" }).configDir).toBe("");
+    expect(normalizeScope().configDir).toBe("");
   });
 
   it("never shares one normalized group record with another scope", () => {
@@ -167,6 +173,7 @@ describe("excluded folders", () => {
 
   it("does not apply to the config folder, whose paths the groups own", () => {
     const withSettings = normalizeScope({
+      configDir: THE_CONFIG_DIR,
       settingsGroups: { app: true },
       excludedFolders: [".obsidian"],
     });
@@ -179,9 +186,12 @@ describe("excluded folders", () => {
     expect(isSyncableDir("private/deep", scope)).toBe(false);
     expect(isSyncableDir("private2", scope)).toBe(true);
     // The config folder is not a vault folder for the exclusion list.
-    expect(isSyncableDir(".obsidian", normalizeScope({ excludedFolders: [".obsidian"] }))).toBe(
-      true,
-    );
+    expect(
+      isSyncableDir(
+        ".obsidian",
+        normalizeScope({ configDir: THE_CONFIG_DIR, excludedFolders: [".obsidian"] }),
+      ),
+    ).toBe(true);
   });
 
   it("keeps markdown outside the excluded folder untouched", () => {
@@ -523,6 +533,7 @@ describe("isSyncableDir", () => {
 describe("outOfScopeReason", () => {
   /** A device that syncs markdown only, with `private/` excluded and no config groups. */
   const scope = normalizeScope({
+    configDir: THE_CONFIG_DIR,
     fileTypes: { images: false, video: false, audio: false, pdf: false, otherTypes: false },
     excludedFolders: ["private"],
   });

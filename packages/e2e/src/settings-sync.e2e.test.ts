@@ -306,7 +306,7 @@ describe("settings sync e2e — the Obsidian config folder", () => {
       const files = GROUP_FILES[group];
       const paths = files.map((file) => file.path);
       // The table above is worth something only if the engine agrees on the owner.
-      const scope = normalizeScope({ settingsGroups: onlyGroups(group) });
+      const scope = normalizeScope({ configDir: ".obsidian", settingsGroups: onlyGroups(group) });
       for (const path of paths) expect(settingsGroupOf(path, scope)).toBe(group);
 
       const a = await newClient(vault.id, "device-a", { settingsGroups: onlyGroups(group) });

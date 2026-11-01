@@ -763,12 +763,13 @@ function engineOver(
 function scopeWith(...groups: SettingsGroup[]): SyncScope {
   const settingsGroups: Record<string, boolean> = {};
   for (const group of groups) settingsGroups[group] = true;
-  return normalizeScope({ settingsGroups, fileTypes: NO_FILE_TYPES });
+  return normalizeScope({ configDir: ".obsidian", settingsGroups, fileTypes: NO_FILE_TYPES });
 }
 
 /** Markdown-only, with the named vault folders excluded on this device. */
 function scopeWithExcluded(...folders: string[]): SyncScope {
   return normalizeScope({
+    configDir: ".obsidian",
     settingsGroups: NO_SETTINGS_GROUPS,
     fileTypes: NO_FILE_TYPES,
     excludedFolders: folders,
@@ -5743,7 +5744,7 @@ describe("sync activity", () => {
     const sender = await makeEngine(
       undefined,
       undefined,
-      normalizeScope({ settingsGroups: { corePlugins: true } }),
+      normalizeScope({ configDir: ".obsidian", settingsGroups: { corePlugins: true } }),
     );
     sender.adapter.files.set(".obsidian/core-plugins.json", encoder.encode("{}"));
     await sender.engine.initialSync();
@@ -5758,7 +5759,7 @@ describe("sync activity", () => {
       adapter: receiverAdapter,
       api: sender.api,
       encryptionKey: sender.key,
-      syncScope: normalizeScope({ settingsGroups: NO_SETTINGS_GROUPS }),
+      syncScope: normalizeScope({ configDir: ".obsidian", settingsGroups: NO_SETTINGS_GROUPS }),
       onSyncActivity: (event) => events.push(event),
     });
     await receiver.handleFilePushed(fileId, head!, "Mobile");

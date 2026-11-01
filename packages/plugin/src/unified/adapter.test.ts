@@ -36,7 +36,7 @@ type VaultCall = [method: string, ...args: unknown[]];
 function scopeWith(...groups: SettingsGroup[]): SyncScope {
   const settingsGroups: Record<string, boolean> = {};
   for (const group of groups) settingsGroups[group] = true;
-  return normalizeScope({ settingsGroups, fileTypes: NO_FILE_TYPES });
+  return normalizeScope({ configDir: ".obsidian", settingsGroups, fileTypes: NO_FILE_TYPES });
 }
 
 const MARKDOWN_ONLY: SyncScope = scopeWith();
