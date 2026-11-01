@@ -5,6 +5,7 @@ import {
   DropdownComponent,
   ItemView,
   openLeaves,
+  PluginSettingTab,
   requestUrl,
   resetStubState,
   setIcon,
@@ -479,5 +480,55 @@ describe("obsidian-stub — the leaves a view lives in", () => {
     const button = new ButtonComponent(container).setButtonText("替换");
     expect(container.children).toEqual([button.buttonEl]);
     expect(button.buttonEl.text).toBe("替换");
+  });
+});
+
+/** The rows a tab drew, in order; a heading is a row with a name and nothing else. */
+function drawnRows(tab: PluginSettingTab): Setting[] {
+  return tab.containerEl.attached.filter((entry): entry is Setting => entry instanceof Setting);
+}
+
+describe("declarative settings (Obsidian 1.13)", () => {
+  it("draws definitions, skips the invisible ones, and reads control values from settings", () => {
+    const plugin = { settings: { deviceName: "laptop", fileTypes: { markdown: true } } };
+    const tab = new PluginSettingTab({}, plugin);
+    tab.getSettingDefinitions = () => [
+      {
+        type: "group",
+        name: "Device",
+        items: [
+          { name: "Device name", control: { type: "text", key: "deviceName" } },
+          {
+            name: "Hidden row",
+            control: { type: "toggle", key: "fileTypes.markdown" },
+            visible: () => false,
+          },
+        ],
+      },
+      { name: "Markdown files", control: { type: "toggle", key: "fileTypes.markdown" } },
+    ];
+
+    tab.display();
+
+    expect(drawnRows(tab).map((row) => row.name)).toEqual([
+      "Device",
+      "Device name",
+      "Markdown files",
+    ]);
+    // The control's cell carries the value the tab would show, read through the plugin.
+    const nameRow = drawnRows(tab)[1];
+    expect(nameRow.controlEl.children[0].text).toBe("laptop");
+    const toggleRow = drawnRows(tab)[2];
+    expect(toggleRow.toggles[0].value).toBe(true);
+  });
+
+  it("writes a control's value back through the key's path", () => {
+    const plugin = { settings: { fileTypes: { markdown: true } } };
+    const tab = new PluginSettingTab({}, plugin);
+
+    tab.setControlValue("fileTypes.markdown", false);
+
+    expect(plugin.settings.fileTypes.markdown).toBe(false);
+    expect(tab.getControlValue("fileTypes.markdown")).toBe(false);
   });
 });

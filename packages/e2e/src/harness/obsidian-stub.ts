@@ -1113,6 +1113,111 @@ export class Plugin {
   registerDomEvent(): void {}
 }
 
+/** A control as `getSettingDefinitions()` describes it (Obsidian 1.13). */
+export interface SettingControlDefinition {
+  type:
+    | "toggle"
+    | "dropdown"
+    | "text"
+    | "textarea"
+    | "number"
+    | "slider"
+    | "color"
+    | "file"
+    | "folder";
+  /** The settings property the tab reads and writes through `get/setControlValue`. */
+  key: string;
+  defaultValue?: unknown;
+  options?: Record<string, string>;
+  placeholder?: string;
+}
+
+/**
+ * One item of `getSettingDefinitions()`, as much of it as a suite can observe.
+ *
+ * The real types are Obsidian's; this is the structural subset the stub renders, and it is
+ * deliberately *not* imported from `obsidian` — this file **is** the `obsidian` module under
+ * test, so importing from it would be a cycle.
+ */
+export interface SettingDefinitionItem {
+  name?: string;
+  desc?: string;
+  /** A `group`, `list` or `page` holds items under its own heading. */
+  type?: "group" | "list" | "page";
+  items?: SettingDefinitionItem[];
+  control?: SettingControlDefinition;
+  action?: (...args: unknown[]) => unknown;
+  render?: (setting: Setting, group: unknown) => void | (() => void);
+  visible?: boolean | (() => boolean);
+}
+
+/** Read a dotted path (`fileTypes.markdown`) out of a settings object. */
+function readSettingPath(settings: unknown, key: string): unknown {
+  let current: unknown = settings;
+  for (const part of key.split(".")) {
+    if (typeof current !== "object" || current === null) return undefined;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+}
+
+/** Write a dotted path into a settings object, creating the intermediate objects. */
+function writeSettingPath(settings: unknown, key: string, value: unknown): void {
+  const parts = key.split(".");
+  let current = settings as Record<string, unknown>;
+  for (const part of parts.slice(0, -1)) {
+    const next = current[part];
+    if (typeof next !== "object" || next === null) current[part] = {};
+    current = current[part] as Record<string, unknown>;
+  }
+  current[parts.at(-1)!] = value;
+}
+
+/** Whether an item's `visible` predicate says to draw it now. */
+function isVisible(item: SettingDefinitionItem): boolean {
+  if (item.visible === undefined) return true;
+  return typeof item.visible === "function" ? item.visible() : item.visible;
+}
+
+/** Draw one control of a definition row, recording its current value like the app does. */
+function renderControl(
+  tab: PluginSettingTab,
+  setting: Setting,
+  control: SettingControlDefinition,
+): void {
+  const value = tab.getControlValue(control.key) ?? control.defaultValue;
+  const cell = createFakeEl("div").addClass(`setting-control-${control.type}`);
+  cell.setAttribute("data-key", control.key);
+  cell.setText(value === undefined || value === null ? "" : String(value));
+  setting.controlEl.appendChild(cell);
+  if (control.type === "toggle") {
+    setting.toggles.push(new ToggleComponent(setting.controlEl).setValue(value === true));
+  }
+}
+
+/** Draw every definition the tab declares into `containerEl`. */
+function renderSettingDefinitions(tab: PluginSettingTab, containerEl: FakeEl): void {
+  const draw = (items: readonly SettingDefinitionItem[]): void => {
+    for (const item of items) {
+      if (!isVisible(item)) continue;
+      if (item.type === "group" || item.type === "list" || item.type === "page") {
+        if (item.name) new Setting(containerEl).setName(item.name).setHeading();
+        if (item.items) draw(item.items);
+        continue;
+      }
+      const setting = new Setting(containerEl);
+      if (item.name) setting.setName(item.name);
+      if (item.desc) setting.setDesc(item.desc);
+      if (item.render) {
+        item.render(setting, containerEl);
+        continue;
+      }
+      if (item.control) renderControl(tab, setting, item.control);
+    }
+  };
+  draw(tab.getSettingDefinitions());
+}
+
 /** Base settings tab. Mirrors Obsidian: a `containerEl` is created eagerly. */
 export class PluginSettingTab {
   containerEl = createFakeEl();
@@ -1122,7 +1227,32 @@ export class PluginSettingTab {
     public plugin: unknown,
   ) {}
 
-  display(): void {}
+  /** The tab's declarative definitions (Obsidian 1.13); a tab that has none returns `[]`. */
+  getSettingDefinitions(): SettingDefinitionItem[] {
+    return [];
+  }
+
+  /** A control's value, read the way the app reads it: out of the plugin's settings. */
+  getControlValue(key: string): unknown {
+    const settings = (this.plugin as { settings?: unknown } | null)?.settings;
+    return readSettingPath(settings, key);
+  }
+
+  /** Write a control's value back to the plugin's settings. */
+  setControlValue(key: string, value: unknown): void {
+    const settings = (this.plugin as { settings?: unknown } | null)?.settings;
+    if (settings) writeSettingPath(settings, key, value);
+  }
+
+  /**
+   * Draw the tab, the way the app does when it opens it.
+   *
+   * A tab that declares `getSettingDefinitions()` is drawn from them; a tab that overrides
+   * this method keeps its own renderer (which is what the old API did).
+   */
+  display(): void {
+    renderSettingDefinitions(this, this.containerEl);
+  }
 
   hide(): void {}
 }
