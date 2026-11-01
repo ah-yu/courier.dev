@@ -104,7 +104,7 @@ export class CourierSettingTab extends PluginSettingTab {
   /** The message under the current step's controls; survives a re-render. */
   private stageError: string | null = null;
   /** Set while a device-name keystroke is pending, so saving happens once. */
-  private deviceNameTimer: ReturnType<typeof setTimeout> | null = null;
+  private deviceNameTimer: number | null = null;
   private pendingDeviceName: string | null = null;
   /**
    * The connection row of the `ready` stage, kept so a host state change can update its
@@ -262,7 +262,7 @@ export class CourierSettingTab extends PluginSettingTab {
     submit.addEventListener("click", () => void signIn());
     for (const input of [serverInput, keyInput]) {
       input.addEventListener("keydown", (event) => {
-        if ((event as KeyboardEvent).key === "Enter") void signIn();
+        if (event.key === "Enter") void signIn();
       });
     }
 
@@ -728,7 +728,7 @@ export class CourierSettingTab extends PluginSettingTab {
       return lines.join(" · ");
     }
 
-    const fragment = document.createDocumentFragment();
+    const fragment = createFragment();
     const details = fragment.createDiv({ cls: "courier-account-details" });
     details.createDiv({ cls: "courier-account-detail", text: serverLine });
 
@@ -916,8 +916,8 @@ export class CourierSettingTab extends PluginSettingTab {
   /** Debounced device-name save — one write per pause, not per keystroke. */
   private queueDeviceName(value: string): void {
     this.pendingDeviceName = value;
-    if (this.deviceNameTimer !== null) clearTimeout(this.deviceNameTimer);
-    this.deviceNameTimer = setTimeout(() => {
+    if (this.deviceNameTimer !== null) window.clearTimeout(this.deviceNameTimer);
+    this.deviceNameTimer = window.setTimeout(() => {
       this.deviceNameTimer = null;
       void this.commitDeviceName();
     }, DEVICE_NAME_DEBOUNCE_MS);
@@ -926,7 +926,7 @@ export class CourierSettingTab extends PluginSettingTab {
   /** Save a pending device name now (blur, or the tab closing). */
   private flushDeviceName(): void {
     if (this.deviceNameTimer !== null) {
-      clearTimeout(this.deviceNameTimer);
+      window.clearTimeout(this.deviceNameTimer);
       this.deviceNameTimer = null;
     }
     void this.commitDeviceName();

@@ -105,7 +105,7 @@ export function buildExcludedFolderTree(paths: readonly string[]): ExcludedFolde
     if (existing) return existing;
     const node: ExcludedFolderNode = {
       path,
-      name: segments[segments.length - 1]!,
+      name: segments[segments.length - 1],
       depth: segments.length - 1,
       children: [],
     };

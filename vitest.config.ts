@@ -102,6 +102,8 @@ export default defineConfig({
         root: "packages/plugin",
         test: {
           exclude,
+          // The plugin creates its timers on `window`; Bun has none. See the file.
+          setupFiles: ["../../scripts/vitest-window.ts"],
         },
         resolve: {
           alias: {

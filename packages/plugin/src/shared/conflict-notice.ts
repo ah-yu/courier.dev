@@ -40,12 +40,12 @@ export function conflictNoticeText(events: ConflictResolvedEvent[]): string {
   // The parked copies keep the original extension (`photo.conflict.png`), so the notice
   // names the files it actually wrote instead of promising a Markdown suffix.
   if (parked.length === 1) {
-    return t("conflict.notice.parkedOne", { head, path: parked[0]!.conflictPath ?? "" });
+    return t("conflict.notice.parkedOne", { head, path: parked[0].conflictPath ?? "" });
   }
   return t("conflict.notice.parkedMany", {
     head,
     count: parked.length,
-    path: parked[0]!.conflictPath ?? "",
+    path: parked[0].conflictPath ?? "",
   });
 }
 

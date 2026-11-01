@@ -13,14 +13,14 @@ export function withTimeout<T>(
   message = `Timed out after ${timeoutMs} ms`,
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    const timer = window.setTimeout(() => reject(new Error(message)), timeoutMs);
     promise.then(
       (value) => {
-        clearTimeout(timer);
+        window.clearTimeout(timer);
         resolve(value);
       },
       (error: unknown) => {
-        clearTimeout(timer);
+        window.clearTimeout(timer);
         reject(error);
       },
     );

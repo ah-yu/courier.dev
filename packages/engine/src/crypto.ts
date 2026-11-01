@@ -236,7 +236,10 @@ export async function sha256Hex(bytes: Uint8Array): Promise<string> {
   if (typeof Bun !== "undefined") {
     return new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
   }
-  const digest = await crypto.subtle.digest("SHA-256", bytes as unknown as BufferSource);
+  // `BufferSource` narrowed to an `ArrayBuffer`-backed view in TypeScript 6, and a
+  // `Uint8Array` is generic over its buffer; the copy is what makes the type true, and it
+  // is the renderer-only fallback (Bun hashes in place above).
+  const digest = await crypto.subtle.digest("SHA-256", new Uint8Array(bytes));
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
@@ -323,29 +326,29 @@ export class Sha256 {
     const w = this.words;
     for (let i = 0; i < 16; i++) {
       const j = offset + i * 4;
-      w[i] = ((data[j]! << 24) | (data[j + 1]! << 16) | (data[j + 2]! << 8) | data[j + 3]!) >>> 0;
+      w[i] = ((data[j] << 24) | (data[j + 1] << 16) | (data[j + 2] << 8) | data[j + 3]) >>> 0;
     }
     for (let i = 16; i < 64; i++) {
-      const x = w[i - 15]!;
-      const y = w[i - 2]!;
+      const x = w[i - 15];
+      const y = w[i - 2];
       const s0 = ((x >>> 7) | (x << 25)) ^ ((x >>> 18) | (x << 14)) ^ (x >>> 3);
       const s1 = ((y >>> 17) | (y << 15)) ^ ((y >>> 19) | (y << 13)) ^ (y >>> 10);
-      w[i] = (w[i - 16]! + s0 + w[i - 7]! + s1) >>> 0;
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
     }
 
-    let a = this.state[0]!;
-    let b = this.state[1]!;
-    let c = this.state[2]!;
-    let d = this.state[3]!;
-    let e = this.state[4]!;
-    let f = this.state[5]!;
-    let g = this.state[6]!;
-    let h = this.state[7]!;
+    let a = this.state[0];
+    let b = this.state[1];
+    let c = this.state[2];
+    let d = this.state[3];
+    let e = this.state[4];
+    let f = this.state[5];
+    let g = this.state[6];
+    let h = this.state[7];
 
     for (let i = 0; i < 64; i++) {
       const S1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
       const ch = (e & f) ^ (~e & g);
-      const t1 = (h + S1 + ch + SHA256_K[i]! + w[i]!) >>> 0;
+      const t1 = (h + S1 + ch + SHA256_K[i] + w[i]) >>> 0;
       const S0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
       const maj = (a & b) ^ (a & c) ^ (b & c);
       const t2 = (S0 + maj) >>> 0;
@@ -359,14 +362,14 @@ export class Sha256 {
       a = (t1 + t2) >>> 0;
     }
 
-    this.state[0] = (this.state[0]! + a) >>> 0;
-    this.state[1] = (this.state[1]! + b) >>> 0;
-    this.state[2] = (this.state[2]! + c) >>> 0;
-    this.state[3] = (this.state[3]! + d) >>> 0;
-    this.state[4] = (this.state[4]! + e) >>> 0;
-    this.state[5] = (this.state[5]! + f) >>> 0;
-    this.state[6] = (this.state[6]! + g) >>> 0;
-    this.state[7] = (this.state[7]! + h) >>> 0;
+    this.state[0] = (this.state[0] + a) >>> 0;
+    this.state[1] = (this.state[1] + b) >>> 0;
+    this.state[2] = (this.state[2] + c) >>> 0;
+    this.state[3] = (this.state[3] + d) >>> 0;
+    this.state[4] = (this.state[4] + e) >>> 0;
+    this.state[5] = (this.state[5] + f) >>> 0;
+    this.state[6] = (this.state[6] + g) >>> 0;
+    this.state[7] = (this.state[7] + h) >>> 0;
   }
 }
 

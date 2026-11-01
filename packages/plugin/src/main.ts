@@ -344,7 +344,7 @@ export default class CourierPlugin extends Plugin {
     await this.loadSettings();
 
     this.settingTab = new CourierSettingTab(this.app, this);
-    this.addSettingTab(this.settingTab!);
+    this.addSettingTab(this.settingTab);
 
     // The always-visible state, bottom-right. Created before the auto-unlock below so the
     // first state a user sees is already the real one (bound but not yet syncing).

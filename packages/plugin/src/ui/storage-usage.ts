@@ -19,7 +19,7 @@ export function storageUsageTitle(
   const usage = storageMenuValue(account.usedBytes, account.storageBytesLimit);
   if (typeof document === "undefined") return usage.text;
 
-  const fragment = document.createDocumentFragment();
+  const fragment = createFragment();
   const row = fragment.createDiv({ cls: className });
   // Only a finite quota has a track to fill. `percent` is null for an unlimited account
   // and for a failed read, both of which still show their text in the wrapper.

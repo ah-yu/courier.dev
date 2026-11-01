@@ -175,8 +175,8 @@ export class EngineHost {
    * generation is dropped, exactly like the engine state writes `SyncHost` already drops.
    */
   private generation = 0;
-  private leaseRetry: ReturnType<typeof setTimeout> | null = null;
-  private leaseRenewal: ReturnType<typeof setInterval> | null = null;
+  private leaseRetry: number | null = null;
+  private leaseRenewal: number | null = null;
   private leaseRelease: Promise<void> | null = null;
   private leaseWatch: (() => void) | null = null;
   private waitingForLease = false;
@@ -257,7 +257,9 @@ export class EngineHost {
     if (this.leaseRelease) {
       const drained = await Promise.race([
         this.leaseRelease.then(() => true),
-        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), LEASE_DRAIN_TIMEOUT_MS)),
+        new Promise<boolean>((resolve) =>
+          window.setTimeout(() => resolve(false), LEASE_DRAIN_TIMEOUT_MS),
+        ),
       ]);
       if (generation !== this.generation) return;
       if (!drained) {
@@ -392,7 +394,7 @@ export class EngineHost {
   /** Retry the lease shortly; this is the fallback when the directory watcher is unavailable. */
   private scheduleLeaseRetry(generation: number): void {
     if (this.leaseRetry) return;
-    this.leaseRetry = setTimeout(() => {
+    this.leaseRetry = window.setTimeout(() => {
       this.leaseRetry = null;
       if (generation !== this.generation) return;
       void this.start();
@@ -404,7 +406,7 @@ export class EngineHost {
     if (this.leaseWatch) return;
     this.leaseWatch = watchLeaseDirectory(this.opts.vault.adapter, () => {
       if (generation !== this.generation) return;
-      if (this.leaseRetry) clearTimeout(this.leaseRetry);
+      if (this.leaseRetry) window.clearTimeout(this.leaseRetry);
       this.leaseRetry = null;
       this.closeLeaseWatch();
       void this.start();
@@ -418,7 +420,7 @@ export class EngineHost {
 
   private startLeaseRenewal(generation: number): void {
     if (!this.opts.lease || this.leaseRenewal) return;
-    this.leaseRenewal = setInterval(() => {
+    this.leaseRenewal = window.setInterval(() => {
       void this.renewLease(generation);
     }, LEASE_RENEW_MS);
   }
@@ -431,7 +433,7 @@ export class EngineHost {
     // engine work, then wait for the retry loop.
     this.host?.stop();
     this.host = null;
-    if (this.leaseRenewal) clearInterval(this.leaseRenewal);
+    if (this.leaseRenewal) window.clearInterval(this.leaseRenewal);
     this.leaseRenewal = null;
     this.setLeaseWaiting(true);
     this.startLeaseWatch(generation);
@@ -447,7 +449,7 @@ export class EngineHost {
     if (!this.leaseRelease) return true;
     return Promise.race([
       this.leaseRelease.then(() => true),
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+      new Promise<boolean>((resolve) => window.setTimeout(() => resolve(false), timeoutMs)),
     ]);
   }
 
@@ -467,10 +469,10 @@ export class EngineHost {
   private teardown(): void {
     // Invalidate the activity callback of the host being stopped before dropping it.
     this.generation += 1;
-    if (this.leaseRetry) clearTimeout(this.leaseRetry);
+    if (this.leaseRetry) window.clearTimeout(this.leaseRetry);
     this.leaseRetry = null;
     this.closeLeaseWatch();
-    if (this.leaseRenewal) clearInterval(this.leaseRenewal);
+    if (this.leaseRenewal) window.clearInterval(this.leaseRenewal);
     this.leaseRenewal = null;
     const stoppedHost = this.host;
     this.host = null;
@@ -480,14 +482,14 @@ export class EngineHost {
       // Keep the lease alive until an in-flight pass has drained. Releasing at `stop()`
       // would let the CLI start while the old engine is still writing. A drain already
       // in progress owns the release; do not replace its promise on a later stop.
-      const keepAlive = setInterval(() => {
+      const keepAlive = window.setInterval(() => {
         void lease.renew().catch(() => {});
       }, LEASE_RENEW_MS);
       this.leaseRelease = (async () => {
         try {
           await stoppedHost?.whenIdle();
         } finally {
-          clearInterval(keepAlive);
+          window.clearInterval(keepAlive);
           await lease.release().catch(() => {});
         }
       })();

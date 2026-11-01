@@ -86,7 +86,7 @@ export class ConflictDiffView extends ItemView {
   private target: ReplaceTarget | null = null;
   private mode: ConflictDiffMode = "split";
   private readonly refs: EventRef[] = [];
-  private refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private refreshTimer: number | null = null;
   private sides: { original: LoadedText; copy: LoadedText } | null = null;
   private rowsEl: HTMLElement | null = null;
   /**
@@ -178,7 +178,7 @@ export class ConflictDiffView extends ItemView {
     // late answer for the closed state must not paint over the new one.
     this.generation++;
     if (this.refreshTimer !== null) {
-      clearTimeout(this.refreshTimer);
+      window.clearTimeout(this.refreshTimer);
       this.refreshTimer = null;
     }
     this.unwatch();
@@ -244,8 +244,8 @@ export class ConflictDiffView extends ItemView {
   }
 
   private scheduleRefresh(): void {
-    if (this.refreshTimer !== null) clearTimeout(this.refreshTimer);
-    this.refreshTimer = setTimeout(() => {
+    if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
+    this.refreshTimer = window.setTimeout(() => {
       this.refreshTimer = null;
       void this.refresh();
     }, CONFLICT_DIFF_REFRESH_MS);

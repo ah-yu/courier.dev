@@ -96,7 +96,7 @@ export class RestorePathModal extends PromiseModal<{ targetPath: string }> {
         this.errorEl?.setText("");
       });
       text.inputEl.addEventListener("keydown", (event) => {
-        if ((event as KeyboardEvent).key === "Enter") void this.confirm();
+        if (event.key === "Enter") void this.confirm();
       });
       // The only field in the dialog: put the cursor there with the suggestion
       // selected, so typing replaces it. The e2e harness's fake input has no

@@ -282,7 +282,7 @@ export class RecycleBinModal extends Modal {
         void this.viewContent(file, plainPath);
       });
       info.addEventListener("keydown", (event) => {
-        const keyboard = event as KeyboardEvent;
+        const keyboard = event;
         if (keyboard.key !== "Enter" && keyboard.key !== " ") return;
         keyboard.preventDefault();
         void this.viewContent(file, plainPath);

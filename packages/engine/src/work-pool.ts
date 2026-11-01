@@ -52,7 +52,7 @@ export class WorkPool {
     return new Promise<T>((resolve, reject) => {
       this.waiting.push({
         weight,
-        run: task as () => Promise<unknown>,
+        run: task,
         resolve: (value) => resolve(value as T),
         reject,
       });

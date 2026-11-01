@@ -12,7 +12,7 @@ export function watchLeaseDirectory(adapter: DataAdapter, onChange: () => void):
   if (typeof window === "undefined") return () => {};
   const require =
     (window as unknown as { require?: (id: string) => unknown }).require ??
-    (globalThis as unknown as { require?: (id: string) => unknown }).require;
+    (window as unknown as { require?: (id: string) => unknown }).require;
   if (!require) return () => {};
   // Only the desktop `FileSystemAdapter` has a base path; the mobile adapter has none.
   const getBasePath = (adapter as { getBasePath?: () => string }).getBasePath;
