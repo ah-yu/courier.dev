@@ -139,13 +139,12 @@ function writeRootManifest(): void {
     },
     // The whole toolchain this tree needs: `tsc` for the plugin's type-only build, and the
     // Bun types the plugin's tsconfig asks for. Everything else is a runtime dependency.
+    //
+    // No `overrides` block, though the repository has one: it is there because the workspace
+    // resolves a second typescript for the review linter, and this tree ships no linter and
+    // resolves a single compiler of its own. `bun install --lockfile-only` below proves it.
     devDependencies: {
       "@types/bun": pin("@types/bun"),
-      typescript: pin("typescript"),
-    },
-    // The same pin the repository uses: typescript-eslint (which the local review gate runs)
-    // refuses TypeScript 7, and a mirror that resolved its own compiler could drift from it.
-    overrides: {
       typescript: pin("typescript"),
     },
   };
