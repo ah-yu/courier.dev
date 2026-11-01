@@ -1,6 +1,6 @@
 # Courier command-line tool — installer for Windows.
 #
-#   irm https://github.com/ah-yu/courier/raw/main/install.ps1 | iex
+#   irm https://github.com/ah-yu/courier.dev/raw/main/install.ps1 | iex
 #
 # What it does: downloads the windows build, checks it against the release manifest, installs it as
 # %LOCALAPPDATA%\Courier\bin\courier-cli.exe, and adds that folder to your user PATH once. Running it
@@ -12,7 +12,7 @@
 #   COURIER_CLI_NO_PATH      set to 1 to skip the PATH change
 $ErrorActionPreference = "Stop"
 
-$base = if ($env:COURIER_CLI_RELEASE_URL) { $env:COURIER_CLI_RELEASE_URL } else { "https://github.com/ah-yu/courier/releases/latest/download" }
+$base = if ($env:COURIER_CLI_RELEASE_URL) { $env:COURIER_CLI_RELEASE_URL } else { "https://github.com/ah-yu/courier.dev/releases/latest/download" }
 $binDir = if ($env:COURIER_CLI_BIN_DIR) { $env:COURIER_CLI_BIN_DIR } else { Join-Path $env:LOCALAPPDATA "Courier\bin" }
 $asset = "courier-cli-win-x64.exe"
 $target = Join-Path $binDir "courier-cli.exe"

@@ -372,7 +372,7 @@ test("mirror creates the release and verifies every uploaded asset", async () =>
     targetSha: "a".repeat(40),
     assetsDir: dir,
     body: "Release notes",
-    sourceUrl: "https://github.com/ah-yu/courier/releases/tag/v0.1.0",
+    sourceUrl: "https://github.com/ah-yu/courier.dev/releases/tag/v0.1.0",
     token: "test-token",
     deps: { fetch: fake.fetchImpl, ...NOOP_DEPS },
   });

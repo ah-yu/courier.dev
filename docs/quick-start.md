@@ -15,7 +15,7 @@ This takes about ten minutes. You need:
 ## 1. Run a server
 
 Download the build for your machine from the
-[latest release](https://github.com/ah-yu/courier/releases/latest): `courier-server-linux-x64`,
+[latest release](https://github.com/ah-yu/courier.dev/releases/latest): `courier-server-linux-x64`,
 `courier-server-darwin-arm64` or `courier-server-win-x64.exe`. Then create the database and start
 the service:
 

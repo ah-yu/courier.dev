@@ -207,9 +207,63 @@ jobs:
             release-assets/styles.css
             release-assets/courier-plugin-*.zip
 
+  # The plugin is published from a generated repository: the community directory reviews
+  # a plugin as the whole repository it was submitted from, and this one also holds the
+  # server, the CLI and their suites. See `docs/release.md#the-publishing-mirror`.
+  #
+  # The assets stay in *this* release as well: the CNB mirror copies them, and a GitHub
+  # download is not always reachable from where the users are.
+  mirror:
+    name: Publish the plugin mirror
+    needs: [preflight, server, cli, plugin]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+
+      - name: Generate the mirror tree
+        run: bun scripts/mirror-plugin.ts --out "$RUNNER_TEMP/mirror"
+
+      - name: Push it to ah-yu/courier
+        env:
+          MIRROR_TOKEN: ${{ secrets.MIRROR_TOKEN }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # A token with `contents: write` on the mirror and the `workflow` scope: the
+          # generated commit carries `.github/workflows/release.yml`, and a token without
+          # it is refused outright. `GITHUB_TOKEN` cannot be used here at all — it has no
+          # access to another repository, and a push it makes does not start a workflow.
+          if [ -z "${MIRROR_TOKEN:-}" ]; then
+            echo "::error::MIRROR_TOKEN is not configured (see docs/release.md)"
+            exit 1
+          fi
+          git clone --depth 1 \
+            "https://x-access-token:${MIRROR_TOKEN}@github.com/ah-yu/courier.git" mirror-repo
+          rsync -a --delete --exclude .git "$RUNNER_TEMP/mirror/" mirror-repo/
+          cd mirror-repo
+          git config user.name "courier mirror"
+          git config user.email "noreply@courier.dev"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "the mirror already holds this tree"
+          else
+            git commit -m "Plugin ${VERSION} from courier.dev@${SOURCE_SHA:0:7}"
+          fi
+          git push origin HEAD:main
+          # The tag push is what starts the mirror's own release workflow. It is pushed
+          # after `main`, so it names the commit that was just published.
+          if ! git rev-parse -q --verify "refs/tags/${VERSION}" > /dev/null; then
+            git tag "${VERSION}"
+          fi
+          git push origin "${VERSION}"
+
   release:
     name: Publish GitHub release
-    needs: [preflight, server, cli, plugin]
+    needs: [preflight, server, cli, plugin, mirror]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

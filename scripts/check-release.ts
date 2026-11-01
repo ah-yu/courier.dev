@@ -2,14 +2,15 @@
 /**
  * Guard the release version before CI and before anything is built.
  *
- * One GitHub release ships `@courier/server`, `@courier/cli` and
- * `@courier/plugin` together under one `X.Y.Z` tag (a leading `v` is accepted and
- * ignored), so the version has to agree everywhere it is written: the three package
- * files, plus the repository-root `manifest.json` that mirrors the plugin manifest for
- * the Obsidian community directory (the directory reads the manifest at the HEAD of
- * the default branch). Without an argument the script only checks that they agree with
- * each other; with a tag it also checks they equal that tag. This is the release
- * preflight and a plain CI step, so a version bump cannot land on one file alone.
+ * One `X.Y.Z` tag drives the release, and it carries the bare version — no leading `v`.
+ * That tag publishes the server and CLI binaries and the plugin assets here, and the
+ * plugin alone from its publishing mirror (`scripts/mirror-plugin.ts`), so the version
+ * has to agree everywhere it is written: the three package files, plus the
+ * repository-root `manifest.json` that mirrors the plugin manifest for the Obsidian
+ * community directory (the directory reads the manifest at the HEAD of the default
+ * branch). Without an argument the script only checks that they agree with each other;
+ * with a tag it also checks they equal that tag. This is the release preflight and a
+ * plain CI step, so a version bump cannot land on one file alone.
  *
  * The root mirror is also held to the plugin manifest byte for byte (line endings
  * aside), and the plugin manifest is checked against the fields the community

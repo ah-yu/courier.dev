@@ -35,7 +35,7 @@ Four steps; the [quick start guide](docs/quick-start.md) has the exact commands 
 will see in Obsidian.
 
 1. **Run a server.** Download the build for your machine from the
-   [latest release](https://github.com/ah-yu/courier/releases/latest), run
+   [latest release](https://github.com/ah-yu/courier.dev/releases/latest), run
    `./courier-server-linux-x64 migrate`, then `./courier-server-linux-x64 start`.
 2. **Create a user key.** `./courier-server-linux-x64 apikey create admin` prints a host key; use
    it once to create your account, and copy the `ck_...` user key it returns.

@@ -118,11 +118,14 @@ workflow is safe: a draft release is completed, and an existing release has its 
 
 ### The Obsidian community directory
 
-The plugin is published from this repository, so the directory's rules are release rules:
+The plugin is published from `ah-yu/courier`, a repository **generated** by
+[`scripts/mirror-plugin.ts`](../scripts/mirror-plugin.ts) — see
+[the publishing mirror](#the-publishing-mirror) below. The directory's rules therefore apply to that
+tree, and this repository's release is what writes it:
 
-- **The files it reads must be at the repository root**: `README.md` (the public page whose excerpt
-  the listing shows), `LICENSE`, and `manifest.json` — the last one is a mirror, with the canonical
-  copy remaining at `packages/plugin/manifest.json`.
+- **The files it reads must be at that repository's root**: `README.md` (the public page whose excerpt
+  the listing shows), `LICENSE`, and `manifest.json` — all three written by the generator, the last
+  from `packages/plugin/manifest.json`, which stays canonical here.
 - **Versions are `x.y.z` only, and the release tag is the version itself.** The directory does not
   accept the snapshot form (`0.0.0-dev.YYYYMMDD.<shortsha>`) or a prerelease tag such as
   `0.1.0-rc.1`, and the GitHub release tag must equal the manifest `version` exactly. That is why
@@ -165,6 +168,38 @@ Three things must stay in step with the directory: the ignore list and `DIRECTOR
 the config, and the `eslint-plugin-obsidianmd` version. The mirror cannot judge the directory's
 non-ESLint checks (manifest, release assets, build verification) — `scripts/check-release.ts` owns
 the manifest half, and the release workflow builds the assets.
+
+Because that scan covers the whole repository and cannot be configured, the plugin is published from
+a repository that holds only the plugin — [the publishing mirror](#the-publishing-mirror).
+
+### The publishing mirror
+
+`ah-yu/courier` is the repository the community directory points at. It is **generated**, not
+developed in: `scripts/mirror-plugin.ts` writes it from `packages/plugin`, `packages/engine` and
+`packages/shared`, and every release replaces it wholesale.
+
+- **What it holds**: the three packages with their tests and `__mocks__` removed (the mirror runs no
+  tests, and their `@courier/testing` imports name a workspace package that is not there), the
+  plugin's `scripts/build.ts` and nothing else from `scripts/`, a generated root `package.json` and
+  `bun.lock`, `manifest.json` at the root, the generated `README.md`, `LICENSE`, `.bun-version`,
+  `tsconfig.base.json`, and one workflow: `release.yml`.
+- **What it deliberately lacks**: a linter, a test runner, the installers, the docs. The review gate
+  runs here over the same three packages (`bun run lint:review`), and the mirror's own scan is
+  Obsidian's — duplicating either in the generated tree would be a second place to keep in step.
+- **When it is written**: on a tag, before the product release, never on a push to `main`. The
+  directory reads `manifest.json` from the default branch, so the released version must be the one on
+  `main`; a generated commit carries it, and the tag points at that commit so build verification
+  rebuilds the bytes that were released.
+- **How the release triggers it**: the `mirror` job pushes `main` and then the tag to `ah-yu/courier`
+  with a personal access token. The tag push is what starts the mirror's `release.yml` — `GITHUB_TOKEN`
+  can neither write to another repository nor trigger a workflow with a push, so the token needs
+  `contents: write` on the mirror and the `workflow` scope (the generated commit contains
+  `.github/workflows/release.yml`). The job runs **before** the product release, so a mirror failure
+  blocks it rather than publishing binaries for a plugin nobody can install.
+- **Why it builds its own assets**: the mirror's workflow runs `bun install --frozen-lockfile` and
+  `bun run build`, and attests what it produced. That is what makes the directory's build
+  verification and artifact attestation checks describe this project rather than a copy of a build
+  that happened somewhere else.
 
 ### Manual smoke check (L4)
 
@@ -227,7 +262,7 @@ looks for the server update manifest beside the server binary. One GitHub releas
 under the same name, so the server manifest is `courier-server-manifest.json`. See
 [`docs/cli.md`](cli.md#information-about-the-server-itself) for the contract.
 
-The release address is built in: `https://github.com/ah-yu/courier/releases/latest/download`. An
+The release address is built in: `https://github.com/ah-yu/courier.dev/releases/latest/download`. An
 installer appends `/courier-server-manifest.json` itself. A deployment's address field and
 `COURIER_SERVER_RELEASE_URL` / `COURIER_CLI_RELEASE_URL` override it for a mirror or a pinned
 prerelease; the CLI install has no address field, so it always uses the built-in address (or that

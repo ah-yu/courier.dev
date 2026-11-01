@@ -1,7 +1,7 @@
 #!/bin/sh
 # Courier command-line tool — installer for Linux and macOS.
 #
-#   curl -fsSL https://github.com/ah-yu/courier/raw/main/install.sh | sh
+#   curl -fsSL https://github.com/ah-yu/courier.dev/raw/main/install.sh | sh
 #
 # What it does: picks the build for this machine, downloads the release, checks it against the
 # release manifest, and puts `courier-cli` in ~/.local/bin. Running it again is safe: it replaces
@@ -12,7 +12,7 @@
 #   COURIER_CLI_BIN_DIR      install somewhere other than ~/.local/bin
 set -eu
 
-BASE=${COURIER_CLI_RELEASE_URL:-https://github.com/ah-yu/courier/releases/latest/download}
+BASE=${COURIER_CLI_RELEASE_URL:-https://github.com/ah-yu/courier.dev/releases/latest/download}
 BIN_DIR=${COURIER_CLI_BIN_DIR:-$HOME/.local/bin}
 
 say() { printf '%s\n' "$*"; }

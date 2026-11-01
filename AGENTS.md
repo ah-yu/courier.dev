@@ -50,11 +50,14 @@ Bun workspace for the sync solution.
 | `@courier/build`   | Release-binary compile (dev)    | TypeScript; `bun build --compile`; devDependency of the CLI/server  |
 | `@courier/testing` | Test helpers shared by packages | TypeScript interfaces exported from `src/`; no build                |
 
-The release workflow publishes the server binaries, the CLI binaries and the Obsidian plugin from
-this repository (see `docs/release.md`). The repository root also carries the three files the
-Obsidian community directory reads — `manifest.json` (a verbatim mirror of
-`packages/plugin/manifest.json`), `README.md` and `LICENSE`; `scripts/check-release.ts` fails when
-the mirror and the plugin manifest differ.
+The release workflow publishes the server binaries and the CLI binaries from this repository, and the
+Obsidian plugin by writing its **publishing mirror** (see `docs/release.md`). `ah-yu/courier` — the
+repository the community directory points at — is a generated artifact: `scripts/mirror-plugin.ts`
+writes it from `packages/plugin`, `packages/engine` and `packages/shared` on every tag, so the scan
+the directory runs sees the plugin's own source instead of this repository's server and CLI. The root
+here still carries `manifest.json` (a verbatim mirror of `packages/plugin/manifest.json`),
+`README.md` and `LICENSE` as that generation's input; `scripts/check-release.ts` fails when the two
+manifests differ.
 
 **Truth, by subject.** This table is the routing rule; `docs/README.md` registers every document
 and its status.
