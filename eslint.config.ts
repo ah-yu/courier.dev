@@ -155,6 +155,12 @@ export default defineConfig([
     },
   },
   {
+    // `no-undef` knows only the globals a config names, and this code runs under Bun as
+    // well as in Obsidian's renderer: `crypto.ts` reads `Bun` behind a `typeof` guard,
+    // which is exactly what declaring it here says.
+    languageOptions: { globals: { Bun: "readonly" } },
+  },
+  {
     // `DataAdapter.appendBinary` arrived in Obsidian 1.12.3; this file feature-detects
     // it and falls back to one write, so the rule cannot see the guard. Keep the rule
     // an error everywhere else.
