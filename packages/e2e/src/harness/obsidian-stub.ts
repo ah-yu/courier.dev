@@ -1224,6 +1224,11 @@ function renderSettingDefinitions(tab: PluginSettingTab, containerEl: FakeEl): v
         continue;
       }
       const setting = new Setting(containerEl);
+      // The app puts the row it created into the list; the stub's `Setting` keeps its own
+      // element aside on purpose (a row's text would otherwise be counted twice by the
+      // page-level assertions), so the definitions renderer attaches it here, where a tab
+      // that draws into its row's element — the sign-in form — is what the test sees.
+      containerEl.appendChild(setting.settingEl);
       if (item.name) setting.setName(item.name);
       if (item.desc) setting.setDesc(item.desc);
       if (item.render) {

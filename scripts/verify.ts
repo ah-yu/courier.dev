@@ -6,7 +6,7 @@
  * `docs` (the agent contract stays within its size cap and the docs index is
  * complete) -> `agent-safety` (the workspace-scoped delete helper's refusals) ->
  * `migrations` (the generated chain matches `drizzle/`) -> `lint` (oxlint) ->
- * `review` (the community directory's scanner, mirrored by `eslint.config.mjs`) ->
+ * `review` (the community directory's scanner, mirrored by `eslint.config.ts`) ->
  * `typecheck` (tsc --noEmit in every package) -> `test` (Vitest on Bun, every
  * project in `vitest.config.ts`).
  * Every selected gate always runs — an incomplete picture costs more than the
@@ -83,11 +83,13 @@ const GATES = [
   },
   { name: "lint", command: "bun", args: ["run", "lint"], default: true },
   {
-    // The community directory reviews the whole repository, not only the plugin, so an
-    // error in another package can fail the plugin's review. `eslint.config.mjs`
-    // reproduces that scan (its rule set, its ignore list), and only the findings the
-    // directory calls errors fail it. Cheap (seconds) and not a second style gate:
-    // `lint` still owns this repository's own style.
+    // The community directory reviews the repository the plugin is published from: a
+    // generated mirror of `packages/plugin`, `packages/engine` and `packages/shared`, so
+    // an error anywhere in that tree (not only the plugin) can fail the plugin's review.
+    // `eslint.config.ts` reproduces that scan over the same three packages (its rule set,
+    // its ignore list), and only the findings the directory calls errors fail it. Cheap
+    // (seconds) and not a second style gate: `lint` still owns this repository's own
+    // style.
     name: "review",
     command: "bun",
     args: ["run", "lint:review"],

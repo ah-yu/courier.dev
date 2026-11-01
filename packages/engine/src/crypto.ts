@@ -236,10 +236,12 @@ export async function sha256Hex(bytes: Uint8Array): Promise<string> {
   if (typeof Bun !== "undefined") {
     return new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
   }
-  // `BufferSource` narrowed to an `ArrayBuffer`-backed view in TypeScript 6, and a
-  // `Uint8Array` is generic over its buffer; the copy is what makes the type true, and it
-  // is the renderer-only fallback (Bun hashes in place above).
-  const digest = await crypto.subtle.digest("SHA-256", new Uint8Array(bytes));
+  // `BufferSource` narrowed to an `ArrayBuffer`-backed view in TypeScript 6, while a
+  // `Uint8Array` is generic over any buffer; WebCrypto takes the view as it is (offset,
+  // byte length and a shared buffer included), so the assertion describes the call instead
+  // of copying the bytes — a copied 200 MiB preview would be a second allocation on top of
+  // the buffer the caller already holds. Bun hashes in place above.
+  const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 

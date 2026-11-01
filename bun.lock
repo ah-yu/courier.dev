@@ -53,7 +53,7 @@
       "dependencies": {
         "@courier/engine": "workspace:*",
         "@courier/shared": "workspace:*",
-        "obsidian": "^1.10.13",
+        "obsidian": "^1.13.0",
       },
       "devDependencies": {
         "@courier/testing": "workspace:*",

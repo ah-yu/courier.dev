@@ -23,6 +23,13 @@ import { storageUsageTitle } from "./storage-usage";
 /** How long the device-name field waits after the last keystroke before saving. */
 const DEVICE_NAME_DEBOUNCE_MS = 600;
 
+/**
+ * `visible` for an item that belongs to the step being rendered: the step switch already
+ * selected it, so a second predicate would only repeat that. Module scope because the
+ * page re-renders on every state change and the predicate captures nothing.
+ */
+const alwaysVisible = (): boolean => true;
+
 /** The catalog key of each file-type switch's label and description. */
 const FILE_TYPE_LABEL_KEYS: Record<FileTypeGroup, PluginMessageKey> = {
   images: "settings.fileType.images.label",
@@ -145,19 +152,29 @@ export class CourierSettingTab extends PluginSettingTab {
    * What stays imperative is what a definition cannot describe: the sign-in form (a form,
    * not a row of settings), the step cards, and the rows whose wording is computed at render
    * time. Those are `render` items and draw into the row they are given.
+   *
+   * **Only the current step is returned.** The framework keys an item by its name, and two
+   * steps can legitimately carry the same one (both the locked and the unverified step say
+   * `已绑定「…」`); returning every step and hiding the others by `visible` makes the app
+   * report duplicate keys and render the page inconsistently. The step is a property of the
+   * render, so the switch happens here — `refresh()` re-asks, which is what `update()` is for.
    */
   override getSettingDefinitions(): SettingDefinitionItem[] {
     // A full render replaces every row; the old connection row must not stay reachable by a
     // state change that arrives before the new one exists.
     this.connectionRow = null;
-    const at = (stage: SettingsStage) => () => this.stage() === stage;
-    return [
-      ...this.loginDefinitions(at("login")),
-      ...this.chooseDefinitions(at("choose")),
-      ...this.lockedDefinitions(at("locked")),
-      ...this.unverifiedDefinitions(at("unverified")),
-      ...this.readyDefinitions(at("ready")),
-    ];
+    switch (this.stage()) {
+      case "login":
+        return this.loginDefinitions(alwaysVisible);
+      case "choose":
+        return this.chooseDefinitions(alwaysVisible);
+      case "locked":
+        return this.lockedDefinitions(alwaysVisible);
+      case "unverified":
+        return this.unverifiedDefinitions(alwaysVisible);
+      case "ready":
+        return this.readyDefinitions(alwaysVisible);
+    }
   }
 
   /**
@@ -254,16 +271,16 @@ export class CourierSettingTab extends PluginSettingTab {
   /**
    * The one line a failed action leaves behind, where the user just looked.
    *
-   * It is not a settings row, so the row it stands in for is hidden and the line is drawn in
-   * the list itself.
+   * It is not a settings row: the row it is given loses its chrome and holds the line.
    */
   private stageErrorItem(visible: () => boolean): SettingDefinitionItem {
     return {
       name: "",
       visible: () => visible() && this.stageError !== null,
-      render: (setting, group) => {
-        setting.settingEl.setCssStyles({ display: "none" });
-        const error = group.listEl.createDiv({ cls: "courier-settings-error" });
+      render: (setting) => {
+        setting.settingEl.empty();
+        setting.settingEl.addClass("courier-settings-error-row");
+        const error = setting.settingEl.createDiv({ cls: "courier-settings-error" });
         error.setCssStyles({ color: "var(--text-error)", margin: "4px 0" });
         error.setText(`⚠ ${this.stageError}`);
       },
@@ -278,11 +295,12 @@ export class CourierSettingTab extends PluginSettingTab {
       {
         name: "",
         visible,
-        render: (setting, group) => {
-          // A form is not a settings row: the row it stands in for is hidden and the card is
-          // drawn in the list itself, centred the way the step always was.
-          setting.settingEl.setCssStyles({ display: "none" });
-          this.renderLoginStage(group.listEl);
+        render: (setting) => {
+          // A form is not a settings row: the row it is given loses its chrome and holds the
+          // card, which keeps the centred form the step has always been.
+          setting.settingEl.empty();
+          setting.settingEl.addClass("courier-login-row");
+          this.renderLoginStage(setting.settingEl);
         },
       },
       this.stageErrorItem(visible),

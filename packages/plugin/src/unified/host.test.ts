@@ -29,6 +29,14 @@ if (typeof (globalThis as { window?: unknown }).window === "undefined") {
   (globalThis as { window?: unknown }).window = globalThis;
 }
 
+/**
+ * The lease watcher loads `node:fs` behind an await, which is the one window where two
+ * starts can race. Mocking the module lets the test hold that window open; the default
+ * is the no-op the test runtime's adapter would get anyway.
+ */
+const leaseWatchMock = vi.hoisted(() => ({ watchLeaseDirectory: vi.fn() }));
+vi.mock("./lease-watch", () => ({ watchLeaseDirectory: leaseWatchMock.watchLeaseDirectory }));
+
 // ── Fakes (plain injected objects — no module mocking, no real network) ──
 
 /**
@@ -227,6 +235,7 @@ describe("EngineHost", () => {
   beforeEach(() => {
     MockWebSocket.instances = [];
     stubGlobal("WebSocket", MockWebSocket);
+    leaseWatchMock.watchLeaseDirectory.mockResolvedValue(() => {});
   });
 
   afterEach(() => {
@@ -336,6 +345,34 @@ describe("EngineHost", () => {
       // them are silent, because they change nothing the user can observe.
       host.stop();
       expect(waitStates).toEqual([true, false]);
+    });
+
+    /**
+     * `watchLeaseDirectory` awaits the desktop `node:fs` import, so between the guard and
+     * the assignment there is a window. Two asks for the *same* generation — a failed
+     * renewal and the bind's own re-check — both pass the `leaseWatch` guard during it;
+     * without the pending flag the second watcher would replace the first without closing
+     * it, and the leaked one would wake the host on every lease-directory event forever.
+     */
+    it("loads one watcher when two asks overlap in the same generation", async () => {
+      let finishLoading!: (stop: () => void) => void;
+      leaseWatchMock.watchLeaseDirectory.mockImplementation(
+        () =>
+          new Promise<() => void>((resolve) => {
+            finishLoading = resolve;
+          }),
+      );
+      const { host } = await waitingHost();
+      const startLeaseWatch = (
+        host as unknown as { startLeaseWatch(generation: number): Promise<void> }
+      ).startLeaseWatch.bind(host);
+
+      const first = startLeaseWatch(1);
+      const second = startLeaseWatch(1);
+
+      expect(leaseWatchMock.watchLeaseDirectory).toHaveBeenCalledTimes(1);
+      finishLoading(() => {});
+      await Promise.all([first, second]);
     });
   });
 

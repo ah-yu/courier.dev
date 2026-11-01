@@ -1811,10 +1811,12 @@ export class SyncEngine {
     });
     // Raised only now: the pass has done everything it still could (see `reconcileLoop`).
     // A refusal is an `Error` in practice; the wrap keeps a host that threw something else
-    // from turning this into a `throw` of a non-error value (and the log line, which does
-    // render it, has already run inside the pass).
+    // from turning this into a `throw` of a non-error value, and `cause` keeps whatever
+    // detail it did carry (a status, a body) available to the host that reports it.
     if (failure !== null) {
-      throw failure instanceof Error ? failure : new Error("the reconcile pass failed");
+      throw failure instanceof Error
+        ? failure
+        : new Error("the reconcile pass failed", { cause: failure });
     }
   }
 

@@ -191,6 +191,17 @@ export class EngineHost {
   private leaseRenewal: number | null = null;
   private leaseRelease: Promise<void> | null = null;
   private leaseWatch: (() => void) | null = null;
+  /**
+   * True while a watcher is being loaded but has not been installed yet.
+   *
+   * `watchLeaseDirectory` awaits the desktop `node:fs` import, so the `leaseWatch` guard
+   * alone no longer makes the start single-flight: two callers in the same generation
+   * (a failed renewal and the bind's own re-check) would both pass it, both load, and
+   * the second assignment would replace the first watcher without ever closing it.
+   * The loser of this flag simply leaves the watcher to the pending start; the retry
+   * timer still covers the lease.
+   */
+  private leaseWatchPending = false;
   private waitingForLease = false;
 
   constructor(private readonly opts: EngineHostOptions) {
@@ -415,21 +426,26 @@ export class EngineHost {
 
   /** On desktop, wake as soon as the holder removes the lease directory. */
   private async startLeaseWatch(generation: number): Promise<void> {
-    if (this.leaseWatch) return;
-    const stop = await watchLeaseDirectory(this.opts.vault.adapter, () => {
-      if (generation !== this.generation) return;
-      if (this.leaseRetry) window.clearTimeout(this.leaseRetry);
-      this.leaseRetry = null;
-      this.closeLeaseWatch();
-      void this.start();
-    });
-    // A stop() that landed while the modules were loading wins: the watcher must not
-    // outlive the host that asked for it.
-    if (generation !== this.generation) {
-      stop();
-      return;
+    if (this.leaseWatch || this.leaseWatchPending) return;
+    this.leaseWatchPending = true;
+    try {
+      const stop = await watchLeaseDirectory(this.opts.vault.adapter, () => {
+        if (generation !== this.generation) return;
+        if (this.leaseRetry) window.clearTimeout(this.leaseRetry);
+        this.leaseRetry = null;
+        this.closeLeaseWatch();
+        void this.start();
+      });
+      // A stop() that landed while the modules were loading wins: the watcher must not
+      // outlive the host that asked for it.
+      if (generation !== this.generation) {
+        stop();
+        return;
+      }
+      this.leaseWatch = stop;
+    } finally {
+      this.leaseWatchPending = false;
     }
-    this.leaseWatch = stop;
   }
 
   private closeLeaseWatch(): void {

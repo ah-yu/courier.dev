@@ -5,10 +5,18 @@ import obsidianmd from "eslint-plugin-obsidianmd";
 /**
  * The community directory's scanner, reproduced for CI.
  *
- * The directory reviews the whole repository with `eslint-plugin-obsidianmd` and a
- * **fixed** ignore list; it does not read this repository's config. A monorepo
- * therefore cannot opt out of that scan, and a non-plugin package can fail the plugin's
- * review — which is exactly what this mirror is for.
+ * The directory reviews the repository the plugin is published from — a generated
+ * mirror that holds only `packages/plugin`, `packages/engine` and `packages/shared`
+ * (see `scripts/mirror-plugin.ts`) — with `eslint-plugin-obsidianmd` and a **fixed**
+ * ignore list; it does not read this repository's config. A monorepo therefore cannot
+ * opt out of that scan, and a non-plugin package can fail the plugin's review — which is
+ * exactly what this mirror is for. It runs over those three packages and nothing else,
+ * so the server, the CLI and the e2e suites (which the directory never sees and which
+ * cannot satisfy Obsidian's plugin rules: a CLI may use Node built-ins, a server has no
+ * `window`) do not report here.
+ *
+ * The mirror drops `*.test.ts`; this scan keeps them, so the gate is stricter than the
+ * directory on the code the mirror does publish.
  *
  * The directory reports only a known set of Obsidian rules as **Error** (traced from
  * its reviews); everything else it lists, including the typescript-eslint and
@@ -17,19 +25,12 @@ import obsidianmd from "eslint-plugin-obsidianmd";
  * `eslint` exits non-zero exactly when the directory would fail. `bun run lint:review`
  * runs it locally and `bun run verify` runs it as the `review` gate.
  *
- * It runs over the **published** packages only — `packages/plugin`, `packages/engine` and
- * `packages/shared` — because that is exactly the tree the directory scans: the plugin is
- * published from a generated repository that holds nothing else
- * (see `scripts/mirror-plugin.ts`). Scanning the server, the CLI and the suites here would
- * report findings against code the directory never sees, and that cannot be made to
- * satisfy Obsidian's plugin rules.
+ * This file is not part of the published tree, so the scan does not read it; it is
+ * type-checked through `tsconfig.scripts.json` with the other repository tooling.
  *
- * This file is not part of the published tree, so it is not scanned; it stays in
- * `tsconfig.scripts.json` for the type-aware rules to resolve it.
- *
- * The gate currently fails on **errors** only, which is what the directory rejects a
- * release for. `--max-warnings 0` is the target, and it is one line away — the remaining
- * findings are listed in the `review` gate's output rather than hidden.
+ * The gate fails on **errors** only, which is what the directory rejects a release for.
+ * `--max-warnings 0` is the target and is one line away; until then the remaining
+ * warnings are printed by the gate rather than hidden (`--quiet` would suppress them).
  *
  * Two things must stay in step with the directory:
  *

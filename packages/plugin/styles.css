@@ -3075,3 +3075,22 @@ body.is-phone .courier-conflict-replace-actions button {
 .courier-password-prompt .setting-item {
   align-items: center;
 }
+
+/*
+ * A settings row that hosts something that is not a settings row: the sign-in form and the
+ * step's error line. The app still creates the row — every definition is one — so its own
+ * padding and divider are removed and the content inside is what the user sees.
+ */
+.courier-login-row,
+.courier-settings-error-row {
+  padding: 0;
+  border: none;
+  background: none;
+}
+
+.courier-login-row .setting-item-info,
+.courier-settings-error-row .setting-item-info,
+.courier-login-row .setting-item-control,
+.courier-settings-error-row .setting-item-control {
+  display: none;
+}

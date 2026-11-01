@@ -93,7 +93,7 @@ interface RecordingVault {
     list(path: string): Promise<{ files: string[]; folders: string[] }>;
     readBinary(path: string): Promise<ArrayBuffer>;
     writeBinary(path: string, data: ArrayBuffer): Promise<void>;
-    appendBinary?(path: string, data: ArrayBuffer): Promise<void>;
+    appendBinary(path: string, data: ArrayBuffer): Promise<void>;
     mkdir(path: string): Promise<void>;
     remove(path: string): Promise<void>;
     rename(from: string, to: string): Promise<void>;
@@ -149,8 +149,6 @@ function recordingVault(
     laggingIndex?: Set<string>;
     /** Paths whose `TFile.stat` still describes the bytes from before a streamed replace. */
     staleIndexStats?: Map<string, { size: number; mtime: number }>;
-    /** Model an Obsidian older than 1.12.3, which has no `appendBinary`. */
-    withoutAppendBinary?: boolean;
   } = {},
 ) {
   const calls: VaultCall[] = [];
@@ -209,7 +207,6 @@ function recordingVault(
       contents.set(to, content);
     },
   };
-  if (races.withoutAppendBinary) delete adapter.appendBinary;
 
   const vault: RecordingVault = {
     configDir,
@@ -580,23 +577,16 @@ describe("ObsidianVaultAdapter — streaming writes", () => {
     expect(decode(await adapter.readFile(".obsidian/snippets/wide.css"))).toBe("body {}");
   });
 
-  it("falls back to one write when the app has no appendBinary", async () => {
-    // `appendBinary` arrived in Obsidian 1.12.3, while the plugin supports older apps.
-    // The semantics stay the same; only the memory bound is lost, which is exactly the
-    // behaviour those versions had before this path existed.
-    const { vault, meaningful } = recordingVault({}, [], ".obsidian", {
-      withoutAppendBinary: true,
-    });
+  it("turns a stream with no chunk into an empty file", async () => {
+    // The engine only streams a version above 8 MiB, so this is the adapter contract's
+    // edge, not a pull the engine makes today: `close` still has to produce the target.
+    const { vault } = recordingVault();
     const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
-    const writer = await adapter.beginWrite("note.md");
-    await writer.write(new TextEncoder().encode("ab"));
-    await writer.write(new TextEncoder().encode("cd"));
-    expect(decode(await adapter.readFile("note.md"))).toBeNull();
+    const writer = await adapter.beginWrite("empty.md");
     await writer.close();
 
-    expect(decode(await adapter.readFile("note.md"))).toBe("abcd");
-    expect(meaningful().some(([method]) => method === "adapter.appendBinary")).toBe(false);
+    expect(decode(await adapter.readFile("empty.md"))).toBe("");
   });
 
   it("reports a streamed file while the index lags, and lets it go once indexed", async () => {
