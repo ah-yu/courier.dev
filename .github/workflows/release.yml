@@ -416,16 +416,16 @@ jobs:
             "AUTHORIZATION: basic $(printf 'cnb:%s' "$CNB_TOKEN" | base64 -w0)"
           repo="${CNB_REPO%.git}"
           git push --force "https://cnb.cool/$repo.git" "refs/tags/$TAG:refs/tags/$TAG"
-          # Create the alias tag once, on the first stable release. It is a
-          # download channel, not a moving source ref; the release API updates
-          # its assets. Never move an existing tag.
+          # The alias names whichever release GitHub reports as the newest stable one, so it
+          # is **moved** on every stable release — it is a download channel, not a version
+          # anybody pins to. It used to be created once and left alone, which made the alias
+          # page show the current assets beside source archives from the release it was born
+          # on. An older tag keeps its own tag and never touches this one: `is_latest` is the
+          # question `releases/latest` answers, not "is this a stable release".
           if [ "${{ steps.plan.outputs.is_latest }}" = "true" ] && \
             [ "${CNB_LATEST_ALIAS:-true}" != "false" ]; then
-            if ! git ls-remote --exit-code --tags \
-              "https://cnb.cool/$repo.git" refs/tags/latest > /dev/null 2>&1; then
-              git push "https://cnb.cool/$repo.git" "refs/tags/$TAG:refs/tags/latest" || \
-                echo "::warning::could not create the latest tag; the release API may create it"
-            fi
+            git push --force "https://cnb.cool/$repo.git" "refs/tags/$TAG:refs/tags/latest" || \
+              echo "::warning::could not move the latest tag; the release API may create it"
           fi
 
       - name: Mirror the release

@@ -95,9 +95,11 @@ https://cnb.cool/ah-yu/courier/-/releases/download/0.1.0/courier-cli-manifest.js
 
 For a one-command install the release job also maintains a `latest` alias release. It is updated
 only when GitHub reports the tag as the latest stable release (`releases/latest`), so re-running
-an older tag leaves the alias alone. The `latest` tag is created once on the first stable release
-and is never moved; it is a download channel, not a source ref. Use the versioned release when you
-need the source tree that matches a binary.
+an older tag leaves the alias alone. The `latest` tag is **moved** to that release on every stable
+release: the alias page carries the current assets, and CNB builds its source-archive links from
+the tag, so a tag left behind shows the current binaries beside an old source tree. It is a
+download channel, not a version anybody pins to — use the versioned release when you need the
+source tree that matches a binary.
 
 ```text
 https://cnb.cool/ah-yu/courier/-/releases/download/latest/courier-cli-manifest.json
