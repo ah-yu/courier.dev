@@ -1810,9 +1810,12 @@ export class SyncEngine {
       priority,
     });
     // Raised only now: the pass has done everything it still could (see `reconcileLoop`).
-    // A refusal is an `Error` in practice; the cast keeps a host that throws something
-    // else from turning this into a `throw` of a non-error value.
-    if (failure !== null) throw failure instanceof Error ? failure : new Error(String(failure));
+    // A refusal is an `Error` in practice; the wrap keeps a host that threw something else
+    // from turning this into a `throw` of a non-error value (and the log line, which does
+    // render it, has already run inside the pass).
+    if (failure !== null) {
+      throw failure instanceof Error ? failure : new Error("the reconcile pass failed");
+    }
   }
 
   /**

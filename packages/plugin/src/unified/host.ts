@@ -1,4 +1,4 @@
-import type { EventRef, TAbstractFile, TFile, Vault } from "obsidian";
+import type { EventRef, TAbstractFile, Vault } from "obsidian";
 import { pluginPlatform } from "../platform";
 import {
   LEASE_RENEW_MS,
@@ -147,7 +147,11 @@ export interface EngineHostOptions {
 
 /** A vault entry's size as Obsidian's index already knows it; null for a folder. */
 function sizeOf(file: TAbstractFile): number | null {
-  return "extension" in file ? ((file as TFile).stat?.size ?? null) : null;
+  // A folder has no `stat`; reading it structurally keeps this module type-only against
+  // `obsidian` (`instanceof TFile` would need a value import, and the package ships types
+  // only — the app provides the module at runtime).
+  const stat = (file as { stat?: { size?: number } }).stat;
+  return stat?.size ?? null;
 }
 
 /**

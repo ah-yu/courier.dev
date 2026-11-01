@@ -7,6 +7,18 @@
  * fall back to what it already knows. The timer is cleared on either settlement, so a
  * successful read leaves nothing behind.
  */
+/**
+ * `promise`'s rejection reason as an `Error`.
+ *
+ * A rejection reason is whatever the other side threw; a promise that rejects with a value
+ * that is not an `Error` is still an ordinary refusal here, and wrapping it keeps the
+ * caller able to read `.message` without every call site narrowing.
+ */
+function asError(reason: unknown): Error {
+  if (reason instanceof Error) return reason;
+  return new Error(typeof reason === "string" ? reason : "the wrapped promise rejected");
+}
+
 export function withTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
@@ -21,7 +33,7 @@ export function withTimeout<T>(
       },
       (error: unknown) => {
         window.clearTimeout(timer);
-        reject(error);
+        reject(asError(error));
       },
     );
   });

@@ -446,8 +446,6 @@ export default class CourierPlugin extends Plugin {
     } else {
       this.settingTab?.refresh();
     }
-
-    console.log("Courier plugin loaded.");
   }
 
   override onunload(): void {
@@ -482,7 +480,6 @@ export default class CourierPlugin extends Plugin {
     clearSyncLog();
     this.reloadPopup?.destroy();
     this.reloadPopup = null;
-    console.log("Courier plugin unloaded");
   }
 
   /**
