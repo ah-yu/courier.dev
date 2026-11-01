@@ -97,7 +97,7 @@ bun run verify obsidian         # end-to-end against a real Obsidian (see the L3
 bun run verify obsidian-ci      # the non-layout L3 subset CI runs (see the L3 rule)
 bun run test:coverage           # the instrumented suite with the per-package floors
 bun run check:docs              # AGENTS.md size, docs index and links/anchors (part of `bun run verify`)
-bun run lint:review             # the community directory's scanner, mirrored (part of `bun run verify`)
+bun run lint:review             # the community directory's scan, mirrored: ESLint over the published packages and Obsidian's Stylelint over `styles.css` (part of `bun run verify`)
 
 # Development
 bun run dev                     # server + plugin watchers in parallel

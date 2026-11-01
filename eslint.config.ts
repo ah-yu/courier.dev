@@ -92,6 +92,26 @@ const DIRECTORY_IGNORES: string[] = [
   "vault_a*/**",
   "vault_b*/**",
   "packages/server/data/**",
+  /*
+   * The packages the plugin is **not** published from. The directory never sees them (see
+   * `scripts/mirror-plugin.ts`), and they cannot satisfy Obsidian's plugin rules: the CLI
+   * imports Node built-ins by design, and the server has no DOM at all. Ignoring them here —
+   * rather than in the command line — is what keeps an editor's ESLint, which reads this
+   * file and not `package.json`, from reporting the whole monorepo.
+   */
+  "packages/server/**",
+  "packages/cli/**",
+  "packages/e2e/**",
+  "packages/build/**",
+  "packages/testing/**",
+  /*
+   * The repository's own tooling. It is not published either, and it is not plugin source:
+   * a config file may name `.obsidian` or import `url` because it runs on a build machine,
+   * not inside the app. (`scripts/**` is on the directory's list already.)
+   */
+  "eslint.config.ts",
+  "vitest.config.ts",
+  "package.json",
 ];
 
 /**

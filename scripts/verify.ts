@@ -87,9 +87,10 @@ const GATES = [
     // generated mirror of `packages/plugin`, `packages/engine` and `packages/shared`, so
     // an error anywhere in that tree (not only the plugin) can fail the plugin's review.
     // `eslint.config.ts` reproduces that scan over the same three packages (its rule set,
-    // its ignore list), and only the findings the directory calls errors fail it. Cheap
-    // (seconds) and not a second style gate: `lint` still owns this repository's own
-    // style.
+    // its ignore list), and only the findings the directory calls errors fail it. The
+    // sheet it ships is scanned too, so this gate runs Obsidian's own Stylelint config over
+    // `packages/plugin/styles.css` as well. Cheap (seconds) and not a second style gate:
+    // `lint` still owns this repository's own style.
     name: "review",
     command: "bun",
     args: ["run", "lint:review"],
