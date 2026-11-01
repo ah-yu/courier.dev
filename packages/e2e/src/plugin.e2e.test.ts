@@ -6318,8 +6318,14 @@ describe("plugin e2e — the real plugin against a real server", () => {
       await peer.sync();
       await plugin.host?.engine?.initialSync();
 
+      // Wait for the row this case is about rather than for a count: two rows arrive here —
+      // the skipped `create` and the applied `modify` — and a slower run can show its first
+      // pair before the second one is written, which is how this case used to fail on timing.
       await waitFor(
-        () => historyRowsFor(modal!, ".obsidian/core-plugins.json").length >= 2,
+        () =>
+          historyRowsFor(modal!, ".obsidian/core-plugins.json").some(
+            (row) => !row.classes.includes("is-skipped") && actionOf(row) === "修改",
+          ),
         "the applied version never reached the log",
       );
       const rows = historyRowsFor(modal!, ".obsidian/core-plugins.json");
