@@ -81,7 +81,7 @@ export async function deleteConflictCopy(app: App, target: ReplaceTarget): Promi
   const copy = app.vault.getAbstractFileByPath(target.conflictPath);
   if (!(copy instanceof TFile)) return false;
   try {
-    await app.vault.delete(copy);
+    await app.fileManager.trashFile(copy);
     return true;
   } catch {
     return false;

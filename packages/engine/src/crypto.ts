@@ -167,11 +167,11 @@ export async function decryptCombinedBytes(
 export async function encryptChunkBytes(
   key: CryptoKey,
   plaintext: Uint8Array<ArrayBuffer>,
-  additionalData: Uint8Array,
+  additionalData: Uint8Array<ArrayBuffer>,
 ): Promise<Uint8Array<ArrayBuffer>> {
   const iv = generateIv();
   const encrypted = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv, additionalData: additionalData as BufferSource },
+    { name: "AES-GCM", iv, additionalData },
     key,
     plaintext,
   );
@@ -185,12 +185,12 @@ export async function encryptChunkBytes(
 export async function decryptChunkBytes(
   key: CryptoKey,
   combined: Uint8Array,
-  additionalData: Uint8Array,
+  additionalData: Uint8Array<ArrayBuffer>,
 ): Promise<Uint8Array<ArrayBuffer>> {
   const iv = combined.slice(0, 12);
   const ciphertext = combined.slice(12);
   const decrypted = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv, additionalData: additionalData as BufferSource },
+    { name: "AES-GCM", iv, additionalData },
     key,
     ciphertext,
   );

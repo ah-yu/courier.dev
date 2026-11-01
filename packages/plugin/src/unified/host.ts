@@ -1,4 +1,4 @@
-import type { EventRef, TAbstractFile, Vault } from "obsidian";
+import type { EventRef, FileManager, TAbstractFile, Vault } from "obsidian";
 import { pluginPlatform } from "../platform";
 import {
   LEASE_RENEW_MS,
@@ -66,6 +66,14 @@ export const LEASE_RETRY_MS = 500;
 
 export interface EngineHostOptions {
   vault: Vault;
+  /**
+   * Obsidian's file manager, for the deletions the sync adapter performs.
+   *
+   * `Vault.delete` exists and is the wrong call for anything Obsidian itself would delete:
+   * it ignores the user's "deleted files" setting, so a note the engine removed would skip
+   * the trash. The adapter takes the manager and deletes through it.
+   */
+  fileManager: FileManager;
   vaultId: string;
   encryptionKey: CryptoKey;
   serverUrl: string;
@@ -313,7 +321,7 @@ export class EngineHost {
       vaultId: this.opts.vaultId,
       encryptionKey: this.opts.encryptionKey,
       syncScope: this.syncScope,
-      adapter: new ObsidianVaultAdapter(this.opts.vault, this.syncScope),
+      adapter: new ObsidianVaultAdapter(this.opts.vault, this.syncScope, this.opts.fileManager),
       api: this.opts.createSyncApi(userKey),
       wsUrl: this.opts.wsUrl,
       userKey,

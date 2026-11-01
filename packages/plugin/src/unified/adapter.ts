@@ -1,4 +1,4 @@
-import type { DataAdapter, TAbstractFile, TFile, Vault } from "obsidian";
+import type { DataAdapter, FileManager, TAbstractFile, TFile, Vault } from "obsidian";
 import {
   DEFAULT_SYNC_SCOPE,
   isConflictFile,
@@ -183,6 +183,13 @@ export class ObsidianVaultAdapter implements SyncAdapter {
   constructor(
     private readonly vault: Vault,
     private readonly scope: SyncScope = DEFAULT_SYNC_SCOPE,
+    /**
+     * Obsidian's file manager, for the deletions this adapter makes on the engine's
+     * behalf. `Vault.delete` is the obvious call and the wrong one: it ignores the user's
+     * "deleted files" preference, so a note the engine removed would not land in the trash
+     * they configured. `FileManager.trashFile` is the API that respects it.
+     */
+    private readonly fileManager: FileManager,
   ) {}
 
   /** True for paths inside the config folder — the adapter-backed ones. */
@@ -516,7 +523,7 @@ export class ObsidianVaultAdapter implements SyncAdapter {
       return;
     }
     try {
-      await this.vault.delete(file);
+      await this.fileManager.trashFile(file);
       this.forgetStreamedPath(path);
     } catch (err) {
       // `Vault.delete` awaits only the adapter's unlink; the vault index is left to the

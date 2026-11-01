@@ -167,9 +167,11 @@ const obsidianTransport: HttpTransport = async (request) => {
     get text() {
       return response.text;
     },
-    get json() {
+    get json(): unknown {
       try {
-        return response.json;
+        // `RequestUrlResponse.json` is `any`; the shared client narrows what it needs, and
+        // answering `unknown` is what keeps the unsafe value from travelling further.
+        return response.json as unknown;
       } catch {
         // Not JSON: binary content, an empty body, a proxy's HTML error page.
         return null;
@@ -527,7 +529,9 @@ export default class CourierPlugin extends Plugin {
   // ── Settings persistence ──
 
   async loadSettings(): Promise<void> {
-    const data = await this.loadData();
+    // `loadData()` is Obsidian's `Promise<any>`: `data.json` is a file the user can edit,
+    // so the shape is asserted here once and every field is normalised below.
+    const data = (await this.loadData()) as Partial<CourierSettings> | null;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
     // The active label and the per-vault records are rebuilt through the shared
     // normalizers for the same reason as the nested scope below: a hand-edited or older
@@ -1114,6 +1118,7 @@ export default class CourierPlugin extends Plugin {
     await previous?.whenStopped();
     const host = new EngineHost({
       vault: this.app.vault,
+      fileManager: this.app.fileManager,
       vaultId,
       encryptionKey: this.encryptionKey,
       serverUrl: getServerUrl(this.settings),

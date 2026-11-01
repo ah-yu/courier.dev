@@ -45,7 +45,8 @@
   },
   "overrides": {
     "@types/node": "25.9.2",
-    "moment": "2.31.0"
+    "moment": "2.31.0",
+    "typescript": "6.0.3"
   },
   "simple-git-hooks": {
     "pre-commit": "bun lint-staged"

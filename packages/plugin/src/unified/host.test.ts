@@ -20,7 +20,7 @@ import {
   type SyncLeaseStore,
   type SyncScope,
 } from "@courier/engine";
-import type { Vault } from "obsidian";
+import type { FileManager, Vault } from "obsidian";
 
 // The plugin's platform is written for Obsidian's renderer, which owns a `window`; Bun,
 // where this suite runs, does not. Defining it here keeps production source honest — the
@@ -193,8 +193,14 @@ async function newHost(
   const fakeApi = makeFakeSyncApi();
   const createSyncApi = vi.fn(() => fakeApi as unknown as SyncApi);
   const { vault, events, config } = makeFakeVault(configFiles);
+  // The host deletes through Obsidian's file manager; the fake vault is what a deletion
+  // reaches, so the stub forwards there and the recorded calls stay the same.
+  const fileManager = {
+    trashFile: (file: Parameters<Vault["delete"]>[0]) => vault.delete(file),
+  } as unknown as FileManager;
   const host = new EngineHost({
     vault,
+    fileManager,
     vaultId: "vault-1",
     encryptionKey: await makeKey(),
     serverUrl: "http://localhost:3002",

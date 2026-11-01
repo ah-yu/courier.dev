@@ -157,7 +157,7 @@ export function chunkAdditionalData(
   index: number,
   chunkCount: number,
   plaintextSize: number,
-): Uint8Array {
+): Uint8Array<ArrayBuffer> {
   if (!/^[a-f0-9]{64}$/.test(contentHash)) {
     throw new Error("chunkAdditionalData needs a 64-character lowercase hex content hash");
   }

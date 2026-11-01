@@ -160,12 +160,6 @@ export default defineConfig([
     // which is exactly what declaring it here says.
     languageOptions: { globals: { Bun: "readonly" } },
   },
-  {
-    // `DataAdapter.appendBinary` arrived in Obsidian 1.12.3; this file feature-detects
-    // it and falls back to one write, so the rule cannot see the guard. Keep the rule
-    // an error everywhere else.
-    files: ["packages/plugin/src/unified/adapter.ts"],
-    rules: { "obsidianmd/no-unsupported-api": "warn" },
-  },
+
   { ignores: DIRECTORY_IGNORES },
 ]);

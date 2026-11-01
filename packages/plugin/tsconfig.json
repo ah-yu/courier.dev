@@ -6,7 +6,9 @@
     // `tsc -b` wrote the whole `src/` tree — including `*.test.js` — into
     // `dist/`, where the test runner collected it as a stale duplicate test.
     "noEmit": true,
-    "lib": ["ES2022", "DOM"],
+    // `DOM.Iterable` for the code that walks a `NodeList` (`for…of`); without it the type
+    // is only indexable, and a linter reading the project sees `any` at every element.
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": ["bun"],
     "paths": {
       "@/*": ["./src/*"]
