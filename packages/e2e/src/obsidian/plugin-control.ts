@@ -943,6 +943,10 @@ export async function openRecycleBinDialog(vault: string): Promise<boolean> {
     if (!p) throw new Error('the Courier plugin is not loaded');
     app.setting.open();
     app.setting.openTabById(p.manifest.id);
+    // The page is drawn from the definitions it cached when the tab was added; the harness
+    // changes the plugin state outside its own actions, so it asks for a re-render the way
+    // the plugin does on every user action.
+    if (p.settingTab && p.settingTab.update) p.settingTab.update();
     ${SETTINGS_IN_WINDOW_ASSERTION}
     // The settings page renders in this window, and everything it opens stays here.
     const doc = (activeWindow && activeWindow.document) || document;
@@ -984,6 +988,10 @@ export async function openSyncHistoryDialog(vault: string): Promise<boolean> {
     if (!p) throw new Error('the Courier plugin is not loaded');
     app.setting.open();
     app.setting.openTabById(p.manifest.id);
+    // The page is drawn from the definitions it cached when the tab was added; the harness
+    // changes the plugin state outside its own actions, so it asks for a re-render the way
+    // the plugin does on every user action.
+    if (p.settingTab && p.settingTab.update) p.settingTab.update();
     ${SETTINGS_IN_WINDOW_ASSERTION}
     const doc = (activeWindow && activeWindow.document) || document;
     window.__courierE2eDialogDoc = doc;
@@ -1215,6 +1223,10 @@ export async function clickPauseRow(vault: string, label: string): Promise<boole
     if (!p) throw new Error('the Courier plugin is not loaded');
     app.setting.open();
     app.setting.openTabById(p.manifest.id);
+    // The page is drawn from the definitions it cached when the tab was added; the harness
+    // changes the plugin state outside its own actions, so it asks for a re-render the way
+    // the plugin does on every user action.
+    if (p.settingTab && p.settingTab.update) p.settingTab.update();
     ${SETTINGS_IN_WINDOW_ASSERTION}
     const doc = (activeWindow && activeWindow.document) || document;
     // The settings page renders in this window; later reads find it through this.

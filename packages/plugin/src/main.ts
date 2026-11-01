@@ -1762,6 +1762,11 @@ export default class CourierPlugin extends Plugin {
       try {
         app.setting.open();
         app.setting.openTabById(this.manifest.id);
+        // A tab drawn from definitions is rendered from the ones it stored when it was added
+        // (1.13: `settingItems`, filled by `update()`), and opening it again does not re-ask.
+        // The state this page shows — the step, the bound vault, the socket — changes behind
+        // its back, so the rows are re-stored here, right before the user reads them.
+        this.refreshSettings();
         return;
       } catch (err) {
         console.error("Courier: could not open the plugin's settings tab:", err);
