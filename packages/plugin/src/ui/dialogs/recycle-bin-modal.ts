@@ -89,7 +89,7 @@ export class RecycleBinModal extends Modal {
     });
     const clearButton = new ButtonComponent(this.footerEl)
       .setButtonText(t("dialog.recycleBin.clear"))
-      .setWarning()
+      .setDestructive()
       .onClick(() => {
         void this.clear();
       });
@@ -459,7 +459,7 @@ export class ClearRecycleBinConfirmModal extends PromiseModal<boolean> {
       .addButton((button) =>
         button
           .setButtonText(t("dialog.recycleBin.deletePermanently"))
-          .setWarning()
+          .setDestructive()
           .onClick(() => this.resolve(true)),
       );
   }

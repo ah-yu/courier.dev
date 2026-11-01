@@ -400,6 +400,12 @@ export class ButtonComponent extends ChainableComponent {
     return this;
   }
 
+  /** `setWarning`'s replacement, `@since 1.13.0`; the same style under a truthful name. */
+  setDestructive(): this {
+    this.isWarning = true;
+    return this;
+  }
+
   onClick(cb: () => unknown): this {
     this.clickHandler = cb;
     return this;

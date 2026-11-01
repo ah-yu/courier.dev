@@ -16,7 +16,7 @@ To install by hand, copy this release's `main.js`, `manifest.json` and `styles.c
 
 ## Requirements
 
-- Obsidian 1.8.7 or newer.
+- Obsidian 1.13.0 or newer.
 - A Courier server you run, and a user key on it. Without both there is nothing to sync to —
   [the server is the other half](https://github.com/ah-yu/courier.dev#quick-start).
 - A vault password. It encrypts the remote vault and is never sent to the server. **If you lose it,

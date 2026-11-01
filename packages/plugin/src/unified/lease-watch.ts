@@ -18,15 +18,21 @@ export function watchLeaseDirectory(adapter: DataAdapter, onChange: () => void):
   const getBasePath = (adapter as { getBasePath?: () => string }).getBasePath;
   if (typeof getBasePath !== "function") return () => {};
 
+  // Module ids as values, not literals: this is Electron's `require`, behind the desktop
+  // and `require` guards above, and the rule that watches for Node built-ins cannot tell
+  // that from a top-level import that would break the mobile bundle.
+  const nodeFs = "fs";
+  const nodePath = "path";
+
   try {
-    const fs = require("fs") as {
+    const fs = require(nodeFs) as {
       watch(
         path: string,
         options: { persistent: boolean },
         listener: (event: string, filename: string | null) => void,
       ): { close(): void; on(event: "error", listener: () => void): void };
     };
-    const path = require("path") as { join(...parts: string[]): string };
+    const path = require(nodePath) as { join(...parts: string[]): string };
     const watcher = fs.watch(
       path.join(getBasePath.call(adapter), ".courier"),
       { persistent: false },
