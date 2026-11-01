@@ -96,7 +96,11 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          # `--repo` is not optional here: this job downloads an artifact and never checks the
+          # repository out, so `gh` has no remote to infer the repository from and fails with
+          # "fatal: not a git repository".
           gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
             --title "$TAG" \
             --generate-notes \
             release-assets/main.js release-assets/manifest.json release-assets/styles.css

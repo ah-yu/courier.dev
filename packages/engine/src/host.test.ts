@@ -143,6 +143,15 @@ async function makeKey(): Promise<CryptoKey> {
   return importRawKey(btoa(String.fromCharCode(...raw)));
 }
 
+/**
+ * The host's own logger, collected instead of printed.
+ *
+ * Most cases here drive a failure path on purpose (a bind the server refuses, a retry that
+ * backs off), and the host reports each one. Without this it falls back to `console.error`,
+ * which turns a passing suite into a wall of stderr and hides a message that is not expected.
+ */
+const hostLog = vi.fn();
+
 async function newHost(overrides: Partial<SyncHostOptions> = {}): Promise<{
   host: SyncHost;
   api: Record<string, ReturnType<typeof vi.fn>>;
@@ -161,6 +170,7 @@ async function newHost(overrides: Partial<SyncHostOptions> = {}): Promise<{
     getDeviceName: () => "My Device",
     eventSource: events,
     stateStore: { load: () => null, save: () => {} },
+    log: hostLog,
     ...overrides,
   });
   return { host, api, events };
@@ -197,6 +207,7 @@ describe("SyncHost", () => {
 
   beforeEach(() => {
     MockWebSocket.instances = [];
+    hostLog.mockClear();
     stubGlobal("WebSocket", MockWebSocket);
   });
 
@@ -359,6 +370,9 @@ describe("SyncHost", () => {
     });
     const onBindFailed = vi.fn();
     const events = fakeEventSource();
+    // The host reports the failure through its logger; collecting it here keeps the suite's
+    // own output clean and pins the message, instead of the console fallback printing it.
+    const log = vi.fn();
     const host = new SyncHost({
       platform: realPlatform,
       vaultId: "vault-1",
@@ -371,6 +385,7 @@ describe("SyncHost", () => {
       eventSource: events,
       stateStore: { load: () => null, save: () => {} },
       onBindFailed,
+      log,
     });
     track(host);
 
@@ -382,11 +397,13 @@ describe("SyncHost", () => {
     expect(host.engine).not.toBeNull();
     expect(events.handlers).not.toBeNull();
     expect(MockWebSocket.instances).toHaveLength(1);
+    expect(log).toHaveBeenCalledWith("the bind pass failed", expect.any(Error));
 
     // The reconcile timer is armed, and firing it retries the pass.
     const reads = api.getVaultSyncIndex.mock.calls.length;
     await advanceTimersByTimeAsync(5 * 60_000);
     expect(api.getVaultSyncIndex.mock.calls.length).toBeGreaterThan(reads);
+    expect(log).toHaveBeenCalledWith("bind retry failed", expect.any(Error));
   });
 
   it("retries a failed bind on its own backoff, and stops once one succeeds", async () => {
@@ -407,6 +424,7 @@ describe("SyncHost", () => {
       getDeviceName: () => "My Device",
       eventSource: fakeEventSource(),
       stateStore: { load: () => null, save: () => {} },
+      log: hostLog,
     });
     track(host);
 
@@ -450,6 +468,7 @@ describe("SyncHost", () => {
       getDeviceName: () => "My Device",
       eventSource: fakeEventSource(),
       stateStore: { load: () => null, save: () => {} },
+      log: hostLog,
     });
     track(host);
 
