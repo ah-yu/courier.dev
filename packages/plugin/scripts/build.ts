@@ -32,7 +32,13 @@ async function build(): Promise<boolean> {
     format: "cjs",
     target: "browser",
     // Obsidian supplies these at runtime; bundling them would ship a second copy.
-    external: ["obsidian", "electron", "@codemirror/*", "@lezer/*"],
+    //
+    // `fs`/`path` are here for the lease watcher, which imports them **dynamically** behind
+    // `Platform.isDesktop` (`src/unified/lease-watch.ts`). Left to the bundler they are
+    // resolved to browser shims — a `path.join` that is not the platform's, on a Windows
+    // vault, is a real difference — so they stay runtime imports that only the desktop
+    // branch ever evaluates.
+    external: ["obsidian", "electron", "node:fs", "node:path", "@codemirror/*", "@lezer/*"],
     sourcemap: prod ? "none" : "inline",
     minify: prod,
     // One file, as Obsidian's loader expects.

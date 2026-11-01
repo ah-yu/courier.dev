@@ -108,6 +108,12 @@ export default defineConfig({
         resolve: {
           alias: {
             "@": "/src",
+            // The `obsidian` package ships types only, so a module that needs a value
+            // from it (`Platform.isDesktop`) would not load outside the app. The plugin's
+            // unit tests get the same stand-in the e2e project uses.
+            obsidian: fileURLToPath(
+              new URL("packages/e2e/src/harness/obsidian-stub.ts", import.meta.url),
+            ),
           },
         },
       },

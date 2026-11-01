@@ -268,7 +268,7 @@ export class EngineHost {
       if (generation !== this.generation) return;
       if (!drained) {
         this.setLeaseWaiting(true);
-        this.startLeaseWatch(generation);
+        void this.startLeaseWatch(generation);
         this.scheduleLeaseRetry(generation);
         return;
       }
@@ -292,7 +292,7 @@ export class EngineHost {
         // The CLI (or another writer) owns this vault. Do not build an engine: waiting is
         // the whole point of the lease.
         this.setLeaseWaiting(true);
-        this.startLeaseWatch(generation);
+        void this.startLeaseWatch(generation);
         this.scheduleLeaseRetry(generation);
         return;
       }
@@ -390,7 +390,7 @@ export class EngineHost {
       host.stop();
       if (this.host === host) this.host = null;
       this.setLeaseWaiting(true);
-      this.startLeaseWatch(generation);
+      void this.startLeaseWatch(generation);
       this.scheduleLeaseRetry(generation);
     }
   }
@@ -406,15 +406,22 @@ export class EngineHost {
   }
 
   /** On desktop, wake as soon as the holder removes the lease directory. */
-  private startLeaseWatch(generation: number): void {
+  private async startLeaseWatch(generation: number): Promise<void> {
     if (this.leaseWatch) return;
-    this.leaseWatch = watchLeaseDirectory(this.opts.vault.adapter, () => {
+    const stop = await watchLeaseDirectory(this.opts.vault.adapter, () => {
       if (generation !== this.generation) return;
       if (this.leaseRetry) window.clearTimeout(this.leaseRetry);
       this.leaseRetry = null;
       this.closeLeaseWatch();
       void this.start();
     });
+    // A stop() that landed while the modules were loading wins: the watcher must not
+    // outlive the host that asked for it.
+    if (generation !== this.generation) {
+      stop();
+      return;
+    }
+    this.leaseWatch = stop;
   }
 
   private closeLeaseWatch(): void {
@@ -440,7 +447,7 @@ export class EngineHost {
     if (this.leaseRenewal) window.clearInterval(this.leaseRenewal);
     this.leaseRenewal = null;
     this.setLeaseWaiting(true);
-    this.startLeaseWatch(generation);
+    void this.startLeaseWatch(generation);
     this.scheduleLeaseRetry(generation);
   }
 
