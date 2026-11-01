@@ -7,7 +7,7 @@
 
 This takes about ten minutes. You need:
 
-- Obsidian 1.8.7 or newer on two devices (the plugin supports desktop and mobile);
+- Obsidian 1.13.0 or newer on two devices (the plugin supports desktop and mobile);
 - a machine that can run the Courier server and is reachable from every device — a NAS, a VPS or
   the computer you already leave on;
 - a name for the remote vault and a strong vault password (it cannot be recovered).

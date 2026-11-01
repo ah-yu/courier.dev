@@ -5,21 +5,32 @@ import obsidianmd from "eslint-plugin-obsidianmd";
 /**
  * The community directory's scanner, reproduced for CI.
  *
- * The directory reviews the whole repository with `eslint-plugin-obsidianmd` and a
- * **fixed** ignore list; it does not read this repository's config. A monorepo
- * therefore cannot opt out of that scan, and a non-plugin package can fail the plugin's
- * review — which is exactly what this mirror is for.
+ * The directory reviews the repository the plugin is published from — a generated
+ * mirror that holds only `packages/plugin`, `packages/engine` and `packages/shared`
+ * (see `scripts/mirror-plugin.ts`) — with `eslint-plugin-obsidianmd` and a **fixed**
+ * ignore list; it does not read this repository's config. A monorepo therefore cannot
+ * opt out of that scan, and a non-plugin package can fail the plugin's review — which is
+ * exactly what this mirror is for. It runs over those three packages and nothing else,
+ * so the server, the CLI and the e2e suites (which the directory never sees and which
+ * cannot satisfy Obsidian's plugin rules: a CLI may use Node built-ins, a server has no
+ * `window`) do not report here.
  *
- * The directory reports only a known set of Obsidian rules as **Error** (traced from
- * its reviews); everything else it lists, including the typescript-eslint and
- * dependency findings, is a **Warning** and does not fail the review. This config
- * reproduces that split: every rule is a warning except the error set below, so
- * `eslint` exits non-zero exactly when the directory would fail. `bun run lint:review`
- * runs it locally and `bun run verify` runs it as the `review` gate.
+ * The mirror drops `*.test.ts`; this scan keeps them, so the gate is stricter than the
+ * directory on the code the mirror does publish.
  *
- * This file is itself scanned by the directory (its ignore list covers `.mjs`, `.cjs`,
- * `.mts` and `.cts`, not `.ts`), so it is listed in `tsconfig.scripts.json` to keep the
- * type-aware rules resolvable, and it has to stay clean under them.
+ * The directory reports only a known set of Obsidian rules as **Error** (traced from its
+ * reviews); everything else it lists, including the typescript-eslint and dependency
+ * findings, is a **Warning**. This config reproduces that split — every rule is a warning
+ * except the error set below — and the gate runs it with `--max-warnings 0`, so a warning
+ * fails `bun run verify` too. That is deliberate and stricter than the directory: the tree
+ * it scans is the tree that ships, and a warning there is a warning on the plugin's page.
+ * `bun run lint:review` runs it locally; `bun run verify` runs it as the `review` gate.
+ *
+ * This file is not part of the published tree, so the scan does not read it; it is
+ * type-checked through `tsconfig.scripts.json` with the other repository tooling.
+ *
+ * Errors and warnings both fail it: the packages are clean of both, and the flag is what
+ * keeps them that way.
  *
  * Two things must stay in step with the directory:
  *
@@ -81,6 +92,27 @@ const DIRECTORY_IGNORES: string[] = [
   "vault_a*/**",
   "vault_b*/**",
   "packages/server/data/**",
+  /*
+   * The packages the plugin is **not** published from. The directory never sees them (see
+   * `scripts/mirror-plugin.ts`), and they cannot satisfy Obsidian's plugin rules: the CLI
+   * imports Node built-ins by design, and the server has no DOM at all. Ignoring them here —
+   * rather than in the command line — is what keeps an editor's ESLint, which reads this
+   * file and not `package.json`, from reporting the whole monorepo.
+   */
+  "packages/server/**",
+  "packages/cli/**",
+  "packages/e2e/**",
+  "packages/build/**",
+  "packages/testing/**",
+  /*
+   * The repository's own tooling. It is not published either, and it is not plugin source:
+   * a config file may name `.obsidian` or import `url` because it runs on a build machine,
+   * not inside the app. (`scripts/**` is on the directory's list already.)
+   */
+  "eslint.config.ts",
+  "vitest.config.ts",
+  "stylelint.config.ts",
+  "package.json",
 ];
 
 /**
@@ -131,25 +163,21 @@ export default defineConfig([
   {
     languageOptions: {
       parserOptions: {
-        // Type-checked rules need the nearest tsconfig for each file; the service
-        // resolves one per package in the workspace. These three files are not in a
-        // package project and are scanned anyway, so name them explicitly.
+        // Type-checked rules need the nearest tsconfig for each file; the service resolves
+        // one per package in the workspace. This one is not in a package project and is
+        // scanned anyway (the config files themselves are ignored, above), so name it here.
         projectService: {
-          allowDefaultProject: [
-            "eslint.config.ts",
-            "vitest.config.ts",
-            "packages/server/drizzle.config.ts",
-          ],
+          allowDefaultProject: ["packages/server/drizzle.config.ts"],
         },
       },
     },
   },
   {
-    // `DataAdapter.appendBinary` arrived in Obsidian 1.12.3; this file feature-detects
-    // it and falls back to one write, so the rule cannot see the guard. Keep the rule
-    // an error everywhere else.
-    files: ["packages/plugin/src/unified/adapter.ts"],
-    rules: { "obsidianmd/no-unsupported-api": "warn" },
+    // `no-undef` knows only the globals a config names, and this code runs under Bun as
+    // well as in Obsidian's renderer: `crypto.ts` reads `Bun` behind a `typeof` guard,
+    // which is exactly what declaring it here says.
+    languageOptions: { globals: { Bun: "readonly" } },
   },
+
   { ignores: DIRECTORY_IGNORES },
 ]);

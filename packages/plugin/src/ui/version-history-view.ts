@@ -125,7 +125,7 @@ export class VersionHistoryView extends ItemView {
   /** The vault listeners that keep the chain current while the tab is open. */
   private readonly vaultRefs: EventRef[] = [];
   /** The pending silent re-read a vault event asked for. */
-  private refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private refreshTimer: number | null = null;
   /**
    * Whether Obsidian has opened this view (`onOpen` without an `onClose` since).
    *
@@ -239,14 +239,14 @@ export class VersionHistoryView extends ItemView {
     for (const ref of this.vaultRefs) this.app.vault.offref(ref);
     this.vaultRefs.length = 0;
     if (this.refreshTimer !== null) {
-      clearTimeout(this.refreshTimer);
+      window.clearTimeout(this.refreshTimer);
       this.refreshTimer = null;
     }
   }
 
   private scheduleRefresh(): void {
-    if (this.refreshTimer !== null) clearTimeout(this.refreshTimer);
-    this.refreshTimer = setTimeout(() => {
+    if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
+    this.refreshTimer = window.setTimeout(() => {
       this.refreshTimer = null;
       if (this.opened) void this.reload(true);
     }, VERSION_HISTORY_REFRESH_MS);
@@ -471,7 +471,7 @@ export class VersionHistoryView extends ItemView {
         void this.select(version.versionId);
       });
       row.addEventListener("keydown", (event) => {
-        const keyboard = event as KeyboardEvent;
+        const keyboard = event;
         if (keyboard.key !== "Enter" && keyboard.key !== " ") return;
         keyboard.preventDefault();
         void this.select(version.versionId);

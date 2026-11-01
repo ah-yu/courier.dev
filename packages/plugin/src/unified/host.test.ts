@@ -20,7 +20,7 @@ import {
   type SyncLeaseStore,
   type SyncScope,
 } from "@courier/engine";
-import type { Vault } from "obsidian";
+import type { FileManager, Vault } from "obsidian";
 
 // The plugin's platform is written for Obsidian's renderer, which owns a `window`; Bun,
 // where this suite runs, does not. Defining it here keeps production source honest — the
@@ -28,6 +28,14 @@ import type { Vault } from "obsidian";
 if (typeof (globalThis as { window?: unknown }).window === "undefined") {
   (globalThis as { window?: unknown }).window = globalThis;
 }
+
+/**
+ * The lease watcher loads `node:fs` behind an await, which is the one window where two
+ * starts can race. Mocking the module lets the test hold that window open; the default
+ * is the no-op the test runtime's adapter would get anyway.
+ */
+const leaseWatchMock = vi.hoisted(() => ({ watchLeaseDirectory: vi.fn() }));
+vi.mock("./lease-watch", () => ({ watchLeaseDirectory: leaseWatchMock.watchLeaseDirectory }));
 
 // ── Fakes (plain injected objects — no module mocking, no real network) ──
 
@@ -193,8 +201,14 @@ async function newHost(
   const fakeApi = makeFakeSyncApi();
   const createSyncApi = vi.fn(() => fakeApi as unknown as SyncApi);
   const { vault, events, config } = makeFakeVault(configFiles);
+  // The host deletes through Obsidian's file manager; the fake vault is what a deletion
+  // reaches, so the stub forwards there and the recorded calls stay the same.
+  const fileManager = {
+    trashFile: (file: Parameters<Vault["delete"]>[0]) => vault.delete(file),
+  } as unknown as FileManager;
   const host = new EngineHost({
     vault,
+    fileManager,
     vaultId: "vault-1",
     encryptionKey: await makeKey(),
     serverUrl: "http://localhost:3002",
@@ -221,6 +235,7 @@ describe("EngineHost", () => {
   beforeEach(() => {
     MockWebSocket.instances = [];
     stubGlobal("WebSocket", MockWebSocket);
+    leaseWatchMock.watchLeaseDirectory.mockResolvedValue(() => {});
   });
 
   afterEach(() => {
@@ -330,6 +345,34 @@ describe("EngineHost", () => {
       // them are silent, because they change nothing the user can observe.
       host.stop();
       expect(waitStates).toEqual([true, false]);
+    });
+
+    /**
+     * `watchLeaseDirectory` awaits the desktop `node:fs` import, so between the guard and
+     * the assignment there is a window. Two asks for the *same* generation — a failed
+     * renewal and the bind's own re-check — both pass the `leaseWatch` guard during it;
+     * without the pending flag the second watcher would replace the first without closing
+     * it, and the leaked one would wake the host on every lease-directory event forever.
+     */
+    it("loads one watcher when two asks overlap in the same generation", async () => {
+      let finishLoading!: (stop: () => void) => void;
+      leaseWatchMock.watchLeaseDirectory.mockImplementation(
+        () =>
+          new Promise<() => void>((resolve) => {
+            finishLoading = resolve;
+          }),
+      );
+      const { host } = await waitingHost();
+      const startLeaseWatch = (
+        host as unknown as { startLeaseWatch(generation: number): Promise<void> }
+      ).startLeaseWatch.bind(host);
+
+      const first = startLeaseWatch(1);
+      const second = startLeaseWatch(1);
+
+      expect(leaseWatchMock.watchLeaseDirectory).toHaveBeenCalledTimes(1);
+      finishLoading(() => {});
+      await Promise.all([first, second]);
     });
   });
 

@@ -89,7 +89,7 @@ export class RecycleBinModal extends Modal {
     });
     const clearButton = new ButtonComponent(this.footerEl)
       .setButtonText(t("dialog.recycleBin.clear"))
-      .setWarning()
+      .setDestructive()
       .onClick(() => {
         void this.clear();
       });
@@ -282,7 +282,7 @@ export class RecycleBinModal extends Modal {
         void this.viewContent(file, plainPath);
       });
       info.addEventListener("keydown", (event) => {
-        const keyboard = event as KeyboardEvent;
+        const keyboard = event;
         if (keyboard.key !== "Enter" && keyboard.key !== " ") return;
         keyboard.preventDefault();
         void this.viewContent(file, plainPath);
@@ -459,7 +459,7 @@ export class ClearRecycleBinConfirmModal extends PromiseModal<boolean> {
       .addButton((button) =>
         button
           .setButtonText(t("dialog.recycleBin.deletePermanently"))
-          .setWarning()
+          .setDestructive()
           .onClick(() => this.resolve(true)),
       );
   }

@@ -137,7 +137,9 @@ describe("per-vault state", () => {
 describe("syncScopeOf", () => {
   it("never enables a config-folder group, whatever the binding stores", () => {
     expect(syncScopeOf(vault())).toEqual({
-      configDir: ".obsidian",
+      // No Obsidian to ask, so the CLI names no config folder: every group is off, and a
+      // name nobody supplies would only make other paths look like settings.
+      configDir: "",
       settingsGroups: NO_SETTINGS_GROUPS,
       fileTypes: DEFAULT_FILE_TYPES,
       excludedFolders: [],

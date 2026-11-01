@@ -1,4 +1,4 @@
-import type { DataAdapter, TAbstractFile, TFile, Vault } from "obsidian";
+import type { DataAdapter, FileManager, TAbstractFile, TFile, Vault } from "obsidian";
 import {
   DEFAULT_SYNC_SCOPE,
   isConflictFile,
@@ -183,6 +183,13 @@ export class ObsidianVaultAdapter implements SyncAdapter {
   constructor(
     private readonly vault: Vault,
     private readonly scope: SyncScope = DEFAULT_SYNC_SCOPE,
+    /**
+     * Obsidian's file manager, for the deletions this adapter makes on the engine's
+     * behalf. `Vault.delete` is the obvious call and the wrong one: it ignores the user's
+     * "deleted files" preference, so a note the engine removed would not land in the trash
+     * they configured. `FileManager.trashFile` is the API that respects it.
+     */
+    private readonly fileManager: FileManager,
   ) {}
 
   /** True for paths inside the config folder — the adapter-backed ones. */
@@ -328,7 +335,9 @@ export class ObsidianVaultAdapter implements SyncAdapter {
         if (isSyncableDir(path, this.scope)) await walk(path, depth + 1);
       }
     };
-    await walk(this.scope.configDir, 0);
+    // A host with no config folder (the CLI) has nothing to walk; without this guard the
+    // walk would start at the vault root and enumerate every file a second time.
+    if (this.scope.configDir !== "") await walk(this.scope.configDir, 0);
     return out;
   }
 
@@ -416,16 +425,14 @@ export class ObsidianVaultAdapter implements SyncAdapter {
    * remembered in `pendingIndex` and answered by `statFile`/`readFile` from the data
    * adapter — see those methods for why a lagging index must not read as a deletion.
    *
-   * `DataAdapter.appendBinary` exists since Obsidian 1.12.3; older app versions get the
-   * same semantics by buffering the chunks and writing once, which is the memory
-   * behaviour they had before streaming existed.
+   * `DataAdapter.appendBinary` exists since Obsidian 1.12.3, and the plugin's floor is
+   * 1.13.0 (`manifest.json`), so the app always has it: there is no buffering fallback.
    */
   async beginWrite(path: string): Promise<SyncWriteStream> {
     const adapter = this.vault.adapter;
     const temp = `.courier/tmp/${crypto.randomUUID()}.part`;
-    const appendBinary =
-      typeof adapter.appendBinary === "function" ? adapter.appendBinary.bind(adapter) : null;
-    const buffered: Uint8Array[] = [];
+    // Bound once: the method reads the adapter's own state.
+    const appendBinary = adapter.appendBinary.bind(adapter);
     let started = false;
     let closed = false;
     await ensureFoldersInAdapter(adapter, parentDir(temp));
@@ -445,10 +452,6 @@ export class ObsidianVaultAdapter implements SyncAdapter {
       write: async (chunk) => {
         if (closed) throw new Error(`write: ${path} is already closed`);
         const bytes = exactBuffer(chunk);
-        if (appendBinary === null) {
-          buffered.push(new Uint8Array(bytes));
-          return;
-        }
         if (!started) {
           await adapter.writeBinary(temp, bytes);
           started = true;
@@ -459,15 +462,9 @@ export class ObsidianVaultAdapter implements SyncAdapter {
       close: async () => {
         if (closed) return;
         try {
-          if (appendBinary === null) {
-            const total = new Uint8Array(buffered.reduce((sum, part) => sum + part.byteLength, 0));
-            let offset = 0;
-            for (const part of buffered) {
-              total.set(part, offset);
-              offset += part.byteLength;
-            }
-            await adapter.writeBinary(temp, exactBuffer(total));
-          }
+          // A stream with no chunk still has to produce an (empty) temp file for the
+          // rename below.
+          if (!started) await adapter.writeBinary(temp, new ArrayBuffer(0));
           if (this.inConfig(path)) {
             await ensureFoldersInAdapter(adapter, parentDir(path));
           } else {
@@ -516,17 +513,17 @@ export class ObsidianVaultAdapter implements SyncAdapter {
       return;
     }
     try {
-      await this.vault.delete(file);
+      await this.fileManager.trashFile(file);
       this.forgetStreamedPath(path);
     } catch (err) {
-      // `Vault.delete` awaits only the adapter's unlink; the vault index is left to the
-      // file watcher, so for one watcher pass it still lists a path whose disk file is
-      // already gone. Another writer that got there first — the user's own delete, or a
-      // second pull of the same delete head (a reconcile and a `file_pushed` notification
-      // can apply one head at once) — therefore makes this unlink answer `ENOENT`. The
+      // `trashFile` resolves once the file has left its path (moved to the trash the user
+      // configured, or unlinked). Another writer that got there first — the user's own
+      // delete, or a second pull of the same delete head (a reconcile and a `file_pushed`
+      // notification can apply one head at once) — makes the move fail instead. The
       // deletion was asked for and has happened; failing the pull for it would report a
-      // succeeded delete as an error. A path still on disk after a failed unlink — a
-      // permission problem, a vanished parent — is the truth and stays the caller's error.
+      // succeeded delete as an error. A path still on disk after a failed move — a
+      // permission problem, an unavailable trash — is the truth and stays the caller's
+      // error.
       if (!(await this.vault.adapter.exists(path))) {
         this.forgetStreamedPath(path);
         return;

@@ -1393,7 +1393,7 @@ export class SyncEngine {
    * refusal is returned rather than thrown, for the same reason the batch collects
    * them — one file the server will not take must not end the pass.
    */
-  private async sendPreparedChunked(prepared: PreparedPush): Promise<unknown | null> {
+  private async sendPreparedChunked(prepared: PreparedPush): Promise<unknown> {
     try {
       await this.uploadChunks(prepared);
       prepared.plainBytes = undefined;
@@ -1810,7 +1810,14 @@ export class SyncEngine {
       priority,
     });
     // Raised only now: the pass has done everything it still could (see `reconcileLoop`).
-    if (failure !== null) throw failure;
+    // A refusal is an `Error` in practice; the wrap keeps a host that threw something else
+    // from turning this into a `throw` of a non-error value, and `cause` keeps whatever
+    // detail it did carry (a status, a body) available to the host that reports it.
+    if (failure !== null) {
+      throw failure instanceof Error
+        ? failure
+        : new Error("the reconcile pass failed", { cause: failure });
+    }
   }
 
   /**
@@ -1832,7 +1839,7 @@ export class SyncEngine {
    * Its whole snapshot arrives as one {@link ReconcilePass}: seven positional arguments
    * of four different container types was a call nobody could read (or get right).
    */
-  private async reconcileLoop(pass: ReconcilePass): Promise<unknown | null> {
+  private async reconcileLoop(pass: ReconcilePass): Promise<unknown> {
     // The set answers "which files does this pass consider"; the array is what gives
     // the user's own files a head start (see `orderFileIds`).
     const ordered = this.orderFileIds([...pass.fileIds], pass);
@@ -2030,7 +2037,7 @@ export class SyncEngine {
    * pool's caller collects the first one and the rest of the pass still runs, exactly as
    * the serial loop did.
    */
-  private async reconcileOne(fileId: string, pass: ReconcilePass): Promise<unknown | null> {
+  private async reconcileOne(fileId: string, pass: ReconcilePass): Promise<unknown> {
     const { localHashes, chainByFileId } = pass;
     const { skippedPaths, localStamps } = pass;
     const { adapter } = this.opts;
@@ -2468,14 +2475,14 @@ export class SyncEngine {
     remote: RemoteIndex,
     localStamps: Map<string, FileStamp>,
     priority: ReadonlyMap<string, number>,
-  ): Promise<unknown | null> {
+  ): Promise<unknown> {
     let batch: PreparedPush[] = [];
     let batchBytes = 0;
     let firstFailure: unknown = null;
     let rateLimitedOut = false;
 
     /** The batch on the wire, if any: the next one is prepared while it flies. */
-    let inFlight: Promise<unknown | null> | null = null;
+    let inFlight: Promise<unknown> | null = null;
 
     /**
      * Send one prepared batch and apply its per-file verdicts.
@@ -2484,7 +2491,7 @@ export class SyncEngine {
      * outlasted its waits. Everything the caller needs to record is recorded here, so the
      * caller can start the request and keep preparing the next batch.
      */
-    const sendBatchNow = async (sending: PreparedPush[]): Promise<unknown | null> => {
+    const sendBatchNow = async (sending: PreparedPush[]): Promise<unknown> => {
       let results;
       try {
         const response = await this.withRateLimitWaits(() =>
@@ -3048,11 +3055,15 @@ export class SyncEngine {
    * without holding the file, hence {@link Sha256}.
    */
   private async streamRemoteVersion(target: string, head: VersionChainEntry): Promise<boolean> {
-    const beginWrite = this.opts.adapter.beginWrite;
+    // Bound once: the adapter method reads its own state, and a bare reference is what
+    // `@typescript-eslint/unbound-method` exists to catch (the `.call` below was the
+    // workaround; binding says the same thing in the type system).
+    const adapter = this.opts.adapter;
+    const beginWrite = adapter.beginWrite?.bind(adapter);
     if (beginWrite === undefined) return false;
     const count = chunkCountForSize(head.sizeBytes);
-    const hasher = this.opts.adapter.createHasher?.() ?? new Sha256();
-    const writer = await beginWrite.call(this.opts.adapter, target);
+    const hasher = adapter.createHasher?.() ?? new Sha256();
+    const writer = await beginWrite(target);
     // The host's watcher can report the rename while `close` is still resolving. An
     // event that finds this promise waits for the stamp rather than reading the file.
     let settle!: (stamp: FileStamp | null) => void;
@@ -3194,7 +3205,7 @@ export class SyncEngine {
     plainPath: string,
     head: VersionChainEntry | undefined,
     entry: LocalVersionState[string] | undefined,
-  ): Promise<unknown | null> {
+  ): Promise<unknown> {
     if (!head || head.action === "delete") return null;
     if (entry?.lastKnownContentHash === head.contentHash) return null;
     const recorded = entry?.stamp;

@@ -69,7 +69,7 @@ export class SyncHistoryModal extends Modal {
   /** Stops the store subscription; `null` until the dialog has opened. */
   private unsubscribe: (() => void) | null = null;
   /** The pending debounced repaint a new event asked for. */
-  private repaintTimer: ReturnType<typeof setTimeout> | null = null;
+  private repaintTimer: number | null = null;
   /**
    * True while the view sits at the newest end of the log, so a repaint scrolls to the
    * bottom instead of pulling the user away from a line they scrolled back to.
@@ -107,7 +107,7 @@ export class SyncHistoryModal extends Modal {
     this.unsubscribe?.();
     this.unsubscribe = null;
     if (this.repaintTimer !== null) {
-      clearTimeout(this.repaintTimer);
+      window.clearTimeout(this.repaintTimer);
       this.repaintTimer = null;
     }
     this.contentEl.empty();
@@ -121,8 +121,8 @@ export class SyncHistoryModal extends Modal {
    * result.
    */
   private scheduleRepaint(): void {
-    if (this.repaintTimer !== null) clearTimeout(this.repaintTimer);
-    this.repaintTimer = setTimeout(() => {
+    if (this.repaintTimer !== null) window.clearTimeout(this.repaintTimer);
+    this.repaintTimer = window.setTimeout(() => {
       this.repaintTimer = null;
       this.render();
     }, REPAINT_DEBOUNCE_MS);

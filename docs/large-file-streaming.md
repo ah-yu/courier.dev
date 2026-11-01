@@ -37,9 +37,8 @@ sides whole, and inspecting a restore target read the file it was about to ask a
   place. A crash leaves a stale temporary file, never a truncated target that the next pass
   would read as a local edit; the next large write sweeps `.part` files older than a day.
 - **The plugin writes through `DataAdapter` + rename.** `ObsidianVaultAdapter.beginWrite` uses
-  `writeBinary` for the first chunk and `appendBinary` for the rest (Obsidian 1.12.3+), then
-  `adapter.rename`. Older apps fall back to buffering the chunks and writing once — the memory
-  behaviour they had before, not a failure.
+  `writeBinary` for the first chunk and `appendBinary` for the rest (`@since 1.12.3`, and the
+  plugin's floor is 1.13.0), then `adapter.rename`.
 - **A lagging Obsidian index does not read as a deletion, and stale index metadata is not
   recorded.** A data-adapter rename fires no vault event, so the app's watcher indexes the
   target on its own schedule. Until it does, the adapter keeps the path in `pendingIndex`,

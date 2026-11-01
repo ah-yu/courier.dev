@@ -1,55 +1,69 @@
 import type { DataAdapter } from "obsidian";
+import { Platform } from "obsidian";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { stubGlobal, restoreGlobals } from "@courier/testing";
 import { watchLeaseDirectory } from "./lease-watch";
 
 /**
  * The desktop wake-up is the difference between a handoff in milliseconds and one bounded
  * by the fallback timer. Obsidian has no adapter watcher, so this is the one place the
- * plugin reaches for a desktop-only module; the no-op paths are what keep mobile and the test runtime safe.
+ * plugin reaches for a desktop-only module; the no-op paths are what keep mobile and the
+ * test runtime safe.
+ *
+ * The modules are imported dynamically (`await import("fs")`), so the fakes are installed
+ * with `vi.mock` rather than through `window.require`.
  */
+const watch = vi.fn(
+  (
+    _path: string,
+    _options: { persistent: boolean },
+    callback: (event: string, filename: string | null) => void,
+  ) => {
+    listeners.push(callback);
+    return { close, on: vi.fn() };
+  },
+);
+let listeners: Array<(event: string, filename: string | null) => void> = [];
+const close = vi.fn();
+
+vi.mock("node:fs", () => ({ watch }));
+
 describe("watchLeaseDirectory", () => {
   afterEach(() => {
-    restoreGlobals();
+    listeners = [];
+    close.mockClear();
+    watch.mockClear();
+    Platform.isDesktop = true;
   });
 
-  it("is a no-op without a desktop window or a filesystem adapter", () => {
-    expect(watchLeaseDirectory({} as DataAdapter, () => {})).toStrictEqual(expect.any(Function));
+  it("is a no-op on mobile and without a filesystem adapter", async () => {
+    Platform.isDesktop = false;
+    await expect(watchLeaseDirectory({} as DataAdapter, () => {})).resolves.toStrictEqual(
+      expect.any(Function),
+    );
+    expect(watch).not.toHaveBeenCalled();
 
-    stubGlobal("window", { require: undefined });
-    expect(watchLeaseDirectory({} as DataAdapter, () => {})).toStrictEqual(expect.any(Function));
+    Platform.isDesktop = true;
+    await expect(watchLeaseDirectory({} as DataAdapter, () => {})).resolves.toStrictEqual(
+      expect.any(Function),
+    );
+    expect(watch).not.toHaveBeenCalled();
   });
 
-  it("watches .courier, wakes on a release, and ignores owner renewals", () => {
-    let listener: ((event: string, filename: string | null) => void) | null = null;
-    const close = vi.fn();
-    const watch = vi.fn(
-      (
-        _path: string,
-        _options: { persistent: boolean },
-        callback: (event: string, filename: string | null) => void,
-      ) => {
-        listener = callback;
-        return { close, on: vi.fn() };
-      },
-    );
-    const require = vi.fn((id: string) =>
-      id === "fs" ? { watch } : { join: (...parts: string[]) => parts.join("/") },
-    );
-    stubGlobal("window", { require });
+  it("watches .courier, wakes on a release, and ignores owner renewals", async () => {
     const onChange = vi.fn();
     const adapter = { getBasePath: () => "/vault" } as unknown as DataAdapter;
 
-    const stop = watchLeaseDirectory(adapter, onChange);
+    const stop = await watchLeaseDirectory(adapter, onChange);
 
     expect(watch).toHaveBeenCalledWith(
       "/vault/.courier",
       { persistent: false },
       expect.any(Function),
     );
-    listener!("rename", "sync-lease");
-    listener!("change", "sync-lease/owner.json");
-    listener!("change", null);
+    const listener = listeners[0]!;
+    listener("rename", "sync-lease");
+    listener("change", "sync-lease/owner.json");
+    listener("change", null);
     expect(onChange).toHaveBeenCalledTimes(3);
 
     stop();

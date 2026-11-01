@@ -72,16 +72,20 @@ export async function replaceWithConflictCopy(
 }
 
 /**
- * Delete the parked copy — only ever after a write that landed.
+ * Discard the parked copy — only ever after a write that landed.
  *
- * Best-effort by design: the replaced content is at the original path by then, so a copy
- * that refuses to disappear is a leftover, not a failure of the replace.
+ * It goes to the trash the user configured (`FileManager.trashFile`), the same way a note the
+ * engine removes does: "the copy is gone from the folder" is the promise, and a user who
+ * asked for deleted files to be kept should get the parked content back if they want it.
+ *
+ * Best-effort by design: the replaced content is at the original path by then, so a copy that
+ * refuses to disappear is a leftover, not a failure of the replace.
  */
 export async function deleteConflictCopy(app: App, target: ReplaceTarget): Promise<boolean> {
   const copy = app.vault.getAbstractFileByPath(target.conflictPath);
   if (!(copy instanceof TFile)) return false;
   try {
-    await app.vault.delete(copy);
+    await app.fileManager.trashFile(copy);
     return true;
   } catch {
     return false;

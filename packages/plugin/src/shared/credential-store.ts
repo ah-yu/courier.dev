@@ -22,7 +22,7 @@
 /** The subset of Obsidian's `App` this module needs — injectable for tests. */
 export interface CredentialStoreHost {
   loadLocalStorage(key: string): unknown;
-  saveLocalStorage(key: string, data: unknown | null): void;
+  saveLocalStorage(key: string, data: unknown): void;
 }
 
 /** A bound vault's locally persisted credential. */

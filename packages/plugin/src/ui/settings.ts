@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import { App, PluginSettingTab, Setting, type SettingDefinitionItem } from "obsidian";
 import {
   FILE_TYPE_GROUPS,
   SETTINGS_GROUPS,
@@ -22,6 +22,13 @@ import { storageUsageTitle } from "./storage-usage";
 
 /** How long the device-name field waits after the last keystroke before saving. */
 const DEVICE_NAME_DEBOUNCE_MS = 600;
+
+/**
+ * `visible` for an item that belongs to the step being rendered: the step switch already
+ * selected it, so a second predicate would only repeat that. Module scope because the
+ * page re-renders on every state change and the predicate captures nothing.
+ */
+const alwaysVisible = (): boolean => true;
 
 /** The catalog key of each file-type switch's label and description. */
 const FILE_TYPE_LABEL_KEYS: Record<FileTypeGroup, PluginMessageKey> = {
@@ -104,7 +111,7 @@ export class CourierSettingTab extends PluginSettingTab {
   /** The message under the current step's controls; survives a re-render. */
   private stageError: string | null = null;
   /** Set while a device-name keystroke is pending, so saving happens once. */
-  private deviceNameTimer: ReturnType<typeof setTimeout> | null = null;
+  private deviceNameTimer: number | null = null;
   private pendingDeviceName: string | null = null;
   /**
    * The connection row of the `ready` stage, kept so a host state change can update its
@@ -119,7 +126,7 @@ export class CourierSettingTab extends PluginSettingTab {
 
   /** Re-render the settings tab (called after a user action that changes its rows or step). */
   refresh(): void {
-    this.display();
+    this.update();
   }
 
   /**
@@ -133,30 +140,83 @@ export class CourierSettingTab extends PluginSettingTab {
     this.connectionRow?.setDesc(this.syncStateLabel());
   }
 
-  override display(): void {
-    const { containerEl } = this;
-    // A full render replaces every row; the old connection row must not stay reachable
-    // by a state change that arrives before the new one exists.
+  /**
+   * The page, as the definitions Obsidian renders (1.13).
+   *
+   * Every row is an item, so the settings are indexable by Obsidian's settings search — the
+   * reason the API exists — and the step the page is on is a `visible` predicate rather than
+   * a `switch` over renderers. The switches are `control` items: their value is read and
+   * written through the key, and `setControlValue` below turns a write into the same call
+   * the row used to make.
+   *
+   * What stays imperative is what a definition cannot describe: the sign-in form (a form,
+   * not a row of settings), the step cards, and the rows whose wording is computed at render
+   * time. Those are `render` items and draw into the row they are given.
+   *
+   * **Only the current step is returned.** The framework keys an item by its name, and two
+   * steps can legitimately carry the same one (both the locked and the unverified step say
+   * `已绑定「…」`); returning every step and hiding the others by `visible` makes the app
+   * report duplicate keys and render the page inconsistently. The step is a property of the
+   * render, so the switch happens here — `refresh()` re-asks, which is what `update()` is for.
+   */
+  override getSettingDefinitions(): SettingDefinitionItem[] {
+    // A full render replaces every row; the old connection row must not stay reachable by a
+    // state change that arrives before the new one exists.
     this.connectionRow = null;
-    containerEl.empty();
-
     switch (this.stage()) {
       case "login":
-        this.renderLoginStage(containerEl);
-        break;
+        return this.loginDefinitions(alwaysVisible);
       case "choose":
-        this.renderChooseStage(containerEl);
-        break;
+        return this.chooseDefinitions(alwaysVisible);
       case "locked":
-        this.renderLockedStage(containerEl);
-        break;
+        return this.lockedDefinitions(alwaysVisible);
       case "unverified":
-        this.renderUnverifiedStage(containerEl);
-        break;
+        return this.unverifiedDefinitions(alwaysVisible);
       case "ready":
-        this.renderReadyStage(containerEl);
-        break;
+        return this.readyDefinitions(alwaysVisible);
     }
+  }
+
+  /**
+   * A control's value, read the way the base class reads it: out of `plugin.settings`, by
+   * the key's dotted path. Overridden only to keep the read explicit for the two maps.
+   */
+  override getControlValue(key: string): unknown {
+    if (key.startsWith("fileTypes.")) {
+      return this.plugin.settings.fileTypes[key.slice("fileTypes.".length) as FileTypeGroup];
+    }
+    if (key.startsWith("settingsGroups.")) {
+      return this.plugin.settings.settingsGroups[
+        key.slice("settingsGroups.".length) as SettingsGroup
+      ];
+    }
+    return super.getControlValue(key);
+  }
+
+  /**
+   * A control's write.
+   *
+   * The two switch families cannot be a plain property write: flipping one restarts the sync
+   * host (the engine and the adapter read the scope when they are built), which is what
+   * `setFileTypeEnabled` / `setSettingsGroupEnabled` do. (The device name is a `render` item,
+   * not a control: its own row owns the debounce and the blur.)
+   */
+  override setControlValue(key: string, value: unknown): void | Promise<void> {
+    if (key.startsWith("fileTypes.")) {
+      void this.plugin.setFileTypeEnabled(
+        key.slice("fileTypes.".length) as FileTypeGroup,
+        value === true,
+      );
+      return;
+    }
+    if (key.startsWith("settingsGroups.")) {
+      void this.plugin.setSettingsGroupEnabled(
+        key.slice("settingsGroups.".length) as SettingsGroup,
+        value === true,
+      );
+      return;
+    }
+    return super.setControlValue(key, value);
   }
 
   override hide(): void {
@@ -189,21 +249,265 @@ export class CourierSettingTab extends PluginSettingTab {
   // ── Section chrome ──
 
   /**
-   * A section header: the title, plus an info icon whose tooltip carries what a
-   * paragraph used to say (`Setting.setHeading()` is Obsidian's own section-heading
-   * row, and the extra button is where the explanation lives).
+   * A section header: the title, plus an info icon whose tooltip carries what a paragraph
+   * used to say (`setHeading()` is Obsidian's own section-heading row, and the extra button
+   * is where the explanation lives).
    */
-  private renderSection(containerEl: HTMLElement, title: string, tooltip: string): void {
-    const heading = new Setting(containerEl).setName(title).setHeading();
-    heading.addExtraButton((button) => button.setIcon("help-circle").setTooltip(tooltip));
+  private heading(name: string, tooltip: string, visible: () => boolean): SettingDefinitionItem {
+    return {
+      name,
+      visible,
+      render: (setting) => {
+        setting.setName(name).setHeading();
+        setting.addExtraButton((button) => button.setIcon("help-circle").setTooltip(tooltip));
+      },
+    };
   }
 
-  /** The one line a failed action leaves behind, where the user just looked. */
-  private renderStageError(containerEl: HTMLElement): void {
-    if (!this.stageError) return;
-    const error = containerEl.createDiv({ cls: "courier-settings-error" });
-    error.setCssStyles({ color: "var(--text-error)", margin: "4px 0" });
-    error.setText(`⚠ ${this.stageError}`);
+  /**
+   * The one line a failed action leaves behind, where the user just looked.
+   *
+   * It is not a settings row: the row it is given loses its chrome and holds the line.
+   */
+  private stageErrorItem(visible: () => boolean): SettingDefinitionItem {
+    return {
+      name: "",
+      visible: () => visible() && this.stageError !== null,
+      render: (setting) => {
+        setting.settingEl.empty();
+        setting.settingEl.addClass("courier-settings-error-row");
+        const error = setting.settingEl.createDiv({ cls: "courier-settings-error" });
+        error.setCssStyles({ color: "var(--text-error)", margin: "4px 0" });
+        error.setText(`⚠ ${this.stageError}`);
+      },
+    };
+  }
+
+  // ── The steps, as definitions ──
+
+  /**
+   * Step 1: the sign-in form. A form is not a row, so it stays one imperative item — and its
+   * own error line is drawn inside the card rather than as a second item, because two items
+   * would carry the same (empty) name, and the app keys an item by that name.
+   */
+  private loginDefinitions(visible: () => boolean): SettingDefinitionItem[] {
+    return [
+      {
+        name: "",
+        visible,
+        render: (setting) => {
+          // A form is not a settings row: the row it is given loses its chrome and holds the
+          // card, which keeps the centred form the step has always been.
+          setting.settingEl.empty();
+          setting.settingEl.addClass("courier-login-row");
+          this.renderLoginStage(setting.settingEl);
+        },
+      },
+    ];
+  }
+
+  /** Step 2: who is signed in, and the way into the vault picker. */
+  private chooseDefinitions(visible: () => boolean): SettingDefinitionItem[] {
+    const settings = this.plugin.settings;
+    return [
+      {
+        name: settings.userName ?? t("settings.account.reading"),
+        desc: t("settings.account.server", { url: getServerUrl(settings) }),
+        visible,
+        render: (setting) => {
+          setting.setName(settings.userName ?? t("settings.account.reading"));
+          setting.setDesc(t("settings.account.server", { url: getServerUrl(settings) }));
+          setting.addButton((button) =>
+            button
+              .setButtonText(t("settings.account.signOut"))
+              .setDestructive()
+              .onClick(async () => {
+                await this.plugin.logout();
+                this.resetStages();
+                this.refresh();
+              }),
+          );
+          // The name belongs to the server, not to this device: a vault signed in before
+          // the name was ever read (or renamed since) would otherwise show nothing.
+          void this.refreshAccount(setting);
+        },
+      },
+      {
+        name: t("settings.choose.selectVault"),
+        desc: t("settings.choose.noVault"),
+        visible,
+        render: (setting) => {
+          setting
+            .setName(t("settings.choose.selectVault"))
+            .setDesc(t("settings.choose.noVault"))
+            .addButton((button) =>
+              button
+                .setButtonText(t("settings.choose.button"))
+                .setCta()
+                .onClick(async () => {
+                  await this.pickVault();
+                }),
+            );
+        },
+      },
+      this.stageErrorItem(visible),
+    ];
+  }
+
+  /** Step 3a, locked: the vault is bound and this device holds no key for it. */
+  private lockedDefinitions(visible: () => boolean): SettingDefinitionItem[] {
+    return [
+      {
+        name: t("settings.locked.bound", { vault: this.boundVaultName() }),
+        desc: t("settings.locked.desc"),
+        visible,
+        render: (setting) => {
+          setting
+            .setClass("courier-step-card")
+            .setName(t("settings.locked.bound", { vault: this.boundVaultName() }))
+            .setDesc(t("settings.locked.desc"))
+            .addButton((button) =>
+              button
+                .setButtonText(t("settings.locked.unlock"))
+                .setCta()
+                .onClick(async () => {
+                  await this.unlock();
+                }),
+            );
+          this.addBoundStepEscapes(setting);
+        },
+      },
+      this.stageErrorItem(visible),
+    ];
+  }
+
+  /** Step 3b, unverified: the key is on this device, only the server check is missing. */
+  private unverifiedDefinitions(visible: () => boolean): SettingDefinitionItem[] {
+    return [
+      {
+        name: t("settings.locked.bound", { vault: this.boundVaultName() }),
+        desc: t("settings.unverified.desc"),
+        visible,
+        render: (setting) => {
+          setting
+            .setClass("courier-step-card")
+            .setName(t("settings.locked.bound", { vault: this.boundVaultName() }))
+            .setDesc(t("settings.unverified.desc"))
+            .addButton((button) => {
+              button.setButtonText(t("settings.unverified.retry")).setCta();
+              button.onClick(async () => {
+                button.setDisabled(true).setButtonText(t("settings.unverified.retrying"));
+                this.stageError = null;
+                const started = await this.plugin.autoUnlockOrPrompt();
+                if (!started && this.stage() === "unverified") {
+                  this.stageError = t("settings.unverified.failed");
+                }
+                this.refresh();
+              });
+            });
+          this.addBoundStepEscapes(setting);
+        },
+      },
+      this.stageErrorItem(visible),
+    ];
+  }
+
+  /**
+   * Step 4, the settings themselves: the connection, what this device syncs, and the
+   * account it syncs with.
+   *
+   * Disconnecting and logging out are deliberately not one row: they are two different
+   * decisions, and the account — with its one destructive button — is the last section.
+   */
+  private readyDefinitions(visible: () => boolean): SettingDefinitionItem[] {
+    const unlocked = this.plugin.encryptionKey !== null;
+    return [
+      this.heading(t("settings.section.device"), t("settings.section.device.tooltip"), visible),
+      {
+        name: t("settings.device.name"),
+        desc: t("settings.device.desc"),
+        visible,
+        // A `render` item, not a `text` control: the field caps what can be typed
+        // (`maxLength`, rather than a validation message after the fact) and commits when it
+        // loses focus, and a control has nowhere to hang either of those.
+        render: (setting) => this.buildDeviceNameRow(setting),
+      },
+
+      this.heading(t("settings.section.vault"), t("settings.section.vault.tooltip"), visible),
+      {
+        name: t("settings.ready.connected", {
+          vault: this.plugin.settings.connectedVaultName ?? "",
+        }),
+        desc: this.syncStateLabel(),
+        visible,
+        render: (setting) => this.buildConnectionRow(setting),
+      },
+      {
+        name: t("settings.pause.name"),
+        visible,
+        render: (setting) => this.buildPauseRow(setting),
+      },
+      {
+        name: t("settings.vaultPassword.name"),
+        visible: () => visible() && this.hasRememberedPasswordRow(),
+        render: (setting) => this.buildRememberedPasswordRow(setting),
+      },
+
+      this.heading(
+        t("settings.section.fileTypes"),
+        t("settings.section.fileTypes.tooltip"),
+        visible,
+      ),
+      ...FILE_TYPE_GROUPS.map((group): SettingDefinitionItem => ({
+        name: t(FILE_TYPE_LABEL_KEYS[group]),
+        desc: t(FILE_TYPE_DESCRIPTION_KEYS[group]),
+        visible,
+        control: { type: "toggle", key: `fileTypes.${group}` },
+      })),
+
+      this.heading(
+        t("settings.section.excludedFolders"),
+        t("settings.section.excludedFolders.tooltip"),
+        visible,
+      ),
+      {
+        name: t("settings.excludedFolders.list.name"),
+        visible,
+        render: (setting) => this.buildExcludedFoldersRow(setting),
+      },
+
+      this.heading(
+        t("settings.section.settingsSync"),
+        t("settings.section.settingsSync.tooltip"),
+        visible,
+      ),
+      ...SETTINGS_GROUPS.map((group): SettingDefinitionItem => ({
+        name: t(SETTINGS_GROUP_LABEL_KEYS[group]),
+        desc: describeSettingsGroup(group),
+        visible,
+        control: { type: "toggle", key: `settingsGroups.${group}` },
+      })),
+
+      {
+        name: t("settings.history.name"),
+        desc: t("settings.history.desc"),
+        visible,
+        render: (setting) => this.buildHistoryRow(setting),
+      },
+      {
+        name: t("settings.recycleBin.name"),
+        visible,
+        render: (setting) => this.buildRecycleBinRow(setting, unlocked),
+      },
+
+      this.heading(t("settings.section.account"), t("settings.section.account.tooltip"), visible),
+      {
+        name: this.plugin.settings.userName ?? t("settings.account.reading"),
+        visible,
+        render: (setting) => this.buildAccountRow(setting),
+      },
+      this.stageErrorItem(visible),
+    ];
   }
 
   // ── Step 1: sign in ──
@@ -262,11 +566,18 @@ export class CourierSettingTab extends PluginSettingTab {
     submit.addEventListener("click", () => void signIn());
     for (const input of [serverInput, keyInput]) {
       input.addEventListener("keydown", (event) => {
-        if ((event as KeyboardEvent).key === "Enter") void signIn();
+        if (event.key === "Enter") void signIn();
       });
     }
 
-    this.renderStageError(card);
+    // The failure lands under the button that produced it. It is part of this item rather than
+    // an item of its own: a second item would carry the same (empty) name, and the app keys an
+    // item by its name.
+    if (this.stageError) {
+      const error = card.createDiv({ cls: "courier-settings-error" });
+      error.setCssStyles({ color: "var(--text-error)", margin: "4px 0" });
+      error.setText(`⚠ ${this.stageError}`);
+    }
   }
 
   /** One labelled, full-width field of the login form. */
@@ -316,58 +627,14 @@ export class CourierSettingTab extends PluginSettingTab {
       // the vault"; the override keeps the page on the field the user has to fix.
       this.showLogin = true;
       this.stageError = outcome.error;
-      this.display();
+      this.refresh();
       return;
     }
     this.showLogin = false;
-    this.display();
+    this.refresh();
   }
 
   // ── Step 2: the account, and choosing a remote vault ──
-
-  /**
-   * Two rows: who is signed in, and the way into the vault picker.
-   *
-   * The account row carries the two things the key stands for — the server it belongs
-   * to and the name the server knows it by — and signing out is its only action:
-   * changing either one means signing in again, which is what the first step is for.
-   * The vault row is one row no matter how many vaults exist, because the list,
-   * connecting, renaming, deleting and creating all live in the dialog behind it
-   * ({@link VaultPickerModal}).
-   */
-  private renderChooseStage(containerEl: HTMLElement): void {
-    const settings = this.plugin.settings;
-
-    const account = new Setting(containerEl)
-      .setName(settings.userName ?? t("settings.account.reading"))
-      .setDesc(t("settings.account.server", { url: getServerUrl(settings) }))
-      .addButton((button) =>
-        button
-          .setButtonText(t("settings.account.signOut"))
-          .setWarning()
-          .onClick(async () => {
-            await this.plugin.logout();
-            this.resetStages();
-            this.display();
-          }),
-      );
-    // The name belongs to the server, not to this device: a vault that was signed in
-    // before the name was ever read (or whose account was renamed since) would
-    // otherwise show nothing. One small read, painted into the row that needs it.
-    void this.refreshAccount(account);
-
-    new Setting(containerEl)
-      .setName(t("settings.choose.selectVault"))
-      .setDesc(t("settings.choose.noVault"))
-      .addButton((button) =>
-        button
-          .setButtonText(t("settings.choose.button"))
-          .setCta()
-          .onClick(async () => {
-            await this.pickVault();
-          }),
-      );
-  }
 
   /** Open the vault picker; connecting inside it moves the page to the settings. */
   private async pickVault(): Promise<void> {
@@ -376,7 +643,7 @@ export class CourierSettingTab extends PluginSettingTab {
     const connected = await modal.getResult();
     if (!connected) return;
     this.resetStages();
-    this.display();
+    this.refresh();
   }
 
   // ── Step 3, bound: the vault has no key in memory ──
@@ -391,73 +658,16 @@ export class CourierSettingTab extends PluginSettingTab {
         button.setButtonText(t("settings.locked.disconnect")).onClick(async () => {
           await this.plugin.disconnectVault();
           this.resetStages();
-          this.display();
+          this.refresh();
         }),
       )
       .addButton((button) =>
         button.setButtonText(t("settings.account.signOut")).onClick(async () => {
           await this.plugin.logout();
           this.resetStages();
-          this.display();
+          this.refresh();
         }),
       );
-  }
-
-  /**
-   * Step 3a, locked: the vault is bound and this device holds no key for it.
-   *
-   * The password dialog is the one thing that can move the step on (`unlock`).
-   */
-  private renderLockedStage(containerEl: HTMLElement): void {
-    const row = new Setting(containerEl)
-      .setClass("courier-step-card")
-      .setName(t("settings.locked.bound", { vault: this.boundVaultName() }))
-      .setDesc(t("settings.locked.desc"))
-      .addButton((button) =>
-        button
-          .setButtonText(t("settings.locked.unlock"))
-          .setCta()
-          .onClick(async () => {
-            await this.unlock();
-          }),
-      );
-    this.addBoundStepEscapes(row);
-    this.renderStageError(containerEl);
-  }
-
-  /**
-   * Step 3b, unverified: the vault is bound, the key is saved on this device, but this run
-   * could not get it into memory — the server was unreachable when it tried to prove it.
-   *
-   * This used to render as `locked`, which offers the password dialog: the page then said
-   * the vault needed its password although the key was already here, and the dialog could
-   * not succeed either (a password cannot be proved without the same server). The action
-   * that fits is the retry, which runs the cold-start path: it unlocks silently when the
-   * server answers, and falls back to the password dialog when the server reports the
-   * stored key as dead.
-   */
-  private renderUnverifiedStage(containerEl: HTMLElement): void {
-    const row = new Setting(containerEl)
-      .setClass("courier-step-card")
-      .setName(t("settings.locked.bound", { vault: this.boundVaultName() }))
-      .setDesc(t("settings.unverified.desc"))
-      .addButton((button) => {
-        button.setButtonText(t("settings.unverified.retry")).setCta();
-        button.onClick(async () => {
-          button.setDisabled(true).setButtonText(t("settings.unverified.retrying"));
-          this.stageError = null;
-          const started = await this.plugin.autoUnlockOrPrompt();
-          // The unlock re-renders the page on every completion, so this button is gone by
-          // now. What the user sees instead is the ready step, the locked step (a credential
-          // that vanished and a dialog they cancelled) or this step with the failure line.
-          if (!started && this.stage() === "unverified") {
-            this.stageError = t("settings.unverified.failed");
-          }
-          this.display();
-        });
-      });
-    this.addBoundStepEscapes(row);
-    this.renderStageError(containerEl);
   }
 
   /** The name of the bound vault, as the page's step rows read it. */
@@ -481,55 +691,10 @@ export class CourierSettingTab extends PluginSettingTab {
     this.stageError = null;
     const outcome = await this.plugin.unlockWithPassword(result.password, result.remember);
     if (!outcome.ok) this.stageError = outcome.error;
-    this.display();
+    this.refresh();
   }
 
   // ── Step 3: the settings themselves ──
-
-  /**
-   * The settings, in sections: the connection, what this device syncs, and the
-   * account it syncs with.
-   *
-   * Disconnecting and logging out are deliberately **not** on one row: they are two
-   * different decisions (stop syncing this vault vs. forget this account here), and
-   * the account — with its one destructive button — is the last section of the page.
-   */
-  private renderReadyStage(containerEl: HTMLElement): void {
-    const settings = this.plugin.settings;
-    // A paused load deliberately does not unlock (see `settingsStage`), so this page can be
-    // on screen without the vault key. The recycle bin decrypts stored paths and says so;
-    // the sync history is this run's in-memory log, so it needs no key and stays available
-    // while paused.
-    const unlocked = this.plugin.encryptionKey !== null;
-
-    this.renderDeviceSection(containerEl);
-
-    this.renderSection(
-      containerEl,
-      t("settings.section.vault"),
-      t("settings.section.vault.tooltip"),
-    );
-    const connection = new Setting(containerEl)
-      .setName(t("settings.ready.connected", { vault: settings.connectedVaultName ?? "" }))
-      .setDesc(this.syncStateLabel())
-      .addButton((button) =>
-        button.setButtonText(t("settings.ready.disconnect")).onClick(async () => {
-          await this.plugin.disconnectVault();
-          this.resetStages();
-          this.display();
-        }),
-      );
-    this.connectionRow = connection;
-
-    this.renderPauseRow(containerEl);
-    this.renderRememberedPassword(containerEl);
-    this.renderFileTypesSection(containerEl);
-    this.renderExcludedFoldersSection(containerEl);
-    this.renderSettingsSyncSection(containerEl);
-    this.renderHistoryRow(containerEl);
-    this.renderRecycleBinRow(containerEl, unlocked);
-    this.renderAccountSection(containerEl);
-  }
 
   /**
    * The connection row's state line: paused wins over the socket, because a paused host is
@@ -547,135 +712,12 @@ export class CourierSettingTab extends PluginSettingTab {
           : t("settings.state.disconnected");
   }
 
-  /**
-   * The one pause/resume control: pausing stops the host and keeps everything else
-   * (binding, key, stored credential, sync state), so resuming is this layout's `继续同步`
-   * and no password on a device that remembers one. Deliberately a row of its own rather
-   * than another button on the connection row: "stop syncing for now" and "let go of this
-   * vault" are different decisions, and the connection row's one action stays the one
-   * that forgets the credential.
-   */
-  private renderPauseRow(containerEl: HTMLElement): void {
-    const paused = this.plugin.settings.syncPaused;
-    new Setting(containerEl)
-      .setName(t("settings.pause.name"))
-      .setDesc(paused ? t("settings.pause.descPaused") : t("settings.pause.descRunning"))
-      .addButton((button) => {
-        button.setButtonText(paused ? t("settings.pause.resume") : t("settings.pause.pause"));
-        if (paused) button.setCta();
-        button.onClick(() => {
-          void (paused ? this.plugin.resumeSync() : this.plugin.pauseSync());
-        });
-      });
-  }
-
-  /**
-   * What this client calls itself.
-   *
-   * Near the top, and not part of the account: it is the label every push from this
-   * machine carries, and the one place it shows up is the history.
-   */
-  private renderDeviceSection(containerEl: HTMLElement): void {
-    this.renderSection(
-      containerEl,
-      t("settings.section.device"),
-      t("settings.section.device.tooltip"),
-    );
-    new Setting(containerEl)
-      .setName(t("settings.device.name"))
-      .setDesc(t("settings.device.desc"))
-      .addText((text) => {
-        text.inputEl.maxLength = MAX_DEVICE_NAME_LENGTH;
-        text
-          .setPlaceholder(t("settings.device.placeholder"))
-          .setValue(this.plugin.settings.deviceName);
-        text.onChange((value) => this.queueDeviceName(value));
-        // Leaving the field commits immediately instead of waiting out the debounce.
-        text.inputEl.addEventListener("blur", () => this.flushDeviceName());
-      });
-  }
-
-  /**
-   * The way into the sync history.
-   *
-   * A row, not a section: the log itself is a dialog (`SyncHistoryModal`), the way
-   * Obsidian's own Sync settings offers its activity log. The page stays a page of
-   * settings instead of growing a 200-line log inside it.
-   */
-  private renderHistoryRow(containerEl: HTMLElement): void {
-    new Setting(containerEl)
-      .setName(t("settings.history.name"))
-      .setDesc(t("settings.history.desc"))
-      .addButton((button) =>
-        button.setButtonText(t("settings.history.view")).onClick(() => {
-          this.openHistory();
-        }),
-      );
-  }
-
   private openHistory(): void {
     // The log is in memory and needs neither the vault key nor the network; the only
     // thing the dialog cannot read for itself is whether a vault is bound.
     new SyncHistoryModal(this.app, {
       connected: this.plugin.settings.connectedVaultId !== null,
     }).open();
-  }
-
-  /**
-   * The way into the recycle bin.
-   *
-   * The same shape as the sync-history row above, and for the same reason: the list is a
-   * dialog ({@link RecycleBinModal}), so the page stays a page of settings. This used to
-   * be a ribbon icon and a sidebar view, which is two pieces of chrome for something a
-   * user reaches for about as often as their own sync history.
-   */
-  private renderRecycleBinRow(containerEl: HTMLElement, unlocked: boolean): void {
-    new Setting(containerEl)
-      .setName(t("settings.recycleBin.name"))
-      .setDesc(unlocked ? t("settings.recycleBin.desc") : t("settings.recycleBin.descLocked"))
-      .addButton((button) =>
-        button
-          .setButtonText(t("settings.recycleBin.view"))
-          .setDisabled(!unlocked)
-          .onClick(() => {
-            new RecycleBinModal(this.app, this.plugin).open();
-          }),
-      );
-  }
-
-  /**
-   * The account this device is signed in as: one row with the name the key belongs to,
-   * the server, the two read-only facts a mobile user cannot see anywhere else — the
-   * key's expiry and the storage quota — and the one destructive action, signing out.
-   *
-   * Everything but the name lives in the row's description as a small stack of lines, so
-   * the section stays one row instead of growing a settings list. One `GET /api/me` read
-   * fills both the name and the usage, so opening the page costs no extra request.
-   */
-  private renderAccountSection(containerEl: HTMLElement): void {
-    this.renderSection(
-      containerEl,
-      t("settings.section.account"),
-      t("settings.section.account.tooltip"),
-    );
-
-    const account = new Setting(containerEl)
-      .setName(this.plugin.settings.userName ?? t("settings.account.reading"))
-      .setDesc(t("settings.account.server", { url: getServerUrl(this.plugin.settings) }))
-      .addButton((button) =>
-        button
-          .setButtonText(t("settings.account.signOut"))
-          .setWarning()
-          .onClick(async () => {
-            await this.plugin.logout();
-            this.resetStages();
-            this.display();
-          }),
-      );
-    // The name belongs to the server, not to this device: a vault that was signed in
-    // before the name was ever read (or whose account was renamed since) would
-    // otherwise show nothing. One small read fills the name and the usage lines.
-    void this.refreshAccount(account);
   }
 
   /** Read which account the user key belongs to and fill the account row. */
@@ -728,7 +770,7 @@ export class CourierSettingTab extends PluginSettingTab {
       return lines.join(" · ");
     }
 
-    const fragment = document.createDocumentFragment();
+    const fragment = createFragment();
     const details = fragment.createDiv({ cls: "courier-account-details" });
     details.createDiv({ cls: "courier-account-detail", text: serverLine });
 
@@ -769,97 +811,141 @@ export class CourierSettingTab extends PluginSettingTab {
     });
   }
 
+  // ── Device label + sync history ──
+
+  /** Debounced device-name save — one write per pause, not per keystroke. */
+  private queueDeviceName(value: string): void {
+    this.pendingDeviceName = value;
+    if (this.deviceNameTimer !== null) window.clearTimeout(this.deviceNameTimer);
+    this.deviceNameTimer = window.setTimeout(() => {
+      this.deviceNameTimer = null;
+      void this.commitDeviceName();
+    }, DEVICE_NAME_DEBOUNCE_MS);
+  }
+
+  /** Save a pending device name now (blur, or the tab closing). */
+  private flushDeviceName(): void {
+    if (this.deviceNameTimer !== null) {
+      window.clearTimeout(this.deviceNameTimer);
+      this.deviceNameTimer = null;
+    }
+    void this.commitDeviceName();
+  }
+
+  private async commitDeviceName(): Promise<void> {
+    const value = this.pendingDeviceName;
+    this.pendingDeviceName = null;
+    if (value === null) return;
+    // No `refresh`: re-rendering the tab would take the caret out of the field the
+    // user may still be typing in.
+    await this.plugin.setDeviceName(value, { refresh: false });
+  }
+
+  // ── The rows of the settings step ──
+
   /**
-   * What this device remembers about the vault key.
+   * What this client calls itself.
    *
-   * The key is kept in Obsidian's App-level localStorage (see
-   * `shared/credential-store.ts`): it never enters the vault folder, so it is not
-   * carried off by vault syncing — but it does mean the connection resumes without
-   * asking for the password again.
+   * The field is built here rather than declared as a `control`, because it caps what can be
+   * typed (`maxLength`) and commits when it loses focus — a `control` has no hook for either.
+   * Leaving the field flushes the debounce, so a value the user typed and immediately left is
+   * written before any other action rebuilds the page from the stored one.
    */
-  private renderRememberedPassword(containerEl: HTMLElement): void {
+  private buildDeviceNameRow(setting: Setting): void {
+    setting
+      .setName(t("settings.device.name"))
+      .setDesc(t("settings.device.desc"))
+      .addText((text) => {
+        text.inputEl.maxLength = MAX_DEVICE_NAME_LENGTH;
+        text
+          .setPlaceholder(t("settings.device.placeholder"))
+          .setValue(this.plugin.settings.deviceName ?? "");
+        text.onChange((value) => this.queueDeviceName(value));
+        text.inputEl.addEventListener("blur", () => this.flushDeviceName());
+      });
+  }
+
+  /** The bound vault, its live state, and the way out of it. */
+  private buildConnectionRow(setting: Setting): void {
+    setting
+      .setName(
+        t("settings.ready.connected", { vault: this.plugin.settings.connectedVaultName ?? "" }),
+      )
+      .setDesc(this.syncStateLabel())
+      .addButton((button) =>
+        button.setButtonText(t("settings.ready.disconnect")).onClick(async () => {
+          await this.plugin.disconnectVault();
+          this.resetStages();
+          this.refresh();
+        }),
+      );
+    this.connectionRow = setting;
+  }
+
+  /**
+   * The one pause/resume control. Pausing stops the host and keeps everything else, so
+   * resuming is this layout's `继续同步` and no password on a device that remembers one.
+   */
+  private buildPauseRow(setting: Setting): void {
+    const paused = this.plugin.settings.syncPaused;
+    setting
+      .setName(t("settings.pause.name"))
+      .setDesc(paused ? t("settings.pause.descPaused") : t("settings.pause.descRunning"))
+      .addButton((button) => {
+        button.setButtonText(paused ? t("settings.pause.resume") : t("settings.pause.pause"));
+        if (paused) button.setCta();
+        button.onClick(() => {
+          void (paused ? this.plugin.resumeSync() : this.plugin.pauseSync());
+        });
+      });
+  }
+
+  /** Whether this run has anything to say about the remembered vault key. */
+  private hasRememberedPasswordRow(): boolean {
+    return this.plugin.settings.connectedVaultId !== null;
+  }
+
+  /**
+   * What this device remembers about the vault key: kept in Obsidian's App-level
+   * localStorage, so it never enters the vault folder and is not carried off by vault
+   * syncing — and the connection resumes without asking for the password again.
+   */
+  private buildRememberedPasswordRow(setting: Setting): void {
     const vaultId = this.plugin.settings.connectedVaultId;
     if (!vaultId) return;
     const stored = loadVaultCredential(this.app, vaultId);
     const paused = this.plugin.settings.syncPaused;
 
+    setting.setName(t("settings.vaultPassword.name"));
     if (!stored) {
-      new Setting(containerEl)
-        .setName(t("settings.vaultPassword.name"))
-        .setDesc(
-          paused
-            ? t("settings.vaultPassword.notStoredPaused")
-            : t("settings.vaultPassword.notStored"),
-        );
+      setting.setDesc(
+        paused
+          ? t("settings.vaultPassword.notStoredPaused")
+          : t("settings.vaultPassword.notStored"),
+      );
       return;
     }
 
-    new Setting(containerEl)
-      .setName(t("settings.vaultPassword.name"))
-      .setDesc(
-        paused ? t("settings.vaultPassword.storedPaused") : t("settings.vaultPassword.stored"),
-      )
-      .addButton((button) =>
-        button.setButtonText(t("settings.vaultPassword.clear")).onClick(() => {
-          clearVaultCredential(this.app);
-          // `refresh()` re-renders this row as 未保存, which is the confirmation.
-          this.refresh();
-        }),
-      );
+    setting.setDesc(
+      paused ? t("settings.vaultPassword.storedPaused") : t("settings.vaultPassword.stored"),
+    );
+    setting.addButton((button) =>
+      button.setButtonText(t("settings.vaultPassword.clear")).onClick(() => {
+        clearVaultCredential(this.app);
+        // Re-rendering this row as 未保存 is the confirmation.
+        this.refresh();
+      }),
+    );
   }
 
-  // ── Vault file types ──
-
   /**
-   * One switch per vault-wide file type.
-   *
-   * Markdown and `.canvas` are not offered: they are the vault's content, and a
-   * device that cannot see them is looking at a different vault. Everything else is
-   * device-local — a type switched off is neither pushed nor pulled, and switching
-   * one off deletes nothing on either side. Any change restarts the host, because
-   * the engine and the adapter read the scope when they are built.
-   *
-   * The maximum sync file size is deliberately absent: it belongs to the account's
-   * key and is set by the administrator, so it has no device-local control here.
+   * The way into the excluded-folder tree: one row, like Obsidian Sync's "Excluded folders →
+   * Manage", because the tree is a dialog and a vault with a hundred folders should not turn
+   * this page into a hundred rows.
    */
-  private renderFileTypesSection(containerEl: HTMLElement): void {
-    this.renderSection(
-      containerEl,
-      t("settings.section.fileTypes"),
-      t("settings.section.fileTypes.tooltip"),
-    );
-
-    for (const group of FILE_TYPE_GROUPS) {
-      new Setting(containerEl)
-        .setName(t(FILE_TYPE_LABEL_KEYS[group]))
-        .setDesc(t(FILE_TYPE_DESCRIPTION_KEYS[group]))
-        .addToggle((toggle) =>
-          toggle.setValue(this.plugin.settings.fileTypes[group]).onChange(async (value) => {
-            await this.plugin.setFileTypeEnabled(group, value);
-          }),
-        );
-    }
-  }
-
-  // ── Excluded folders ──
-
-  /**
-   * The way into the excluded-folder tree.
-   *
-   * One row, like Obsidian Sync's own "Excluded folders → Manage": the tree is a dialog
-   * (`ExcludedFoldersModal`), so a vault with a hundred folders does not turn this page
-   * into a hundred rows. The selection is written once, when the dialog's 完成 is
-   * pressed, because every scope write restarts the sync host.
-   */
-  private renderExcludedFoldersSection(containerEl: HTMLElement): void {
-    this.renderSection(
-      containerEl,
-      t("settings.section.excludedFolders"),
-      t("settings.section.excludedFolders.tooltip"),
-    );
-
+  private buildExcludedFoldersRow(setting: Setting): void {
     const count = this.plugin.settings.excludedFolders.length;
-    new Setting(containerEl)
+    setting
       .setName(t("settings.excludedFolders.list.name"))
       .setDesc(
         count === 0
@@ -880,65 +966,57 @@ export class CourierSettingTab extends PluginSettingTab {
       );
   }
 
-  // ── Obsidian settings sync ──
+  /**
+   * The way into the sync history: a row, not a section, because the log itself is a dialog
+   * ({@link SyncHistoryModal}) and the page stays a page of settings.
+   */
+  private buildHistoryRow(setting: Setting): void {
+    setting
+      .setName(t("settings.history.name"))
+      .setDesc(t("settings.history.desc"))
+      .addButton((button) =>
+        button.setButtonText(t("settings.history.view")).onClick(() => {
+          this.openHistory();
+        }),
+      );
+  }
+
+  /** The way into the recycle bin, disabled while this device holds no vault key. */
+  private buildRecycleBinRow(setting: Setting, unlocked: boolean): void {
+    setting
+      .setName(t("settings.recycleBin.name"))
+      .setDesc(unlocked ? t("settings.recycleBin.desc") : t("settings.recycleBin.descLocked"))
+      .addButton((button) =>
+        button
+          .setButtonText(t("settings.recycleBin.view"))
+          .setDisabled(!unlocked)
+          .onClick(() => {
+            new RecycleBinModal(this.app, this.plugin).open();
+          }),
+      );
+  }
 
   /**
-   * One switch per config-folder group.
-   *
-   * The groups mirror Obsidian's own "vault configuration sync" categories, so a
-   * user can keep appearance on one device and hotkeys on another instead of
-   * choosing all settings or none. All of them are device-local and default off:
-   * turning one on changes what the *other* devices' Obsidian looks like, which is
-   * not a decision to make for the user. Any change restarts the host, because the
-   * engine and the vault adapter read the scope when they are built.
+   * The account this device is signed in as: one row with the name the key belongs to, the
+   * server, the two read-only facts a mobile user cannot see anywhere else — the key's
+   * expiry and the storage quota — and the one destructive action, signing out.
    */
-  private renderSettingsSyncSection(containerEl: HTMLElement): void {
-    this.renderSection(
-      containerEl,
-      t("settings.section.settingsSync"),
-      t("settings.section.settingsSync.tooltip"),
-    );
-
-    for (const group of SETTINGS_GROUPS) {
-      new Setting(containerEl)
-        .setName(t(SETTINGS_GROUP_LABEL_KEYS[group]))
-        .setDesc(describeSettingsGroup(group))
-        .addToggle((toggle) =>
-          toggle.setValue(this.plugin.settings.settingsGroups[group]).onChange(async (value) => {
-            await this.plugin.setSettingsGroupEnabled(group, value);
+  private buildAccountRow(setting: Setting): void {
+    setting
+      .setName(this.plugin.settings.userName ?? t("settings.account.reading"))
+      .setDesc(t("settings.account.server", { url: getServerUrl(this.plugin.settings) }))
+      .addButton((button) =>
+        button
+          .setButtonText(t("settings.account.signOut"))
+          .setDestructive()
+          .onClick(async () => {
+            await this.plugin.logout();
+            this.resetStages();
+            this.refresh();
           }),
-        );
-    }
-  }
-
-  // ── Device label + sync history ──
-
-  /** Debounced device-name save — one write per pause, not per keystroke. */
-  private queueDeviceName(value: string): void {
-    this.pendingDeviceName = value;
-    if (this.deviceNameTimer !== null) clearTimeout(this.deviceNameTimer);
-    this.deviceNameTimer = setTimeout(() => {
-      this.deviceNameTimer = null;
-      void this.commitDeviceName();
-    }, DEVICE_NAME_DEBOUNCE_MS);
-  }
-
-  /** Save a pending device name now (blur, or the tab closing). */
-  private flushDeviceName(): void {
-    if (this.deviceNameTimer !== null) {
-      clearTimeout(this.deviceNameTimer);
-      this.deviceNameTimer = null;
-    }
-    void this.commitDeviceName();
-  }
-
-  private async commitDeviceName(): Promise<void> {
-    const value = this.pendingDeviceName;
-    this.pendingDeviceName = null;
-    if (value === null) return;
-    // No `refresh`: re-rendering the tab would take the caret out of the field the
-    // user may still be typing in.
-    await this.plugin.setDeviceName(value, { refresh: false });
+      );
+    // The name belongs to the server: one small read fills the name and the usage lines.
+    void this.refreshAccount(setting);
   }
 
   // ── Helpers ──

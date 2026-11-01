@@ -17,7 +17,7 @@ import { storageUsageTitle } from "./storage-usage";
  */
 function menuTextTitle(text: string): string | DocumentFragment {
   if (typeof document === "undefined") return text;
-  const fragment = document.createDocumentFragment();
+  const fragment = createFragment();
   fragment.createSpan({ cls: "courier-status-menu-row", text });
   return fragment;
 }

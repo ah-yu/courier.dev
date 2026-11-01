@@ -176,16 +176,18 @@ export interface SyncScope {
   maxFileBytes: number;
 }
 
-/** Obsidian's default config folder name. */
-export const DEFAULT_CONFIG_DIR = ".obsidian";
-
 /**
  * What a device that has never been configured syncs: markdown, canvas and Obsidian's
  * own file types (images, audio, video, PDF) everywhere in the vault, no config-folder
  * group, and the default 50 MB size cap.
+ *
+ * `configDir` is **empty**, and that means "this host has no config folder": the name is a
+ * property of the app the vault belongs to (`Vault.configDir`, which a user can rename), so
+ * the engine never guesses it. The plugin passes the real one; the CLI, which has no
+ * Obsidian to ask, syncs no config folder at all — which is what it always did.
  */
 export const DEFAULT_SYNC_SCOPE: SyncScope = {
-  configDir: DEFAULT_CONFIG_DIR,
+  configDir: "",
   settingsGroups: NO_SETTINGS_GROUPS,
   fileTypes: DEFAULT_FILE_TYPES,
   excludedFolders: [],
@@ -291,7 +293,8 @@ export interface SyncScopeInput {
 
 /** Fill in the defaults of a partially specified scope and normalize it. */
 export function normalizeScope(scope?: SyncScopeInput): SyncScope {
-  const configDir = (scope?.configDir ?? DEFAULT_CONFIG_DIR).replace(/^\/+|\/+$/g, "");
+  // No name means no config folder — see `DEFAULT_SYNC_SCOPE`. A host that has one passes it.
+  const configDir = (scope?.configDir ?? "").replace(/^\/+|\/+$/g, "");
   const groups: SettingsSyncGroups = { ...NO_SETTINGS_GROUPS };
   for (const group of SETTINGS_GROUPS) {
     groups[group] = scope?.settingsGroups?.[group] === true;
@@ -305,7 +308,7 @@ export function normalizeScope(scope?: SyncScopeInput): SyncScope {
     if (typeof value === "boolean") fileTypes[group] = value;
   }
   return {
-    configDir: configDir.length > 0 ? configDir : DEFAULT_CONFIG_DIR,
+    configDir,
     settingsGroups: groups,
     fileTypes,
     excludedFolders: normalizeExcludedFolders(scope?.excludedFolders),

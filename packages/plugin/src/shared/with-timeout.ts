@@ -1,4 +1,20 @@
 /**
+ * `promise`'s rejection reason as an `Error`.
+ *
+ * A rejection reason is whatever the other side threw; a promise that rejects with a value
+ * that is not an `Error` is still an ordinary refusal here, and wrapping it keeps the
+ * caller able to read `.message` without every call site narrowing. The original reason is
+ * kept as `cause`, so a refusal that did carry detail (an object with fields, a status)
+ * does not lose it in the wrap.
+ */
+function asError(reason: unknown): Error {
+  if (reason instanceof Error) return reason;
+  return new Error(typeof reason === "string" ? reason : "the wrapped promise rejected", {
+    cause: reason,
+  });
+}
+
+/**
  * Reject when `promise` has not settled within `timeoutMs`.
  *
  * The status menu reads the account before it opens, and a request that never settles
@@ -13,15 +29,15 @@ export function withTimeout<T>(
   message = `Timed out after ${timeoutMs} ms`,
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    const timer = window.setTimeout(() => reject(new Error(message)), timeoutMs);
     promise.then(
       (value) => {
-        clearTimeout(timer);
+        window.clearTimeout(timer);
         resolve(value);
       },
       (error: unknown) => {
-        clearTimeout(timer);
-        reject(error);
+        window.clearTimeout(timer);
+        reject(asError(error));
       },
     );
   });

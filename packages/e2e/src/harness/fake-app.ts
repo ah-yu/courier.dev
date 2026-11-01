@@ -1,3 +1,4 @@
+import type { TFile } from "obsidian";
 import { FakeVault } from "./fake-vault";
 import {
   createFakeEl,
@@ -89,6 +90,12 @@ export interface FakeApp {
   vault: FakeVault;
   workspace: FakeWorkspace;
   setting: FakeSettingsSurface;
+  /**
+   * Obsidian's file manager, as far as the plugin uses it: every deletion the sync engine
+   * performs goes through `trashFile`, so a fake that skipped it would let a deletion
+   * silently do nothing (the app's "deleted files" preference is the point of the call).
+   */
+  fileManager: { trashFile(file: TFile): Promise<void> };
   loadLocalStorage(key: string): unknown;
   saveLocalStorage(key: string, data: unknown | null): void;
 }
@@ -166,6 +173,9 @@ export function createFakeApp(vault: FakeVault): FakeApp {
     vault,
     workspace,
     setting,
+    // The vault is the trash in this harness: there is no system recycle bin to move to,
+    // and a deletion has to reach the file map for the suite to observe it.
+    fileManager: { trashFile: (file: TFile) => vault.delete(file) },
     loadLocalStorage,
     saveLocalStorage,
   });

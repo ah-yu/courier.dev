@@ -24,7 +24,7 @@ for machines that never open Obsidian, and one server that you run yourself.
 
 ## Requirements
 
-- Obsidian 1.8.7 or newer.
+- Obsidian 1.13.0 or newer.
 - A Courier server you run (Linux x64, macOS on Apple Silicon, or Windows x64) and a user key on it.
 - A vault password. It encrypts the remote vault and is never sent to the server. **If you lose it,
   the remote content cannot be decrypted — there is no reset.**

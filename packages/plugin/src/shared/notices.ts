@@ -42,7 +42,7 @@ export interface BurstNotifierOptions<T> {
 }
 
 export function createBurstNotifier<T>(options: BurstNotifierOptions<T>): BurstNotifier<T> {
-  let timer: ReturnType<typeof setTimeout> | null = null;
+  let timer: number | null = null;
   let pending: T[] = [];
   /** Keys collected for the current window — a burst names each identity once. */
   let pendingKeys = new Set<string>();
@@ -58,7 +58,7 @@ export function createBurstNotifier<T>(options: BurstNotifierOptions<T>): BurstN
       }
       pending.push(event);
       if (timer !== null) return;
-      timer = setTimeout(() => {
+      timer = window.setTimeout(() => {
         timer = null;
         const events = pending;
         const keys = pendingKeys;
@@ -73,7 +73,7 @@ export function createBurstNotifier<T>(options: BurstNotifierOptions<T>): BurstN
 
     reset() {
       if (timer !== null) {
-        clearTimeout(timer);
+        window.clearTimeout(timer);
         timer = null;
       }
       pending = [];

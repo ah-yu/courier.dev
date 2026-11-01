@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { TFile, Vault } from "obsidian";
+import type { FileManager, TFile, Vault } from "obsidian";
 import { ObsidianVaultAdapter } from "./adapter";
 import {
   NO_FILE_TYPES,
@@ -22,13 +22,21 @@ import {
  * only), which is why the stub below is hand-written rather than aliased.
  */
 
+/**
+ * The `FileManager` the adapter deletes through. The stub records it like any other
+ * vault call, so a test that cares about a deletion can still see it.
+ */
+function fileManagerFor(vault: Vault): FileManager {
+  return { trashFile: (file: TFile) => vault.delete(file) } as unknown as FileManager;
+}
+
 type VaultCall = [method: string, ...args: unknown[]];
 
 /** A scope with exactly the named config-folder groups on and no vault file types. */
 function scopeWith(...groups: SettingsGroup[]): SyncScope {
   const settingsGroups: Record<string, boolean> = {};
   for (const group of groups) settingsGroups[group] = true;
-  return normalizeScope({ settingsGroups, fileTypes: NO_FILE_TYPES });
+  return normalizeScope({ configDir: ".obsidian", settingsGroups, fileTypes: NO_FILE_TYPES });
 }
 
 const MARKDOWN_ONLY: SyncScope = scopeWith();
@@ -85,7 +93,7 @@ interface RecordingVault {
     list(path: string): Promise<{ files: string[]; folders: string[] }>;
     readBinary(path: string): Promise<ArrayBuffer>;
     writeBinary(path: string, data: ArrayBuffer): Promise<void>;
-    appendBinary?(path: string, data: ArrayBuffer): Promise<void>;
+    appendBinary(path: string, data: ArrayBuffer): Promise<void>;
     mkdir(path: string): Promise<void>;
     remove(path: string): Promise<void>;
     rename(from: string, to: string): Promise<void>;
@@ -141,8 +149,6 @@ function recordingVault(
     laggingIndex?: Set<string>;
     /** Paths whose `TFile.stat` still describes the bytes from before a streamed replace. */
     staleIndexStats?: Map<string, { size: number; mtime: number }>;
-    /** Model an Obsidian older than 1.12.3, which has no `appendBinary`. */
-    withoutAppendBinary?: boolean;
   } = {},
 ) {
   const calls: VaultCall[] = [];
@@ -201,7 +207,6 @@ function recordingVault(
       contents.set(to, content);
     },
   };
-  if (races.withoutAppendBinary) delete adapter.appendBinary;
 
   const vault: RecordingVault = {
     configDir,
@@ -305,7 +310,7 @@ function recordingVault(
 describe("ObsidianVaultAdapter — notes", () => {
   it("modifies an existing file instead of recreating it", async () => {
     const { vault, meaningful } = recordingVault({ "note.md": "old" });
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
     await adapter.writeFile("note.md", new TextEncoder().encode("new"));
 
@@ -314,7 +319,7 @@ describe("ObsidianVaultAdapter — notes", () => {
 
   it("creates the missing parent folders before a nested write", async () => {
     const { vault, meaningful } = recordingVault();
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
     await adapter.writeFile("folder/sub/new.md", new TextEncoder().encode("body"));
 
@@ -330,7 +335,7 @@ describe("ObsidianVaultAdapter — notes", () => {
 
   it("does not recreate folders that already exist", async () => {
     const { vault, meaningful } = recordingVault({}, ["folder", "folder/sub"]);
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
     // Would throw if the adapter called createFolder on an existing folder.
     await adapter.writeFile("folder/sub/another.md", new TextEncoder().encode("body"));
@@ -346,7 +351,7 @@ describe("ObsidianVaultAdapter — notes", () => {
     const { vault, meaningful } = recordingVault({}, [], ".obsidian", {
       racedFolders: ["folder"],
     });
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
     await adapter.writeFile("folder/new.md", new TextEncoder().encode("body"));
 
@@ -359,7 +364,7 @@ describe("ObsidianVaultAdapter — notes", () => {
     // refuses the loser with `File already exists.` — harmless when both wrote the
     // same version, and the pull must not fail for it.
     const { vault, meaningful } = recordingVault();
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
     const bytes = new TextEncoder().encode("same");
 
     await Promise.all([adapter.writeFile("note.md", bytes), adapter.writeFile("note.md", bytes)]);
@@ -373,7 +378,7 @@ describe("ObsidianVaultAdapter — notes", () => {
     // The other half of the same rule: overwriting would destroy content the engine
     // has not seen, so the loser must report the failure rather than adopt the file.
     const { vault, meaningful } = recordingVault();
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
     const results = await Promise.allSettled([
       adapter.writeFile("note.md", new TextEncoder().encode("mine")),
@@ -391,7 +396,7 @@ describe("ObsidianVaultAdapter — notes", () => {
 
   it("still reports a create failure that left no file behind", async () => {
     const { vault } = recordingVault({}, [], ".obsidian", { failingCreates: ["note.md"] });
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
     // The catch above is not a blanket swallow: when the path is still absent, the
     // original failure is the truth and must reach the caller.
@@ -404,7 +409,7 @@ describe("ObsidianVaultAdapter — notes", () => {
     const { vault } = recordingVault({}, [], ".obsidian", {
       uncreatableFolders: ["folder"],
     });
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
     await expect(
       adapter.writeFile("folder/new.md", new TextEncoder().encode("body")),
@@ -413,7 +418,7 @@ describe("ObsidianVaultAdapter — notes", () => {
 
   it("writes a root-level file without touching any folder", async () => {
     const { vault, meaningful } = recordingVault();
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
     await adapter.writeFile("top.md", new TextEncoder().encode("body"));
 
@@ -422,7 +427,7 @@ describe("ObsidianVaultAdapter — notes", () => {
 
   it("reads bytes for a tracked file and null for anything else", async () => {
     const { vault, calls } = recordingVault({ "a.md": "content" });
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
     const bytes = await adapter.readFile("a.md");
     expect(new TextDecoder().decode(bytes!)).toBe("content");
@@ -433,7 +438,7 @@ describe("ObsidianVaultAdapter — notes", () => {
 
   it("prepares the target folder before renaming into it, and skips a missing source", async () => {
     const { vault, meaningful } = recordingVault({ "old.md": "x" });
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
     await adapter.renameFile("old.md", "folder/new.md");
     await adapter.renameFile("never-existed.md", "folder/other.md");
@@ -448,7 +453,7 @@ describe("ObsidianVaultAdapter — notes", () => {
 
   it("ignores a delete for a path Obsidian does not know", async () => {
     const { vault, meaningful } = recordingVault({ "gone.md": "x" });
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
     await adapter.deleteFile("gone.md");
     await adapter.deleteFile("never-existed.md");
@@ -464,7 +469,7 @@ describe("ObsidianVaultAdapter — notes", () => {
     // deletion the pull was asked for has happened; reporting a failed pull for it would
     // turn a succeeded delete into an error the host shows the user.
     const { vault, calls } = recordingVault({}, [], ".obsidian", { vanishedDeletes: ["gone.md"] });
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
     await expect(adapter.deleteFile("gone.md")).resolves.toBeUndefined();
 
@@ -479,7 +484,7 @@ describe("ObsidianVaultAdapter — notes", () => {
     const { vault } = recordingVault({ "stuck.md": "x" }, [], ".obsidian", {
       failingDeletes: ["stuck.md"],
     });
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
     await expect(adapter.deleteFile("stuck.md")).rejects.toThrow(/EACCES/);
   });
@@ -490,7 +495,7 @@ describe("ObsidianVaultAdapter — notes", () => {
       "other.md": "",
       "note-2026-01-01-090000.conflict.md": "",
     });
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
     expect(await adapter.listSyncableFiles()).toEqual(["note.md", "other.md"]);
   });
@@ -505,7 +510,7 @@ describe("ObsidianVaultAdapter — notes", () => {
 describe("ObsidianVaultAdapter — streaming writes", () => {
   it("writes chunks to a hidden temporary file and renames once", async () => {
     const { vault, meaningful } = recordingVault();
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
     const writer = await adapter.beginWrite("media/big.mp4");
     await writer.write(new TextEncoder().encode("abcd"));
@@ -535,7 +540,7 @@ describe("ObsidianVaultAdapter — streaming writes", () => {
 
   it("replaces an existing file only when the stream commits", async () => {
     const { vault } = recordingVault({ "note.md": "old" });
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
     const writer = await adapter.beginWrite("note.md");
     await writer.write(new TextEncoder().encode("new"));
@@ -547,7 +552,7 @@ describe("ObsidianVaultAdapter — streaming writes", () => {
 
   it("discards the temporary file and keeps the old content on abort", async () => {
     const { vault, meaningful } = recordingVault({ "note.md": "old" });
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
     const writer = await adapter.beginWrite("note.md");
     await writer.write(new TextEncoder().encode("partial"));
@@ -563,7 +568,7 @@ describe("ObsidianVaultAdapter — streaming writes", () => {
 
   it("streams a settings file through the data adapter too", async () => {
     const { vault } = recordingVault({}, [".obsidian"]);
-    const adapter = new ObsidianVaultAdapter(vault, SETTINGS);
+    const adapter = new ObsidianVaultAdapter(vault, SETTINGS, fileManagerFor(vault));
 
     const writer = await adapter.beginWrite(".obsidian/snippets/wide.css");
     await writer.write(new TextEncoder().encode("body {}"));
@@ -572,23 +577,16 @@ describe("ObsidianVaultAdapter — streaming writes", () => {
     expect(decode(await adapter.readFile(".obsidian/snippets/wide.css"))).toBe("body {}");
   });
 
-  it("falls back to one write when the app has no appendBinary", async () => {
-    // `appendBinary` arrived in Obsidian 1.12.3, while the plugin supports older apps.
-    // The semantics stay the same; only the memory bound is lost, which is exactly the
-    // behaviour those versions had before this path existed.
-    const { vault, meaningful } = recordingVault({}, [], ".obsidian", {
-      withoutAppendBinary: true,
-    });
-    const adapter = new ObsidianVaultAdapter(vault);
+  it("turns a stream with no chunk into an empty file", async () => {
+    // The engine only streams a version above 8 MiB, so this is the adapter contract's
+    // edge, not a pull the engine makes today: `close` still has to produce the target.
+    const { vault } = recordingVault();
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
-    const writer = await adapter.beginWrite("note.md");
-    await writer.write(new TextEncoder().encode("ab"));
-    await writer.write(new TextEncoder().encode("cd"));
-    expect(decode(await adapter.readFile("note.md"))).toBeNull();
+    const writer = await adapter.beginWrite("empty.md");
     await writer.close();
 
-    expect(decode(await adapter.readFile("note.md"))).toBe("abcd");
-    expect(meaningful().some(([method]) => method === "adapter.appendBinary")).toBe(false);
+    expect(decode(await adapter.readFile("empty.md"))).toBe("");
   });
 
   it("reports a streamed file while the index lags, and lets it go once indexed", async () => {
@@ -597,7 +595,7 @@ describe("ObsidianVaultAdapter — streaming writes", () => {
     // it, or the chain looks deleted here and a tombstone would be pushed.
     const lagging = new Set<string>();
     const { vault } = recordingVault({}, [], ".obsidian", { laggingIndex: lagging });
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
     const writer = await adapter.beginWrite("media/big.mp4");
     await writer.write(new TextEncoder().encode("data"));
@@ -617,7 +615,7 @@ describe("ObsidianVaultAdapter — streaming writes", () => {
   it("forgets a pending streamed path the user deleted before it was indexed", async () => {
     const lagging = new Set<string>();
     const { vault } = recordingVault({}, [], ".obsidian", { laggingIndex: lagging });
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
     const writer = await adapter.beginWrite("media/gone.mp4");
     await writer.write(new TextEncoder().encode("data"));
@@ -640,7 +638,7 @@ describe("ObsidianVaultAdapter — streaming writes", () => {
     const { vault, meaningful } = recordingVault({}, [], ".obsidian", {
       laggingIndex: lagging,
     });
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
     const writer = await adapter.beginWrite("media/gone.mp4");
     await writer.write(new TextEncoder().encode("data"));
@@ -657,7 +655,7 @@ describe("ObsidianVaultAdapter — streaming writes", () => {
   it("writes a small replacement through the index-lag window", async () => {
     const lagging = new Set<string>();
     const { vault } = recordingVault({}, [], ".obsidian", { laggingIndex: lagging });
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
     const writer = await adapter.beginWrite("media/note.md");
     await writer.write(new TextEncoder().encode("old"));
@@ -675,7 +673,7 @@ describe("ObsidianVaultAdapter — streaming writes", () => {
   it("moves a streamed path the index has not caught up with", async () => {
     const lagging = new Set<string>();
     const { vault } = recordingVault({}, [], ".obsidian", { laggingIndex: lagging });
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
     const writer = await adapter.beginWrite("media/old.mp4");
     await writer.write(new TextEncoder().encode("payload"));
@@ -698,7 +696,7 @@ describe("ObsidianVaultAdapter — streaming writes", () => {
     const { vault } = recordingVault({ "media/big.mp4": "old" }, [], ".obsidian", {
       staleIndexStats: stale,
     });
-    const adapter = new ObsidianVaultAdapter(vault);
+    const adapter = new ObsidianVaultAdapter(vault, undefined, fileManagerFor(vault));
 
     const writer = await adapter.beginWrite("media/big.mp4");
     await writer.write(new TextEncoder().encode("new-data"));
@@ -735,7 +733,7 @@ describe("ObsidianVaultAdapter — excluded folders", () => {
       "private/a-2026-02-14-101530.conflict.md": "parked",
       "private2/c.md": "c",
     });
-    const adapter = new ObsidianVaultAdapter(vault, scope);
+    const adapter = new ObsidianVaultAdapter(vault, scope, fileManagerFor(vault));
 
     expect(await adapter.listExcludedFiles()).toEqual(["private/a.md", "private/deep/b.md"]);
     expect(await adapter.listSyncableFiles()).toEqual(["note.md", "private2/c.md"]);
@@ -744,7 +742,13 @@ describe("ObsidianVaultAdapter — excluded folders", () => {
   it("lists no excluded files when the scope excludes nothing", async () => {
     const { vault } = recordingVault({ "private/a.md": "a" });
 
-    expect(await new ObsidianVaultAdapter(vault, MARKDOWN_ONLY).listExcludedFiles()).toEqual([]);
+    expect(
+      await new ObsidianVaultAdapter(
+        vault,
+        MARKDOWN_ONLY,
+        fileManagerFor(vault),
+      ).listExcludedFiles(),
+    ).toEqual([]);
   });
 });
 
@@ -753,7 +757,7 @@ describe("ObsidianVaultAdapter — the config folder", () => {
     const { vault, meaningful } = recordingVault({ ".obsidian/app.json": '{"theme":"x"}' }, [
       ".obsidian",
     ]);
-    const adapter = new ObsidianVaultAdapter(vault, SETTINGS);
+    const adapter = new ObsidianVaultAdapter(vault, SETTINGS, fileManagerFor(vault));
 
     const bytes = await adapter.readFile(".obsidian/app.json");
     expect(new TextDecoder().decode(bytes!)).toBe('{"theme":"x"}');
@@ -771,7 +775,7 @@ describe("ObsidianVaultAdapter — the config folder", () => {
 
   it("creates the config folder chain before a nested settings write", async () => {
     const { vault, meaningful } = recordingVault({}, [".obsidian"]);
-    const adapter = new ObsidianVaultAdapter(vault, SETTINGS);
+    const adapter = new ObsidianVaultAdapter(vault, SETTINGS, fileManagerFor(vault));
 
     await adapter.writeFile(".obsidian/snippets/deep/wide.css", new TextEncoder().encode("body{}"));
 
@@ -786,7 +790,7 @@ describe("ObsidianVaultAdapter — the config folder", () => {
 
   it("reads a missing settings file as absent instead of throwing", async () => {
     const { vault } = recordingVault({}, [".obsidian"]);
-    const adapter = new ObsidianVaultAdapter(vault, SETTINGS);
+    const adapter = new ObsidianVaultAdapter(vault, SETTINGS, fileManagerFor(vault));
 
     expect(await adapter.readFile(".obsidian/app.json")).toBeNull();
     // A delete for a file that is not there is a no-op, not an error.
@@ -819,7 +823,11 @@ describe("ObsidianVaultAdapter — the config folder", () => {
       ],
     );
 
-    const settingsOnly = await new ObsidianVaultAdapter(vault, SETTINGS).listSyncableFiles();
+    const settingsOnly = await new ObsidianVaultAdapter(
+      vault,
+      SETTINGS,
+      fileManagerFor(vault),
+    ).listSyncableFiles();
     expect(settingsOnly).toEqual([
       ".obsidian/app.json",
       ".obsidian/snippets/wide.css",
@@ -831,7 +839,11 @@ describe("ObsidianVaultAdapter — the config folder", () => {
     expect(calls.some(([, path]) => path === ".obsidian/plugins")).toBe(false);
     expect(calls.some(([, path]) => path === ".obsidian/cache")).toBe(false);
 
-    const withPlugins = await new ObsidianVaultAdapter(vault, PLUGINS).listSyncableFiles();
+    const withPlugins = await new ObsidianVaultAdapter(
+      vault,
+      PLUGINS,
+      fileManagerFor(vault),
+    ).listSyncableFiles();
     expect(withPlugins).toEqual([
       ".obsidian/app.json",
       ".obsidian/plugins/dataview/data.json",
@@ -854,9 +866,11 @@ describe("ObsidianVaultAdapter — the config folder", () => {
     };
     const folders = [".obsidian", ".obsidian/my-tool", ".obsidian/icons"];
 
+    const settingsVault = recordingVault(files, folders).vault;
     const settingsOnly = await new ObsidianVaultAdapter(
-      recordingVault(files, folders).vault,
+      settingsVault,
       SETTINGS,
+      fileManagerFor(settingsVault),
     ).listSyncableFiles();
     expect(settingsOnly).toEqual([".obsidian/app.json"]);
 
@@ -864,6 +878,7 @@ describe("ObsidianVaultAdapter — the config folder", () => {
     const withOther = await new ObsidianVaultAdapter(
       vault,
       scopeWith("otherFiles"),
+      fileManagerFor(vault),
     ).listSyncableFiles();
     // The unclaimed paths only — `app.json` belongs to a group that is off.
     expect(withOther).toEqual([
@@ -878,7 +893,7 @@ describe("ObsidianVaultAdapter — the config folder", () => {
     const { vault, calls } = recordingVault({ ".obsidian/app.json": "{}", "note.md": "" }, [
       ".obsidian",
     ]);
-    const adapter = new ObsidianVaultAdapter(vault, MARKDOWN_ONLY);
+    const adapter = new ObsidianVaultAdapter(vault, MARKDOWN_ONLY, fileManagerFor(vault));
 
     expect(await adapter.listSyncableFiles()).toEqual(["note.md"]);
     expect(calls.some(([method]) => method === "adapter.list")).toBe(false);

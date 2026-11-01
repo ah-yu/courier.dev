@@ -1,4 +1,4 @@
-import type { EventRef, TAbstractFile, TFile, Vault } from "obsidian";
+import type { EventRef, FileManager, TAbstractFile, Vault } from "obsidian";
 import { pluginPlatform } from "../platform";
 import {
   LEASE_RENEW_MS,
@@ -66,6 +66,14 @@ export const LEASE_RETRY_MS = 500;
 
 export interface EngineHostOptions {
   vault: Vault;
+  /**
+   * Obsidian's file manager, for the deletions the sync adapter performs.
+   *
+   * `Vault.delete` exists and is the wrong call for anything Obsidian itself would delete:
+   * it ignores the user's "deleted files" setting, so a note the engine removed would skip
+   * the trash. The adapter takes the manager and deletes through it.
+   */
+  fileManager: FileManager;
   vaultId: string;
   encryptionKey: CryptoKey;
   serverUrl: string;
@@ -147,7 +155,11 @@ export interface EngineHostOptions {
 
 /** A vault entry's size as Obsidian's index already knows it; null for a folder. */
 function sizeOf(file: TAbstractFile): number | null {
-  return "extension" in file ? ((file as TFile).stat?.size ?? null) : null;
+  // A folder has no `stat`; reading it structurally keeps this module type-only against
+  // `obsidian` (`instanceof TFile` would need a value import, and the package ships types
+  // only — the app provides the module at runtime).
+  const stat = (file as { stat?: { size?: number } }).stat;
+  return stat?.size ?? null;
 }
 
 /**
@@ -175,10 +187,21 @@ export class EngineHost {
    * generation is dropped, exactly like the engine state writes `SyncHost` already drops.
    */
   private generation = 0;
-  private leaseRetry: ReturnType<typeof setTimeout> | null = null;
-  private leaseRenewal: ReturnType<typeof setInterval> | null = null;
+  private leaseRetry: number | null = null;
+  private leaseRenewal: number | null = null;
   private leaseRelease: Promise<void> | null = null;
   private leaseWatch: (() => void) | null = null;
+  /**
+   * True while a watcher is being loaded but has not been installed yet.
+   *
+   * `watchLeaseDirectory` awaits the desktop `node:fs` import, so the `leaseWatch` guard
+   * alone no longer makes the start single-flight: two callers in the same generation
+   * (a failed renewal and the bind's own re-check) would both pass it, both load, and
+   * the second assignment would replace the first watcher without ever closing it.
+   * The loser of this flag simply leaves the watcher to the pending start; the retry
+   * timer still covers the lease.
+   */
+  private leaseWatchPending = false;
   private waitingForLease = false;
 
   constructor(private readonly opts: EngineHostOptions) {
@@ -257,12 +280,14 @@ export class EngineHost {
     if (this.leaseRelease) {
       const drained = await Promise.race([
         this.leaseRelease.then(() => true),
-        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), LEASE_DRAIN_TIMEOUT_MS)),
+        new Promise<boolean>((resolve) =>
+          window.setTimeout(() => resolve(false), LEASE_DRAIN_TIMEOUT_MS),
+        ),
       ]);
       if (generation !== this.generation) return;
       if (!drained) {
         this.setLeaseWaiting(true);
-        this.startLeaseWatch(generation);
+        void this.startLeaseWatch(generation);
         this.scheduleLeaseRetry(generation);
         return;
       }
@@ -286,7 +311,7 @@ export class EngineHost {
         // The CLI (or another writer) owns this vault. Do not build an engine: waiting is
         // the whole point of the lease.
         this.setLeaseWaiting(true);
-        this.startLeaseWatch(generation);
+        void this.startLeaseWatch(generation);
         this.scheduleLeaseRetry(generation);
         return;
       }
@@ -307,7 +332,7 @@ export class EngineHost {
       vaultId: this.opts.vaultId,
       encryptionKey: this.opts.encryptionKey,
       syncScope: this.syncScope,
-      adapter: new ObsidianVaultAdapter(this.opts.vault, this.syncScope),
+      adapter: new ObsidianVaultAdapter(this.opts.vault, this.syncScope, this.opts.fileManager),
       api: this.opts.createSyncApi(userKey),
       wsUrl: this.opts.wsUrl,
       userKey,
@@ -384,7 +409,7 @@ export class EngineHost {
       host.stop();
       if (this.host === host) this.host = null;
       this.setLeaseWaiting(true);
-      this.startLeaseWatch(generation);
+      void this.startLeaseWatch(generation);
       this.scheduleLeaseRetry(generation);
     }
   }
@@ -392,7 +417,7 @@ export class EngineHost {
   /** Retry the lease shortly; this is the fallback when the directory watcher is unavailable. */
   private scheduleLeaseRetry(generation: number): void {
     if (this.leaseRetry) return;
-    this.leaseRetry = setTimeout(() => {
+    this.leaseRetry = window.setTimeout(() => {
       this.leaseRetry = null;
       if (generation !== this.generation) return;
       void this.start();
@@ -400,15 +425,27 @@ export class EngineHost {
   }
 
   /** On desktop, wake as soon as the holder removes the lease directory. */
-  private startLeaseWatch(generation: number): void {
-    if (this.leaseWatch) return;
-    this.leaseWatch = watchLeaseDirectory(this.opts.vault.adapter, () => {
-      if (generation !== this.generation) return;
-      if (this.leaseRetry) clearTimeout(this.leaseRetry);
-      this.leaseRetry = null;
-      this.closeLeaseWatch();
-      void this.start();
-    });
+  private async startLeaseWatch(generation: number): Promise<void> {
+    if (this.leaseWatch || this.leaseWatchPending) return;
+    this.leaseWatchPending = true;
+    try {
+      const stop = await watchLeaseDirectory(this.opts.vault.adapter, () => {
+        if (generation !== this.generation) return;
+        if (this.leaseRetry) window.clearTimeout(this.leaseRetry);
+        this.leaseRetry = null;
+        this.closeLeaseWatch();
+        void this.start();
+      });
+      // A stop() that landed while the modules were loading wins: the watcher must not
+      // outlive the host that asked for it.
+      if (generation !== this.generation) {
+        stop();
+        return;
+      }
+      this.leaseWatch = stop;
+    } finally {
+      this.leaseWatchPending = false;
+    }
   }
 
   private closeLeaseWatch(): void {
@@ -418,7 +455,7 @@ export class EngineHost {
 
   private startLeaseRenewal(generation: number): void {
     if (!this.opts.lease || this.leaseRenewal) return;
-    this.leaseRenewal = setInterval(() => {
+    this.leaseRenewal = window.setInterval(() => {
       void this.renewLease(generation);
     }, LEASE_RENEW_MS);
   }
@@ -431,10 +468,10 @@ export class EngineHost {
     // engine work, then wait for the retry loop.
     this.host?.stop();
     this.host = null;
-    if (this.leaseRenewal) clearInterval(this.leaseRenewal);
+    if (this.leaseRenewal) window.clearInterval(this.leaseRenewal);
     this.leaseRenewal = null;
     this.setLeaseWaiting(true);
-    this.startLeaseWatch(generation);
+    void this.startLeaseWatch(generation);
     this.scheduleLeaseRetry(generation);
   }
 
@@ -447,7 +484,7 @@ export class EngineHost {
     if (!this.leaseRelease) return true;
     return Promise.race([
       this.leaseRelease.then(() => true),
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+      new Promise<boolean>((resolve) => window.setTimeout(() => resolve(false), timeoutMs)),
     ]);
   }
 
@@ -467,10 +504,10 @@ export class EngineHost {
   private teardown(): void {
     // Invalidate the activity callback of the host being stopped before dropping it.
     this.generation += 1;
-    if (this.leaseRetry) clearTimeout(this.leaseRetry);
+    if (this.leaseRetry) window.clearTimeout(this.leaseRetry);
     this.leaseRetry = null;
     this.closeLeaseWatch();
-    if (this.leaseRenewal) clearInterval(this.leaseRenewal);
+    if (this.leaseRenewal) window.clearInterval(this.leaseRenewal);
     this.leaseRenewal = null;
     const stoppedHost = this.host;
     this.host = null;
@@ -480,14 +517,14 @@ export class EngineHost {
       // Keep the lease alive until an in-flight pass has drained. Releasing at `stop()`
       // would let the CLI start while the old engine is still writing. A drain already
       // in progress owns the release; do not replace its promise on a later stop.
-      const keepAlive = setInterval(() => {
+      const keepAlive = window.setInterval(() => {
         void lease.renew().catch(() => {});
       }, LEASE_RENEW_MS);
       this.leaseRelease = (async () => {
         try {
           await stoppedHost?.whenIdle();
         } finally {
-          clearInterval(keepAlive);
+          window.clearInterval(keepAlive);
           await lease.release().catch(() => {});
         }
       })();
