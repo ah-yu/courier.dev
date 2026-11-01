@@ -5541,7 +5541,11 @@ describe("plugin e2e — the real plugin against a real server", () => {
       expect(inputs).toHaveLength(2);
       expect(inputs[0]!.classes).toContain("courier-login-input");
       expect(elementsWithClass(tab.containerEl, "courier-login-submit")[0]!.text).toBe("登录");
-      expect(settingsIn(tab.containerEl)).toEqual([]);
+      // The step is an item in the definitions, so the app creates a row to host it — and
+      // the page hides that row: what the user sees is the form, not a settings row.
+      expect(
+        settingsIn(tab.containerEl).every((row) => row.settingEl.style.display === "none"),
+      ).toBe(true);
       expect(buttonsIn(tab.containerEl)).toEqual([]);
       expect(extraButtonsIn(tab.containerEl)).toEqual([]);
       // No page heading either: the form is the whole step.

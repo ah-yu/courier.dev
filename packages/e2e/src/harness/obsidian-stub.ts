@@ -1190,8 +1190,26 @@ function renderControl(
   cell.setAttribute("data-key", control.key);
   cell.setText(value === undefined || value === null ? "" : String(value));
   setting.controlEl.appendChild(cell);
+
+  // A control is wired to the tab the way the app wires it: a change writes through
+  // `setControlValue`, which is where the tab decides what the write means.
   if (control.type === "toggle") {
-    setting.toggles.push(new ToggleComponent(setting.controlEl).setValue(value === true));
+    setting.toggles.push(
+      new ToggleComponent(setting.controlEl).setValue(value === true).onChange((next) => {
+        tab.setControlValue(control.key, next);
+      }),
+    );
+    return;
+  }
+  if (control.type === "text" || control.type === "textarea" || control.type === "number") {
+    const text = new TextComponent().setValue(
+      value === undefined || value === null ? "" : String(value),
+    );
+    if (control.placeholder) text.setPlaceholder(control.placeholder);
+    text.onChange((next) => {
+      tab.setControlValue(control.key, next);
+    });
+    setting.texts.push(text);
   }
 }
 
@@ -1209,7 +1227,10 @@ function renderSettingDefinitions(tab: PluginSettingTab, containerEl: FakeEl): v
       if (item.name) setting.setName(item.name);
       if (item.desc) setting.setDesc(item.desc);
       if (item.render) {
-        item.render(setting, containerEl);
+        // The group is what the app passes: a `SettingGroup` whose `listEl` is the container
+        // the rows live in. A `render` callback that wants to draw something other than a
+        // row (the sign-in form) draws it there.
+        item.render(setting, { listEl: containerEl } as unknown as never);
         continue;
       }
       if (item.control) renderControl(tab, setting, item.control);
@@ -1251,7 +1272,16 @@ export class PluginSettingTab {
    * this method keeps its own renderer (which is what the old API did).
    */
   display(): void {
+    this.containerEl.empty();
     renderSettingDefinitions(this, this.containerEl);
+  }
+
+  /**
+   * Re-render from the definitions, which is what `update()` means in 1.13: the rows are
+   * rebuilt, so a `visible` predicate that just changed takes effect.
+   */
+  update(): void {
+    this.display();
   }
 
   hide(): void {}
