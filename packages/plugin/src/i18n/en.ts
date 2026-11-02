@@ -74,8 +74,14 @@ export const en: Record<PluginMessageKey, string> = {
   "notice.manualReload": "Quit and reopen Obsidian manually.",
 
   // ── Settings page: login / choose / locked ──
+  "settings.login.title": "Sign in to Courier",
+  "settings.login.subtitle": "Use your server address and user key to sign in.",
   "settings.login.serverAddress": "Server address",
   "settings.login.userKey": "User key",
+  "settings.login.serverPlaceholder": "https://your-server.com",
+  "settings.login.showKey": "Show user key",
+  "settings.login.hideKey": "Hide user key",
+  "settings.login.fullAddress": "Full address: {url}",
   "settings.login.submit": "Sign in",
   "settings.login.submitting": "Signing in…",
   "settings.account.reading": "Reading account…",

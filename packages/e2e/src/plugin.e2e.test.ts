@@ -5537,35 +5537,113 @@ describe("plugin e2e — the real plugin against a real server", () => {
       return settingsIn(tab.containerEl).map((row) => row.name);
     }
 
-    it("shows nothing but a centred login form before signing in", async () => {
+    it("shows the centred sign-in form before signing in", async () => {
       const plugin = await loadSignedOutPlugin();
       const tab = settingsTabOf(plugin);
       tab.display();
 
-      // Two field labels and the button. Nothing else — no page title, no step hint,
-      // no section heading and no explanatory paragraph.
-      expect(allText(tab.containerEl)).toEqual(["服务器地址", "用户密钥", "登录"]);
+      // The form's title and subtitle, two field labels and the button. No brand block,
+      // no privacy line, no step counter and no section heading.
+      expect(allText(tab.containerEl)).toEqual([
+        "登录 Courier",
+        "使用服务器地址与用户密钥登录。",
+        "服务器地址",
+        "用户密钥",
+        "登录",
+      ]);
 
       // A form, not Obsidian's settings rows (label left, control right).
       const inputs = elementsWithClass(tab.containerEl, "courier-login-input");
       expect(inputs).toHaveLength(2);
       expect(inputs[0]!.classes).toContain("courier-login-input");
+      expect((inputs[0] as unknown as { placeholder: string }).placeholder).toBe(
+        "https://your-server.com",
+      );
       expect(elementsWithClass(tab.containerEl, "courier-login-submit")[0]!.text).toBe("登录");
       // The step is an item in the definitions, so the app creates a row to host it; the
-      // page strips that row's chrome (`courier-login-row`) and the card is the content, so
+      // page strips that row's chrome (`courier-login-row`) and the form is the content, so
       // what the user sees is the form and not a settings row.
       const hostRows = settingsIn(tab.containerEl);
       expect(hostRows).toHaveLength(1);
       expect(hostRows[0]!.settingEl.classes).toContain("courier-login-row");
       expect(buttonsIn(tab.containerEl)).toEqual([]);
       expect(extraButtonsIn(tab.containerEl)).toEqual([]);
-      // No page heading either: the form is the whole step.
+
+      // The form carries its own heading, but it is not a page-level `h2` that repeats the
+      // plugin's name above the pane: the role is the one piece of semantics the title needs.
+      const title = elementsWithClass(tab.containerEl, "courier-login-title")[0]!;
+      expect(title.text).toBe("登录 Courier");
+      expect(title.getAttribute("role")).toBe("heading");
       expect(tab.containerEl.children.some((child) => child.tagName === "h2")).toBe(false);
 
-      // Narrow and centred inside the pane.
-      const card = elementsWithClass(tab.containerEl, "courier-login")[0]!;
-      expect(card.style.maxWidth).toBe("360px");
-      expect(card.style.margin).toBe("48px auto 0");
+      // One form in the middle of the pane: no brand panel, no card, no background shell
+      // and no privacy line.
+      const page = elementsWithClass(tab.containerEl, "courier-login")[0]!;
+      expect(page.classes).toContain("courier-login");
+      expect(elementsWithClass(tab.containerEl, "courier-login-panel")).toHaveLength(1);
+      expect(elementsWithClass(tab.containerEl, "courier-login-card")).toHaveLength(0);
+      expect(elementsWithClass(tab.containerEl, "courier-login-intro")).toHaveLength(0);
+      expect(elementsWithClass(tab.containerEl, "courier-login-device-note")).toHaveLength(0);
+      const fieldIcons = elementsWithClass(tab.containerEl, "courier-login-field-icon");
+      expect(fieldIcons).toHaveLength(2);
+      expect(fieldIcons.every((icon) => icon.getAttribute("aria-hidden") === "true")).toBe(true);
+
+      // The key can be read back before it is submitted, and the toggle stays on the field
+      // it reveals.
+      const reveal = elementsWithClass(tab.containerEl, "courier-login-reveal")[0]!;
+      expect(reveal.icon).toBe("eye");
+      expect(reveal.getAttribute("aria-pressed")).toBe("false");
+      reveal.click();
+      expect((loginInputs(tab).key as unknown as { type: string }).type).toBe("text");
+      expect(reveal.icon).toBe("eye-off");
+      expect(reveal.getAttribute("aria-pressed")).toBe("true");
+      reveal.click();
+      expect((loginInputs(tab).key as unknown as { type: string }).type).toBe("password");
+      expect(reveal.getAttribute("aria-pressed")).toBe("false");
+    });
+
+    it("signs in once when Enter is pressed while the request is in flight", async () => {
+      const plugin = await loadSignedOutPlugin();
+      const tab = settingsTabOf(plugin);
+      tab.display();
+
+      const signIn = vi.spyOn(plugin, "signIn").mockReturnValue(new Promise<never>(() => {}));
+      const pressEnter = (): void => {
+        for (const listener of loginInputs(tab).server.listeners.keydown ?? []) {
+          listener({ key: "Enter" });
+        }
+      };
+      pressEnter();
+      pressEnter();
+
+      expect(signIn).toHaveBeenCalledTimes(1);
+      signIn.mockRestore();
+    });
+
+    it("repeats a server address that is wider than its field", async () => {
+      const plugin = await loadSignedOutPlugin();
+      const tab = settingsTabOf(plugin);
+      tab.display();
+
+      const addressInput = loginInputs(tab).server as FakeEl & {
+        scrollWidth: number;
+        clientWidth: number;
+      };
+      addressInput.scrollWidth = 720;
+      addressInput.clientWidth = 420;
+      const address = "https://sync.example.com/courier";
+      typeInto(loginInputs(tab).server, address);
+
+      const full = elementsWithClass(tab.containerEl, "courier-login-url-full")[0]!;
+      expect(full.classes).toContain("is-visible");
+      expect(full.text).toBe(`完整地址：${address}`);
+
+      // A value that fits stays in the field alone: the line is a repair for a clipped
+      // value, not a second copy of every address.
+      addressInput.scrollWidth = 300;
+      typeInto(loginInputs(tab).server, address);
+      expect(full.classes).not.toContain("is-visible");
+      expect(full.text).toBe("");
     });
 
     it("reports a rejected user key in place and stays on the first step", async () => {
@@ -5580,8 +5658,14 @@ describe("plugin e2e — the real plugin against a real server", () => {
         () => allText(tab.containerEl).some((text) => text.includes("用户密钥无效或已过期")),
         "the rejected key was never reported",
       );
-      // Still the form: no vault step appeared, and the fields are there to fix.
+      // Still the form: no vault step appeared, the error has its own block inside the form,
+      // and the fields are there to fix.
       expect(loginInputs(tab).server).toBeTruthy();
+      const error = elementsWithClass(tab.containerEl, "courier-login-error")[0]!;
+      expect(error.getAttribute("role")).toBe("alert");
+      expect(error.getAttribute("id")).toBe("courier-login-error");
+      expect(loginInputs(tab).server.getAttribute("aria-describedby")).toBe("courier-login-error");
+      expect(loginInputs(tab).key.getAttribute("aria-describedby")).toBe("courier-login-error");
       expect(sectionNames(tab)).not.toContain("选择远程库");
       // What the user typed is kept, so the fix is one field away.
       expect(plugin.settings.userKey).toBe("ck_this_key_does_not_exist");
@@ -5600,6 +5684,9 @@ describe("plugin e2e — the real plugin against a real server", () => {
       const plugin = await loadSignedOutPlugin();
       const tab = settingsTabOf(plugin);
       tab.display();
+      // The login step flattens the app's grouping panel so the form is the surface.
+      expect(tab.containerEl.classes).toContain("courier-login-group");
+      const loginRow = settingsIn(tab.containerEl)[0]!.settingEl;
 
       fillLogin(tab, server.serverUrl, server.userKey);
       clickControl(tab.containerEl, "courier-login-submit");
@@ -5608,6 +5695,10 @@ describe("plugin e2e — the real plugin against a real server", () => {
         () => sectionNames(tab).includes("选择远程库"),
         "the vault step never appeared",
       );
+      // Leaving the login step gives the app's grouping panel and the login row their
+      // chrome back, even if the app reuses those elements.
+      expect(tab.containerEl.classes).not.toContain("courier-login-group");
+      expect(loginRow.classes).not.toContain("courier-login-row");
 
       // The account row: the name the key belongs to and the server it belongs to,
       // with signing out as its only action — the destructive one, so it is red.
