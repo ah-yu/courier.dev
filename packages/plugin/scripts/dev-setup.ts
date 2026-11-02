@@ -31,7 +31,6 @@ import { DEFAULT_SETTINGS } from "../src/shared/settings";
 import { checkoutSlug, devVaults, pluginDir, repoRoot } from "./dev-vaults.ts";
 import { ensureRegistered } from "./obsidian-registry.ts";
 
-const DEFAULT_SERVER_URL = "http://localhost:3002";
 const DEFAULT_PASSWORD = "courier-dev";
 // `bun run dev` starts the server and this script in parallel; a plugin-only dev run waits
 // this long once, then continues without a sign-in rather than blocking the watcher.
@@ -49,8 +48,15 @@ if (process.env.COURIER_DEV_SETUP === "0") {
 const root = repoRoot();
 const vaults = devVaults();
 const label = checkoutSlug(root) || "main";
-const serverUrl = (process.env.COURIER_DEV_SERVER_URL ?? DEFAULT_SERVER_URL).replace(/\/+$/, "");
+// The server reads the same `PORT` (default 3002 in dev). A worktree that runs beside
+// another one sets it once and both sides follow, unless the URL is given explicitly.
+const devPort = (process.env.PORT ?? "").trim() || "3002";
+const serverUrl = (process.env.COURIER_DEV_SERVER_URL ?? `http://localhost:${devPort}`).replace(
+  /\/+$/,
+  "",
+);
 const password = process.env.COURIER_DEV_VAULT_PASSWORD ?? DEFAULT_PASSWORD;
+const repoint = process.env.COURIER_DEV_REPOINT === "1";
 const statePath = join(root, ".courier-dev", "dev.json");
 
 // ── The vault folders ──
@@ -259,11 +265,13 @@ function normalizeUrl(value) {
  *
  * Two cases are left alone. A vault pointed at **another** server is somebody's own setup
  * (a deployed instance), and re-pointing it at the local dev server would be silent data
- * movement. A vault already connected to **this** dev vault keeps its paused state, device
- * label and everything else — `bun run dev` runs on every start, and a developer who paused a
- * vault or renamed the device must not have that undone by starting the watcher.
+ * movement — unless the run sets `COURIER_DEV_REPOINT=1`, or the vault still names the
+ * server this checkout used last time (the auto-port wrapper moving the loop). A vault
+ * already connected to **this** dev vault keeps its paused state, device label and
+ * everything else — `bun run dev` runs on every start, and a developer who paused a vault
+ * or renamed the device must not have that undone by starting the watcher.
  */
-function writePluginData(vault: any, state: any): void {
+function writePluginData(vault: any, state: any, previousServerUrl: string): void {
   const file = join(pluginDir(vault.path), "data.json");
   let existing: any = {};
   if (existsSync(file)) {
@@ -273,12 +281,25 @@ function writePluginData(vault: any, state: any): void {
       warn(`${file} is not valid JSON — replacing it`);
     }
   }
-  if (normalizeUrl(existing.serverUrl) !== "") {
-    if (normalizeUrl(existing.serverUrl) !== serverUrl) {
-      log(`${vault.name} is signed in to ${existing.serverUrl} — left alone`);
-      return;
-    }
-    if (existing.connectedVaultId === state.vaultId) {
+  const existingServer = normalizeUrl(existing.serverUrl);
+  // The wrapper moves the loop between ports when one is busy. A vault that still names the
+  // server this checkout used last time is the loop's own, not somebody's deployed instance,
+  // so following the new port is automatic. Anything else needs the explicit flag.
+  const movingFromThisLoop = previousServerUrl !== "" && existingServer === previousServerUrl;
+  const sameVault = existing.connectedVaultId === state.vaultId;
+  // The old sync state is chain identities for the *old* vault. It is only safe to keep
+  // when both the dev server and the target vault are unchanged — a port move on the same
+  // database is safe, but a new vault (different salt, a changed dev password, or a fresh
+  // database) invalidates every fileId in it.
+  const keepDerivedState = movingFromThisLoop && sameVault;
+  if (existingServer !== "") {
+    if (existingServer !== serverUrl) {
+      if (!repoint && !movingFromThisLoop) {
+        log(`${vault.name} is signed in to ${existingServer} — left alone`);
+        return;
+      }
+      log(`${vault.name} was signed in to ${existingServer} — re-pointing to ${serverUrl}`);
+    } else if (sameVault) {
       log(`${vault.name} is already connected to this dev vault — left alone`);
       return;
     }
@@ -294,11 +315,17 @@ function writePluginData(vault: any, state: any): void {
     connectedVaultName: state.vaultName ?? `dev ${label}`,
     encryptionSalt: state.vaultSalt,
     syncPaused: false,
-    vaultConnections: {
-      ...existing.vaultConnections,
-      [state.vaultId]: { deviceName: vault.deviceName, excludedFolders: [] },
-    },
+    vaultConnections: keepDerivedState
+      ? {
+          ...existing.vaultConnections,
+          [state.vaultId]: { deviceName: vault.deviceName, excludedFolders: [] },
+        }
+      : { [state.vaultId]: { deviceName: vault.deviceName, excludedFolders: [] } },
   };
+  // A different remote or a different target vault has different chain identities; the old
+  // sync state would name files this device has never seen there. Keep the sign-in, drop
+  // the derived state. A plain port change on the same vault keeps it.
+  if (!keepDerivedState) delete settings.syncState;
   writeFileSync(file, `${JSON.stringify(settings, null, 2)}\n`);
 }
 
@@ -333,16 +360,21 @@ function existingConnection(vault) {
  *
  * `bun run dev` is not the owner of a vault somebody already signed in by hand; the
  * auto-provisioning exists for the checkout that has nothing, not to overwrite working
- * credentials on every start. A vault pointed at **another** server is never touched —
+ * credentials on every start. A vault pointed at **another** server is not touched —
  * reaching that server to prove the key is not this script's business, and a checkout
- * connected to a deployed instance must survive `bun run dev`.
+ * connected to a deployed instance must survive `bun run dev`. The two exceptions are
+ * `COURIER_DEV_REPOINT=1`, and a vault that still names the server this checkout used last
+ * time: that one is the loop's own, moved because the auto-port wrapper picked a new port.
  */
-async function alreadySignedIn() {
+async function alreadySignedIn(previousServerUrl: string) {
   const connections = vaults.map((vault) => existingConnection(vault));
   if (connections.some((data) => data === null)) return false;
   for (const data of connections) {
     const own = typeof data.serverUrl === "string" ? data.serverUrl.replace(/\/+$/, "") : "";
-    if (own && own !== serverUrl) return true;
+    if (own && own !== serverUrl) {
+      const movingFromThisLoop = previousServerUrl !== "" && own === previousServerUrl;
+      return !(repoint || movingFromThisLoop);
+    }
   }
   for (const data of connections) {
     const me = await request("/api/me", { key: data.userKey });
@@ -374,8 +406,9 @@ async function main() {
   }
 
   const state = loadState();
+  const previousServerUrl = normalizeUrl(state.serverUrl);
   const owned = typeof state.vaultId === "string" && state.vaultId.length > 0;
-  if (!owned && (await alreadySignedIn())) {
+  if (!owned && (await alreadySignedIn(previousServerUrl))) {
     log(
       "the vaults already carry a sign-in — left as they are " +
         "(delete their plugin data.json to have this checkout provisioned instead)",
@@ -392,7 +425,7 @@ async function main() {
     return;
   }
   saveState(state);
-  for (const vault of vaults) writePluginData(vault, state);
+  for (const vault of vaults) writePluginData(vault, state, previousServerUrl);
 
   for (const vault of vaults) {
     log(`${vault.name} → ${serverUrl} (vault ${state.vaultName}, device "${vault.deviceName}")`);

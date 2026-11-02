@@ -6,7 +6,7 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "bun run --filter '*' --parallel dev",
+    "dev": "bun scripts/dev.ts",
     "build": "bun run --filter '*' build",
     "lint": "oxlint --deny-warnings",
     "lint:review": "eslint --max-warnings 0 . && stylelint packages/plugin/styles.css",

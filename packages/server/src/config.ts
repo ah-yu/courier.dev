@@ -151,11 +151,13 @@ const envSchema = z.object({
   LOG_SLOW_MS: z.coerce.number().int().nonnegative().default(500),
 });
 
-const rawConfig = envSchema.parse(process.env);
 const isProd: boolean = process.env.COURIER_ENV === "production";
-if (!isProd) {
+// The dev loop defaults to 3002, but a second worktree can pass its own port. Only fill in
+// the default: an explicit `PORT` belongs to the caller (a test harness, a second dev loop).
+if (!isProd && !process.env["PORT"]) {
   process.env["PORT"] = "3002";
 }
+const rawConfig = envSchema.parse(process.env);
 const basedir = isProd ? getExeDir() : path.resolve(import.meta.dirname, "..");
 
 export const config = {

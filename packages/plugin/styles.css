@@ -567,18 +567,22 @@
 
 .courier-setup-connection {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
-  max-height: 82vh;
   min-height: 0;
+  max-height: none;
   overflow: hidden;
 }
 
-/* Only the form scrolls; the footer with Start syncing is always on screen. */
+/* Only the form scrolls; the footer inside it sticks to the bottom. */
 .courier-setup-body {
+  display: flex;
   flex: 1 1 auto;
+  flex-direction: column;
   min-height: 0;
   overflow-y: auto;
-  padding-right: 2px;
+  overscroll-behavior: contain;
+  scroll-padding-block: 14px;
 }
 
 /* ── Lead ── */
@@ -652,6 +656,7 @@
   display: flex;
   flex-direction: column;
   gap: 14px;
+  margin-bottom: 16px;
 }
 
 .courier-setup-card,
@@ -763,13 +768,17 @@
 }
 
 .courier-setup-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
   display: flex;
   flex: 0 0 auto;
   align-items: center;
   gap: 12px;
-  margin-top: 16px;
+  margin-top: auto;
   padding-top: 13px;
   border-top: 1px solid var(--background-modifier-border);
+  background: var(--modal-background, var(--background-primary));
 }
 
 .courier-setup-footer-hint {
@@ -2318,12 +2327,11 @@ body.is-phone .courier-login-control.has-action .courier-login-input {
  * themes both get the same hierarchy without a second palette.
  */
 .modal.courier-setup-connection-modal {
-  width: min(560px, 92vw);
+  --courier-keyboard-height: 0px;
 
-  /* The form is taller than Obsidian's default 80vh cap once the folder summary is
-   * included; a little more room keeps the primary action in view without shrinking the
-   * fields. The body still scrolls on a short window. */
+  width: min(560px, 92vw);
   max-height: 88vh;
+  overflow: hidden;
 }
 
 /* Rows inside a card keep the app's rhythm but not its page-level rules. */
@@ -2369,6 +2377,7 @@ body.is-phone .courier-login-control.has-action .courier-login-input {
 
 .courier-setup-error.is-visible {
   display: block;
+  margin-bottom: 16px;
 }
 
 .courier-vh-version.is-selectable {
@@ -3457,5 +3466,148 @@ body.is-phone .courier-conflict-diff .courier-diff-rows.is-unified .courier-diff
 @supports (background: color-mix(in srgb, red 10%, transparent)) {
   body.is-phone .courier-conflict-diff-icon {
     background: color-mix(in srgb, var(--interactive-accent) 14%, transparent);
+  }
+}
+
+/* ── The connection setup dialog on a phone ── */
+
+/*
+ * A phone gets a bottom sheet instead of a floating dialog: edge to edge, anchored to the
+ * bottom, with only its top corners rounded. That is the shape Obsidian's own phone dialogs
+ * use, and it is what makes the form read as part of the app rather than a desktop window
+ * squeezed onto a narrow screen.
+ *
+ * The sheet also owns the keyboard. `--keyboard-height` is Obsidian's own measurement and
+ * `--courier-keyboard-height` is the visual-viewport fallback written by the modal; the
+ * larger one wins. `margin-top: auto` pins the sheet to the bottom of the modal container
+ * (the container is a row flexbox, so a cross-axis auto margin is what moves it), and
+ * `margin-bottom` lifts it clear of the keyboard. The height subtracts the same inset so a
+ * tall form cannot grow behind the keyboard.
+ */
+body.is-phone .modal.courier-setup-connection-modal {
+  --courier-keyboard: max(var(--keyboard-height, 0px), var(--courier-keyboard-height, 0px));
+
+  width: 100vw;
+  max-width: 100vw;
+  max-height: calc(100vh - var(--safe-area-inset-top, 0px) - var(--courier-keyboard));
+  margin-top: auto;
+  margin-bottom: var(--courier-keyboard);
+  border-radius: var(--touch-radius-s, 16px) var(--touch-radius-s, 16px) 0 0;
+  background: var(--modal-background, var(--background-primary));
+}
+
+body.is-phone .courier-setup-connection {
+  max-height: none;
+
+  /* The sheet reaches the screen's bottom edge, so its content has to clear the home
+   * indicator itself. With the keyboard up that inset is covered, hence `max()` rather
+   * than adding the two. */
+  padding-bottom: max(16px, calc(var(--safe-area-inset-bottom, 0px) - var(--courier-keyboard)));
+}
+
+body.is-phone .courier-setup-lead {
+  padding: 2px 0 14px;
+}
+
+/* The phone sheet has no room for a decorative tile; the title and the vault chip already
+ * say what this screen is. This used to live in the `max-width: 520px` query, which missed
+ * phones (and foldables) whose window is wider than that. */
+body.is-phone .courier-setup-lead-icon {
+  display: none;
+}
+
+body.is-phone .courier-setup-chips {
+  padding-left: 0;
+}
+
+body.is-phone .courier-setup-form {
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+body.is-phone .courier-setup-card {
+  padding: 4px 16px;
+  border-radius: 14px;
+}
+
+body.is-phone .courier-setup-card .setting-item {
+  padding: 12px 0;
+}
+
+/* Obsidian zeroes the first and last `setting-item` of a modal. These cards are forms, so
+ * their outermost rows keep the same inset as the rows between them; without this the
+ * first label sits against the card's top edge and the last row against its bottom. `body`
+ * makes these outrank Obsidian's `:first-child`/`:last-child` rules; the phone rules after
+ * them outrank these. */
+body .modal.courier-setup-connection-modal .courier-setup-card .setting-item:first-child {
+  padding: 10px 0;
+}
+
+body .modal.courier-setup-connection-modal .courier-setup-card .setting-item:last-child {
+  padding: 10px 0;
+}
+
+body.is-phone .modal.courier-setup-connection-modal .courier-setup-card .setting-item:first-child {
+  padding: 12px 0;
+}
+
+body.is-phone .modal.courier-setup-connection-modal .courier-setup-card .setting-item:last-child {
+  padding: 12px 0;
+}
+
+body.is-phone .courier-setup-field .setting-item-info {
+  margin-bottom: 8px;
+}
+
+body.is-phone .courier-setup-error.is-visible {
+  margin-bottom: 14px;
+}
+
+body.is-phone .courier-setup-folders {
+  gap: 8px;
+  padding: 13px 16px 14px;
+  border-radius: 14px;
+}
+
+body.is-phone .courier-setup-manage {
+  min-height: 40px;
+  padding: 0 16px;
+  border-radius: 10px;
+}
+
+body.is-phone .courier-setup-field input[type="text"],
+body.is-phone .courier-setup-field input[type="password"] {
+  height: 46px;
+  border-radius: 12px;
+  font-size: 16px;
+}
+
+body.is-phone .courier-setup-footer {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  margin-top: auto;
+  padding-top: 12px;
+}
+
+body.is-phone .courier-setup-footer-hint {
+  width: 100%;
+}
+
+body.is-phone .courier-setup-actions {
+  width: 100%;
+  gap: 10px;
+}
+
+body.is-phone .courier-setup-actions button {
+  flex: 1 1 0;
+  min-height: 48px;
+  border-radius: 12px;
+  font-size: var(--font-ui-medium);
+}
+
+@supports (height: 100dvh) {
+  body.is-phone .modal.courier-setup-connection-modal {
+    max-height: calc(100dvh - var(--safe-area-inset-top, 0px) - var(--courier-keyboard));
   }
 }
