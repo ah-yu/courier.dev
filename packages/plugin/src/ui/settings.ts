@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting, type SettingDefinitionItem } from "obsidian";
+import { App, PluginSettingTab, Setting, setIcon, type SettingDefinitionItem } from "obsidian";
 import {
   FILE_TYPE_GROUPS,
   SETTINGS_GROUPS,
@@ -96,9 +96,10 @@ function describeSettingsGroup(group: SettingsGroup): string {
  * notices, and the step never changes on a failure, so nothing the user typed is
  * lost.
  *
- * There is no page title and no step counter: the controls say what they are, and a
- * settings page that opens with a heading repeating the plugin's name is one line of
- * chrome the user has to read past every time.
+ * There is no settings-level title and no step counter: the sign-in form has its own
+ * heading, and everywhere else the controls say what they are. A settings page that opens
+ * with a heading repeating the plugin's name is one line of chrome the user reads past
+ * every time.
  */
 export class CourierSettingTab extends PluginSettingTab {
   private plugin: CourierPlugin;
@@ -118,6 +119,19 @@ export class CourierSettingTab extends PluginSettingTab {
    * one live line without rebuilding the page.
    */
   private connectionRow: Setting | null = null;
+  /**
+   * The login row, the grouping panel around it and that panel's parent. The row loses its
+   * chrome, the panel is flattened and the parent is stretched so the form can centre in
+   * the visible tab; all three are tracked so the next stage can put the app's own chrome
+   * back, even if the app reuses the elements.
+   */
+  private loginRowEl: HTMLElement | null = null;
+  private loginGroupEl: HTMLElement | null = null;
+  private loginPageEl: HTMLElement | null = null;
+  /** Re-measures the URL field when the window (or phone rotation) changes its width. */
+  private loginResizeObserver: ResizeObserver | null = null;
+  /** Set by a failed sign-in so the re-render can put focus back on the key field. */
+  private focusLoginKey = false;
 
   constructor(app: App, plugin: CourierPlugin) {
     super(app, plugin);
@@ -163,7 +177,12 @@ export class CourierSettingTab extends PluginSettingTab {
     // A full render replaces every row; the old connection row must not stay reachable by a
     // state change that arrives before the new one exists.
     this.connectionRow = null;
-    switch (this.stage()) {
+    const stage = this.stage();
+    // The login step owns the classes that flatten and centre it. Only another step (or a
+    // re-render of this one, which cleans up at its own start) gets the app's chrome back;
+    // a call that merely indexes or warms this page must not un-centre it.
+    if (stage !== "login") this.clearLoginChrome();
+    switch (stage) {
       case "login":
         return this.loginDefinitions(alwaysVisible);
       case "choose":
@@ -287,7 +306,7 @@ export class CourierSettingTab extends PluginSettingTab {
 
   /**
    * Step 1: the sign-in form. A form is not a row, so it stays one imperative item — and its
-   * own error line is drawn inside the card rather than as a second item, because two items
+   * own error line is drawn inside the form rather than as a second item, because two items
    * would carry the same (empty) name, and the app keys an item by that name.
    */
   private loginDefinitions(visible: () => boolean): SettingDefinitionItem[] {
@@ -297,9 +316,23 @@ export class CourierSettingTab extends PluginSettingTab {
         visible,
         render: (setting) => {
           // A form is not a settings row: the row it is given loses its chrome and holds the
-          // card, which keeps the centred form the step has always been.
+          // form. The panel that groups settings rows and its parent are flattened too, so
+          // the form — not the app's own card — is the surface the user sees. Clean the old
+          // login chrome first, so a re-render cannot leave two sets of classes behind.
+          this.clearLoginChrome();
           setting.settingEl.empty();
           setting.settingEl.addClass("courier-login-row");
+          this.loginRowEl = setting.settingEl;
+          const group = setting.settingEl.parentElement;
+          if (group) {
+            group.addClass("courier-login-group");
+            this.loginGroupEl = group;
+            const shell = group.parentElement;
+            if (shell) {
+              shell.addClass("courier-login-page");
+              this.loginPageEl = shell;
+            }
+          }
           this.renderLoginStage(setting.settingEl);
         },
       },
@@ -513,109 +546,181 @@ export class CourierSettingTab extends PluginSettingTab {
   // ── Step 1: sign in ──
 
   /**
-   * The whole login step: two labelled fields and one button, centred.
+   * The whole login step: one centred form, not a settings row and not a card.
    *
-   * No heading and no description — the fields say what they are, and the step is
-   * the first thing a fresh install shows, so there is nothing to explain. It is
-   * deliberately **not** a set of Obsidian settings rows either: those put the label
-   * on the left and the control on the right, which is right for a switch and wrong
-   * for a form.
+   * The settings pane is already the surface, so this page adds no panel, background or
+   * brand block of its own — the title, the two fields and the button are the whole view,
+   * and they sit in the middle of the pane instead of at its top edge.
    *
-   * The fields persist as they are typed but never re-render the page (a rebuild on
-   * every keystroke would take the caret with it), so validation and the request
-   * happen on the button, and its outcome decides the next step. Enter submits, as on
-   * any web login.
+   * The address field is the one value that can outgrow its input. It stays on one line (an
+   * input cannot wrap), and when the value is wider than the field the full address is
+   * repeated underneath in a line that wraps, so no part of a server URL is ever hidden.
+   *
+   * The fields persist as they are typed but never re-render the page (a rebuild on every
+   * keystroke would take the caret with it), so validation and the request happen on the
+   * button, and its outcome decides the next step. Enter submits, as on any web login.
    */
   private renderLoginStage(containerEl: HTMLElement): void {
-    const card = containerEl.createDiv({ cls: "courier-login" });
-    // A narrow column in the middle of the pane, with nothing above it: the page has
-    // no title, so the form is the whole step.
-    card.setCssStyles({ maxWidth: "360px", margin: "48px auto 0" });
+    const page = containerEl.createDiv({ cls: "courier-login" });
+    const panel = page.createDiv({ cls: "courier-login-panel" });
+    const head = panel.createDiv({ cls: "courier-login-head" });
+    // A `div` with the heading role rather than an `h2`: the app's heading rules are sized
+    // for settings sections, and this is the page's functional title.
+    const title = head.createDiv({
+      cls: "courier-login-title",
+      text: t("settings.login.title"),
+    });
+    title.setAttribute("role", "heading");
+    title.setAttribute("aria-level", "2");
+    head.createDiv({ cls: "courier-login-subtitle", text: t("settings.login.subtitle") });
 
-    const serverInput = this.renderLoginField(card, t("settings.login.serverAddress"), {
+    const form = panel.createDiv({ cls: "courier-login-form" });
+
+    const server = this.renderLoginField(form, "server", t("settings.login.serverAddress"), {
       type: "text",
-      placeholder: "http://localhost:3002",
+      placeholder: t("settings.login.serverPlaceholder"),
       value: this.plugin.settings.serverUrl ?? "",
+      icon: "server",
       onChange: (value) => {
         this.plugin.settings.serverUrl = value.trim() || null;
         void this.plugin.saveSettings();
       },
     });
-    const keyInput = this.renderLoginField(card, t("settings.login.userKey"), {
+
+    const fullAddress = server.field.createDiv({ cls: "courier-login-url-full" });
+    fullAddress.setAttribute("aria-live", "polite");
+    const syncFullAddress = (): void => {
+      const value = server.input.value.trim();
+      const clipped = server.input.scrollWidth > server.input.clientWidth + 1;
+      if (!clipped || !value) {
+        fullAddress.removeClass("is-visible");
+        fullAddress.setText("");
+        return;
+      }
+      fullAddress.addClass("is-visible");
+      fullAddress.setText(t("settings.login.fullAddress", { url: value }));
+    };
+    server.input.addEventListener("input", syncFullAddress);
+    // The first paint happens before the field has a width; measure again once it has one.
+    window.setTimeout(syncFullAddress, 0);
+    // A window resize or a phone rotation changes the field's width too.
+    if (typeof ResizeObserver !== "undefined") {
+      this.loginResizeObserver = new ResizeObserver(syncFullAddress);
+      this.loginResizeObserver.observe(server.input);
+    }
+
+    const key = this.renderLoginField(form, "key", t("settings.login.userKey"), {
       type: "password",
       placeholder: "ck_...",
       value: this.plugin.settings.userKey ?? "",
+      icon: "key",
+      action: true,
       onChange: (value) => {
         this.plugin.settings.userKey = value.trim() || null;
         void this.plugin.saveSettings();
       },
     });
+    if (this.focusLoginKey) {
+      this.focusLoginKey = false;
+      window.setTimeout(() => key.input.focus?.(), 0);
+    }
 
-    const submit = card.createEl("button", {
+    // Reveal stays beside the dots: a pasted key is easy to get one character wrong, and
+    // the field is the one place that mistake can be seen before a round trip.
+    let keyVisible = false;
+    const reveal = key.control.createEl("button", { cls: "courier-login-reveal" });
+    reveal.type = "button";
+    const paintReveal = (): void => {
+      reveal.empty();
+      setIcon(reveal, keyVisible ? "eye-off" : "eye");
+      reveal.querySelector("svg")?.setAttribute("aria-hidden", "true");
+      const label = t(keyVisible ? "settings.login.hideKey" : "settings.login.showKey");
+      reveal.setAttribute("aria-label", label);
+      reveal.setAttribute("aria-pressed", String(keyVisible));
+      reveal.setAttribute("title", label);
+    };
+    paintReveal();
+    reveal.addEventListener("click", () => {
+      keyVisible = !keyVisible;
+      key.input.type = keyVisible ? "text" : "password";
+      paintReveal();
+      key.input.focus?.();
+    });
+
+    // The failure belongs to the form that produced it, so it sits between the fields and
+    // the button. It is part of this item rather than an item of its own: a second item
+    // would carry the same (empty) name, and the app keys an item by its name.
+    if (this.stageError) {
+      const error = form.createDiv({ cls: "courier-login-error" });
+      error.setAttribute("role", "alert");
+      error.setAttribute("id", "courier-login-error");
+      for (const input of [server.input, key.input]) {
+        input.setAttribute("aria-describedby", "courier-login-error");
+      }
+      const errorIcon = error.createSpan({ cls: "courier-login-error-icon" });
+      errorIcon.setAttribute("aria-hidden", "true");
+      setIcon(errorIcon, "alert-circle");
+      error.createSpan({ cls: "courier-login-error-text", text: this.stageError });
+    }
+
+    const submit = form.createEl("button", {
       text: t("settings.login.submit"),
       cls: "courier-login-submit",
     });
     submit.type = "button";
     submit.addClass("mod-cta");
-    submit.setCssStyles({ width: "100%", marginTop: "8px", padding: "10px" });
     const signIn = async () => {
+      // Enter reaches this from either field, so a second keypress while the request is in
+      // flight must not start a second sign-in.
+      if (submit.disabled) return;
       submit.disabled = true;
       submit.setText(t("settings.login.submitting"));
       await this.signIn();
     };
     submit.addEventListener("click", () => void signIn());
-    for (const input of [serverInput, keyInput]) {
+    for (const input of [server.input, key.input]) {
       input.addEventListener("keydown", (event) => {
         if (event.key === "Enter") void signIn();
       });
-    }
-
-    // The failure lands under the button that produced it. It is part of this item rather than
-    // an item of its own: a second item would carry the same (empty) name, and the app keys an
-    // item by its name.
-    if (this.stageError) {
-      const error = card.createDiv({ cls: "courier-settings-error" });
-      error.setCssStyles({ color: "var(--text-error)", margin: "4px 0" });
-      error.setText(`⚠ ${this.stageError}`);
     }
   }
 
   /** One labelled, full-width field of the login form. */
   private renderLoginField(
     parent: HTMLElement,
+    name: "server" | "key",
     label: string,
     options: {
       type: string;
       placeholder: string;
       value: string;
+      icon: string;
+      /** Reserve room on the right for the field's own action button. */
+      action?: boolean;
       onChange: (value: string) => void;
     },
-  ): HTMLInputElement {
+  ): { field: HTMLElement; input: HTMLInputElement; control: HTMLElement } {
     const field = parent.createDiv({ cls: "courier-login-field" });
-    field.setCssStyles({ marginBottom: "14px" });
+    const inputId = `courier-login-${name}`;
     const labelEl = field.createEl("label", { text: label, cls: "courier-login-label" });
-    labelEl.setCssStyles({
-      display: "block",
-      marginBottom: "6px",
-      fontWeight: "600",
-      fontSize: "var(--font-ui-small)",
-    });
+    labelEl.htmlFor = inputId;
 
-    const input = field.createEl("input", { cls: "courier-login-input" });
+    const control = field.createDiv({
+      cls: options.action ? "courier-login-control has-action" : "courier-login-control",
+    });
+    const icon = control.createSpan({ cls: "courier-login-field-icon" });
+    icon.setAttribute("aria-hidden", "true");
+    setIcon(icon, options.icon);
+
+    const input = control.createEl("input", { cls: "courier-login-input" });
+    input.id = inputId;
     input.type = options.type;
     input.placeholder = options.placeholder;
     input.value = options.value;
-    input.setCssStyles({
-      boxSizing: "border-box",
-      width: "100%",
-      padding: "8px 10px",
-      border: "1px solid var(--background-modifier-border)",
-      borderRadius: "var(--radius-m)",
-      background: "var(--background-modifier-form-field)",
-      color: "var(--text-normal)",
-    });
+    input.autocomplete = "off";
+    input.spellcheck = false;
     input.addEventListener("input", () => options.onChange(input.value));
-    return input;
+    return { field, input, control };
   }
 
   /** Keep the credentials, prove the key works, and show the vault list. */
@@ -627,6 +732,8 @@ export class CourierSettingTab extends PluginSettingTab {
       // the vault"; the override keeps the page on the field the user has to fix.
       this.showLogin = true;
       this.stageError = outcome.error;
+      // The re-render replaces the form, so put the caret back where the fix belongs.
+      this.focusLoginKey = true;
       this.refresh();
       return;
     }
@@ -1021,9 +1128,28 @@ export class CourierSettingTab extends PluginSettingTab {
 
   // ── Helpers ──
 
+  /**
+   * Put the app's own chrome back and stop watching the URL field.
+   *
+   * The login step is the only stage that removes the grouping panel's background and
+   * stretches its ancestors. The classes live on three different elements, so they are
+   * tracked and removed together; the observer is disconnected with them.
+   */
+  private clearLoginChrome(): void {
+    this.loginRowEl?.removeClass("courier-login-row");
+    this.loginGroupEl?.removeClass("courier-login-group");
+    this.loginPageEl?.removeClass("courier-login-page");
+    this.loginResizeObserver?.disconnect();
+    this.loginRowEl = null;
+    this.loginGroupEl = null;
+    this.loginPageEl = null;
+    this.loginResizeObserver = null;
+  }
+
   /** Drop the per-step state when the flow moves on (bind, unbind, log out). */
   private resetStages(): void {
     this.stageError = null;
     this.showLogin = false;
+    this.focusLoginKey = false;
   }
 }

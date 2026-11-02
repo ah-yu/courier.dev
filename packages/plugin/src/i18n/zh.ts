@@ -69,8 +69,14 @@ export const zh = {
   "notice.manualReload": "请手动退出并重新打开 Obsidian。",
 
   // ── Settings page: login / choose / locked ──
+  "settings.login.title": "登录 Courier",
+  "settings.login.subtitle": "使用服务器地址与用户密钥登录。",
   "settings.login.serverAddress": "服务器地址",
   "settings.login.userKey": "用户密钥",
+  "settings.login.serverPlaceholder": "https://your-server.com",
+  "settings.login.showKey": "显示用户密钥",
+  "settings.login.hideKey": "隐藏用户密钥",
+  "settings.login.fullAddress": "完整地址：{url}",
   "settings.login.submit": "登录",
   "settings.login.submitting": "正在登录…",
   "settings.account.reading": "读取账号中…",

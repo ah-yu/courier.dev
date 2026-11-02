@@ -38,6 +38,8 @@ export interface FakeEl {
   children: FakeEl[];
   /** The element this one hangs off, or null at the root — what `detach()` needs. */
   parent: FakeEl | null;
+  /** The same relationship as the DOM spells it; a node's parent element, or null. */
+  readonly parentElement: FakeEl | null;
   /** Objects created *on* this element — `Setting` rows in practice. */
   attached: unknown[];
   /** CSS classes this element carries, so tests can find rendered rows. */
@@ -170,6 +172,9 @@ export function createFakeEl(tagName = "div"): FakeEl {
       for (const cb of el.listeners.click ?? []) cb(event);
     },
     style: {},
+    get parentElement() {
+      return el.parent;
+    },
     setCssStyles(styles) {
       for (const [property, value] of Object.entries(styles)) {
         if (value !== undefined) el.style[property] = String(value);

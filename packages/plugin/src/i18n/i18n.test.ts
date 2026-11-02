@@ -87,7 +87,7 @@ function isFormatOnly(value: string): boolean {
 describe("catalogs", () => {
   const keys = Object.keys(zh) as PluginMessageKey[];
   /** Values that are legitimately identical in both languages. */
-  const SHARED_VALUES = new Set(["PDF", "Markdown"]);
+  const SHARED_VALUES = new Set(["PDF", "Markdown", "https://your-server.com"]);
 
   it("has exactly the same keys in both catalogs", () => {
     expect(sortedCopy(Object.keys(en))).toEqual(sortedCopy(keys));

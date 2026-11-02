@@ -1671,11 +1671,350 @@
  * step's error line. The app still creates the row — every definition is one — so its own
  * padding and divider are removed and the content inside is what the user sees.
  */
-.courier-login-row,
-.courier-settings-error-row {
+.setting-item.courier-login-row {
+  padding: 8px 0;
+  border: none;
+  background: none;
+}
+
+.setting-item.courier-settings-error-row {
   padding: 0;
   border: none;
   background: none;
+}
+
+/* ── The sign-in step ── */
+
+/*
+ * The login step is the one page in the tab that is not a list of settings: the app's
+ * grouping card is flattened and the whole chain from the tab's content down is stretched
+ * to the pane (the settings tab puts the classes on while this step renders), so the form
+ * sits directly on the page and is centred in the space the user actually sees.
+ */
+.setting-group.courier-login-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.setting-items.courier-login-group {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.setting-items.courier-login-group .setting-item.courier-login-row {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  padding: 8px 0;
+}
+
+.courier-login {
+  box-sizing: border-box;
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 0;
+  padding: 24px 0;
+}
+
+/* The form is the page: no card, no panel and no background of its own. */
+.courier-login-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+  width: 100%;
+  max-width: 400px;
+}
+
+.courier-login-head {
+  text-align: center;
+}
+
+.courier-login-title {
+  color: var(--text-normal);
+  font-size: calc(var(--font-ui-medium) * 1.45);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
+}
+
+.courier-login-subtitle {
+  margin-top: 8px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  line-height: 1.55;
+}
+
+.courier-login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.courier-login-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.courier-login-label {
+  color: var(--text-normal);
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.courier-login-control {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.courier-login-field-icon {
+  position: absolute;
+  left: 12px;
+  display: flex;
+  color: var(--text-faint);
+  pointer-events: none;
+}
+
+.courier-login-field-icon svg {
+  width: 15px;
+  height: 15px;
+}
+
+/*
+ * Two classes, not one: Obsidian's own `input[type="text"]` rule sets the height,
+ * padding and radius, and an attribute selector outranks a single class. The form's
+ * field is the one place where that default must not win.
+ */
+.courier-login-control .courier-login-input {
+  box-sizing: border-box;
+  width: 100%;
+  height: 42px;
+  padding: 0 13px 0 37px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-normal);
+  font-family: var(--font-interface);
+  font-size: var(--font-ui-small);
+  line-height: 1.4;
+}
+
+.courier-login-control .courier-login-input:hover {
+  border-color: var(--background-modifier-border-hover, var(--background-modifier-border));
+}
+
+.courier-login-control .courier-login-input:focus {
+  border-color: var(--interactive-accent);
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--interactive-accent) 16%, transparent);
+}
+
+.courier-login-control .courier-login-input::placeholder {
+  color: var(--text-faint);
+}
+
+.courier-login-control.has-action .courier-login-input {
+  padding-right: 44px;
+}
+
+/* Two classes: Obsidian's own button rule gives every button a background, and the
+ * reveal must stay transparent inside the field. */
+.courier-login-control .courier-login-reveal {
+  position: absolute;
+  right: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.courier-login-control .courier-login-reveal:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.courier-login-control .courier-login-reveal:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 1px;
+}
+
+.courier-login-reveal svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* A field cannot wrap, so a value wider than its input is repeated here, where it can. */
+.courier-login-url-full {
+  display: none;
+  margin-top: 1px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.courier-login-url-full.is-visible {
+  display: block;
+}
+
+.courier-login-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--text-error) 30%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--text-error) 8%, transparent);
+  color: var(--text-error);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.5;
+}
+
+.courier-login-error-icon {
+  display: flex;
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.courier-login-error-icon svg {
+  width: 15px;
+  height: 15px;
+}
+
+.courier-login-error-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.courier-login-submit {
+  width: 100%;
+  height: 42px;
+  margin-top: 2px;
+  border-radius: 10px;
+  font-size: var(--font-ui-small);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.courier-login-submit:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 2px;
+}
+
+.courier-login-submit:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
+@media (width <= 780px) {
+  .setting-group.courier-login-page {
+    display: block;
+    min-height: 0;
+  }
+
+  .setting-items.courier-login-group,
+  .setting-items.courier-login-group .setting-item.courier-login-row {
+    display: block;
+  }
+
+  .courier-login {
+    min-height: 0;
+    padding: 8px 0 24px;
+  }
+
+  .courier-login-panel {
+    max-width: 100%;
+    gap: 22px;
+  }
+
+  .courier-login-title {
+    font-size: calc(var(--font-ui-medium) * 1.3);
+  }
+}
+
+body.is-phone .setting-group.courier-login-page {
+  display: block;
+  min-height: 0;
+}
+
+body.is-phone .setting-items.courier-login-group,
+body.is-phone .setting-items.courier-login-group .setting-item.courier-login-row {
+  display: block;
+}
+
+body.is-phone .courier-login {
+  min-height: 0;
+  padding: 8px 0 24px;
+}
+
+body.is-phone .courier-login-panel {
+  max-width: 100%;
+  gap: 20px;
+}
+
+body.is-phone .courier-login-control .courier-login-input,
+body.is-phone .courier-login-submit {
+  height: 46px;
+}
+
+/* A thumb needs a full touch target, not the desktop field's icon-sized button. */
+body.is-phone .courier-login-control .courier-login-reveal {
+  right: 1px;
+  width: 44px;
+  height: 44px;
+}
+
+body.is-phone .courier-login-control.has-action .courier-login-input {
+  padding-right: 50px;
+}
+
+/* A phone with the keyboard up is a short viewport: keep the whole form above it rather
+ * than letting the button slip under the keyboard. The form already starts at the top on
+ * a phone; this pass only tightens the rhythm and the control heights. */
+@media (height <= 520px) {
+  body.is-phone .courier-login {
+    padding: 4px 0 max(12px, env(safe-area-inset-bottom, 0px));
+  }
+
+  body.is-phone .courier-login-panel {
+    gap: 14px;
+  }
+
+  body.is-phone .courier-login-title {
+    font-size: calc(var(--font-ui-medium) * 1.15);
+  }
+
+  body.is-phone .courier-login-form {
+    gap: 10px;
+  }
+
+  body.is-phone .courier-login-control .courier-login-input,
+  body.is-phone .courier-login-submit {
+    height: 42px;
+  }
 }
 
 .courier-reload-notice-icon svg {
