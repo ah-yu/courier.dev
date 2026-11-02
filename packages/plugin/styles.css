@@ -802,6 +802,272 @@
   margin-left: auto;
 }
 
+/* ── The remote-vault picker ── */
+
+/*
+ * The picker is a list of vault cards, not a settings page: one card per remote vault
+ * with a quiet cloud tile, the name and its age, delete as an icon and Connect as the
+ * row's action. The create entry is a dashed "add" row under the list rather than a
+ * second purple button — connecting is what this dialog is for, and two primary buttons
+ * made neither read as the main one.
+ *
+ * The modal is kept narrow enough that a row reads as one line; the card's own padding
+ * does the grouping, so the dialog needs no rules or dividers. Every colour and radius
+ * is a theme variable, so light, dark and community themes colour it without a second
+ * rule.
+ */
+.modal.courier-vault-picker-modal {
+  width: min(600px, calc(100vw - 32px));
+}
+
+body.is-phone .modal.courier-vault-picker-modal {
+  width: 100%;
+  max-width: none;
+}
+
+.courier-vault-subtitle {
+  margin: -2px 0 14px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  line-height: 1.5;
+}
+
+.courier-vault-list {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+/* The card's padding and border live at the end of this file: the app's modal reset
+ * outranks a class pair, so the card rule needs a modal-scoped selector and a late
+ * position in the cascade. */
+
+/* The tile is the row's first child, and the app gives a settings row's first child its
+ * own inline-end margin; `renderVaultRow` clears it inline because the app's rule
+ * outranks this class. */
+.courier-vault-icon {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+  color: var(--interactive-accent);
+}
+
+.courier-vault-icon svg {
+  width: 19px;
+  height: 19px;
+}
+
+.courier-vault-row .setting-item-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.courier-vault-row .setting-item-name {
+  overflow: hidden;
+  color: var(--text-normal);
+  font-size: var(--font-ui-medium);
+  font-weight: 600;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A phone gives the name less width beside the two controls; two lines keep a long
+ * vault name readable where one line would truncate it to a stub. */
+:where(body.is-phone) .courier-vault-row .setting-item-name {
+  display: -webkit-box;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.courier-vault-row .setting-item-description {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.4;
+}
+
+.courier-vault-connect {
+  padding: 6px 16px;
+  border-radius: var(--radius-s);
+  font-size: var(--font-ui-small);
+  font-weight: 600;
+}
+
+/* Delete stays quiet until the pointer is on the card: it is the rare, destructive
+ * action, and a red icon on every row would make the list read as a warning. */
+.courier-vault-row .extra-setting-button {
+  width: 28px;
+  height: 28px;
+  color: var(--text-faint);
+}
+
+:where(.courier-vault-row) .extra-setting-button:hover {
+  color: var(--text-error);
+  background: color-mix(in srgb, var(--text-error) 10%, transparent);
+}
+
+/* `:where` keeps the phone rule from outranking later component rules on paper while
+ * still applying on a phone; the row's inline control width is what prevents the
+ * app's phone layout from stretching the row. */
+:where(body.is-phone) .courier-vault-row .extra-setting-button {
+  width: 32px;
+  height: 32px;
+}
+
+/* The phone button metrics live at the end of this file: the app's own phone rule for a
+ * settings-row button outranks a bare class. */
+
+/* The "add" row: the same card shape as a vault, drawn as an outline, with a wider gap
+ * than between cards so it reads as the list's footer rather than one more vault. Its
+ * spacing and control width are inline: the app's modal reset outranks a class here. */
+.courier-vault-create .setting-item-info {
+  display: none;
+}
+
+.courier-vault-create-button {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 9px;
+  width: 100%;
+  min-height: 46px;
+  padding: 0 16px;
+  border: 1px dashed var(--background-modifier-border);
+  border-radius: 12px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  font-weight: 600;
+}
+
+.courier-vault-create-button:hover {
+  border-color: var(--interactive-accent);
+  background: color-mix(in srgb, var(--interactive-accent) 7%, transparent);
+  color: var(--interactive-accent);
+}
+
+.courier-vault-create-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.courier-vault-create-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* ── Loading and empty states ── */
+
+.courier-vault-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px 0;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.courier-vault-state-icon svg {
+  width: 16px;
+  height: 16px;
+  animation: courier-spin 900ms linear infinite;
+}
+
+@keyframes courier-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.courier-vault-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 26px 12px 22px;
+  text-align: center;
+}
+
+.courier-vault-empty-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  margin-bottom: 6px;
+  border-radius: 14px;
+  background: var(--background-secondary);
+  color: var(--text-faint);
+}
+
+.courier-vault-empty-icon svg {
+  width: 22px;
+  height: 22px;
+}
+
+.courier-vault-empty-title {
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  font-weight: 600;
+}
+
+.courier-vault-empty-hint {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.5;
+}
+
+/* ── Errors ── */
+
+.courier-vault-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--text-error) 35%, var(--background-modifier-border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text-error) 8%, transparent);
+  color: var(--text-error);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.45;
+}
+
+.courier-vault-error-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  padding-top: 1px;
+}
+
+.courier-vault-error-icon svg {
+  width: 14px;
+  height: 14px;
+}
+
+.courier-vault-error-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.courier-vault-retry .setting-item-info {
+  display: none;
+}
+
+.courier-vault-retry .setting-item-control {
+  width: 100%;
+  justify-content: flex-start;
+}
+
 /* ── The version history view (a main-area tab) ── */
 
 /*
@@ -3446,6 +3712,12 @@ body.is-phone .courier-conflict-diff .courier-diff-rows.is-unified .courier-diff
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .courier-vault-state-icon svg {
+    animation: none;
+  }
+}
+
 @keyframes courier-recycle-pulse {
   0%,
   100% {
@@ -3610,4 +3882,48 @@ body.is-phone .courier-setup-actions button {
   body.is-phone .modal.courier-setup-connection-modal {
     max-height: calc(100dvh - var(--safe-area-inset-top, 0px) - var(--courier-keyboard));
   }
+}
+
+/*
+ * The app's modal reset — `.modal:not(.mod-settings) .setting-item:not(...)` — sets a
+ * settings row's padding and border with a specificity that a class pair cannot beat,
+ * which flattened this card into a bare settings row. The modal-scoped selector below
+ * outranks it; it sits at the end of the file so it is the last word among this sheet's
+ * own rules, and stylelint's descending-specificity check stays satisfied.
+ */
+.modal.courier-vault-picker-modal .courier-vault-picker .courier-vault-list .courier-vault-row {
+  margin: 0;
+  padding: 13px 14px 13px 16px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 12px;
+  background: var(--background-primary-alt);
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease;
+}
+
+.modal.courier-vault-picker-modal
+  .courier-vault-picker
+  .courier-vault-list
+  .courier-vault-row:hover {
+  border-color: color-mix(
+    in srgb,
+    var(--interactive-accent) 45%,
+    var(--background-modifier-border)
+  );
+  background: var(--background-secondary);
+}
+
+/*
+ * The app's phone rule for a settings-row button is (0,3,1). These modal-scoped
+ * selectors outrank it, so the picker's touch metrics survive the app's own styling.
+ */
+body.is-phone .modal.courier-vault-picker-modal .courier-vault-connect {
+  min-height: 36px;
+  padding: 6px 16px;
+}
+
+body.is-phone .modal.courier-vault-picker-modal .courier-vault-create-button {
+  min-height: 46px;
+  padding: 0 16px;
 }
