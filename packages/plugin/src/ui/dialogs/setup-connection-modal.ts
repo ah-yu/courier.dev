@@ -2,6 +2,7 @@ import { Modal, Setting, setIcon, type App } from "obsidian";
 import { MAX_DEVICE_NAME_LENGTH, normalizeDeviceName } from "@courier/shared";
 import { t, plural } from "../../i18n";
 import { describeActionError, type ActionOutcome } from "../../shared/action-error";
+import { keyboardInset, revealScrollDelta } from "../../shared/visual-viewport";
 import { ExcludedFoldersModal } from "./excluded-folders-modal";
 
 /** What the setup dialog sends to the picker when Start syncing is pressed. */
@@ -57,10 +58,14 @@ export class SetupConnectionModal extends Modal {
   private summaryEl!: HTMLElement;
   private chipsEl!: HTMLElement;
   private errorEl!: HTMLElement;
+  private bodyEl!: HTMLElement;
   private startButton!: HTMLButtonElement;
   private cancelButton!: HTMLButtonElement;
   private manageButton!: HTMLButtonElement;
   private passwordInput!: HTMLInputElement;
+  /** Stops the visual-viewport listeners, or null on a window without one. */
+  private stopViewportWatch: (() => void) | null = null;
+  private revealTimer: number | null = null;
 
   constructor(app: App, options: SetupConnectionOptions) {
     super(app);
@@ -75,9 +80,10 @@ export class SetupConnectionModal extends Modal {
     this.contentEl.empty();
     this.contentEl.addClass("courier-setup-connection");
 
-    // The body scrolls when the window is short; the footer never does — Start syncing
-    // must stay visible without the user discovering a scrollbar.
-    const body = this.contentEl.createDiv({ cls: "courier-setup-body" });
+    // The body is the scrolling region; the footer inside it is sticky, so Start syncing
+    // stays visible without the user discovering a scrollbar.
+    this.bodyEl = this.contentEl.createDiv({ cls: "courier-setup-body" });
+    const body = this.bodyEl;
     this.renderLead(body);
     const form = body.createDiv({ cls: "courier-setup-form" });
     this.renderConnectionSection(form);
@@ -86,7 +92,15 @@ export class SetupConnectionModal extends Modal {
 
     this.errorEl = body.createDiv({ cls: "courier-setup-error" });
     this.renderError();
-    this.renderFooter();
+    this.renderFooter(body);
+    this.watchKeyboard();
+  }
+
+  override onClose(): void {
+    this.stopViewportWatch?.();
+    this.stopViewportWatch = null;
+    this.revealTimer = null;
+    this.contentEl.empty();
   }
 
   // ── Layout ──
@@ -126,6 +140,7 @@ export class SetupConnectionModal extends Modal {
         text.inputEl.addEventListener("keydown", (event) => {
           if (event.key === "Enter") void this.start();
         });
+        this.attachRevealOnFocus(text.inputEl);
         this.passwordInput = text.inputEl;
       });
     this.asField(passwordRow);
@@ -157,6 +172,7 @@ export class SetupConnectionModal extends Modal {
         text.inputEl.addEventListener("keydown", (event) => {
           if (event.key === "Enter") void this.start();
         });
+        this.attachRevealOnFocus(text.inputEl);
       });
     this.asField(deviceRow);
   }
@@ -182,8 +198,8 @@ export class SetupConnectionModal extends Modal {
     this.renderFolderDraft();
   }
 
-  private renderFooter(): void {
-    const footer = this.contentEl.createDiv({ cls: "courier-setup-footer" });
+  private renderFooter(parent: HTMLElement): void {
+    const footer = parent.createDiv({ cls: "courier-setup-footer" });
     const hint = footer.createDiv({ cls: "courier-setup-footer-hint" });
     const lock = hint.createSpan({ cls: "courier-setup-footer-icon" });
     setIcon(lock, "lock");
@@ -211,6 +227,85 @@ export class SetupConnectionModal extends Modal {
    */
   private asField(row: Setting): void {
     row.settingEl.addClass("courier-setup-field");
+  }
+
+  // ── Keyboard ──
+
+  /**
+   * Keep the sheet above the on-screen keyboard and the focused field inside it.
+   *
+   * A phone's WebView reports the keyboard as a shrunken **visual** viewport while
+   * `innerHeight` and `100vh` keep the layout viewport: `styles.css` anchors the sheet to
+   * the bottom and lifts it by `--courier-keyboard-height` (and Obsidian's own
+   * `--keyboard-height`, whichever is larger). The inset is written here rather than in CSS
+   * because only a runtime can compare the two viewports; a desktop window and a phone
+   * without a keyboard both leave it at zero.
+   *
+   * Lifting the sheet is not enough on its own: the field the user tapped can still end up
+   * under the keyboard when the form was taller than the remaining space, so every resize
+   * also scrolls the body to reveal it. The method is a no-op when no visual viewport
+   * exists (the L2 stub's window), which keeps the dialog's structure tests independent of
+   * a browser layout engine.
+   */
+  private watchKeyboard(): void {
+    const win = typeof window === "undefined" ? null : window;
+    const viewport = win?.visualViewport;
+    if (!win || !viewport) return;
+
+    const update = (): void => {
+      const inset = keyboardInset(win.innerHeight, viewport.height, viewport.offsetTop);
+      this.modalEl.style.setProperty("--courier-keyboard-height", `${inset}px`);
+      this.scheduleReveal(win);
+    };
+    viewport.addEventListener("resize", update);
+    viewport.addEventListener("scroll", update);
+    win.addEventListener("orientationchange", update);
+
+    this.stopViewportWatch = () => {
+      viewport.removeEventListener("resize", update);
+      viewport.removeEventListener("scroll", update);
+      win.removeEventListener("orientationchange", update);
+      if (this.revealTimer !== null) win.clearTimeout(this.revealTimer);
+    };
+    update();
+  }
+
+  /** Reveal the tapped field once the keyboard has finished its opening animation. */
+  private attachRevealOnFocus(input: HTMLInputElement): void {
+    input.addEventListener("focus", () => {
+      const win = typeof window === "undefined" ? null : window;
+      if (win?.visualViewport) this.scheduleReveal(win);
+    });
+  }
+
+  private scheduleReveal(win: Window): void {
+    if (this.revealTimer !== null) win.clearTimeout(this.revealTimer);
+    this.revealTimer = win.setTimeout(() => {
+      this.revealTimer = null;
+      this.revealFocusedField();
+    }, 120);
+  }
+
+  private revealFocusedField(): void {
+    const field = this.bodyEl.ownerDocument.activeElement as HTMLElement | null;
+    if (!field || typeof field.getBoundingClientRect !== "function") return;
+    if (field.tagName !== "INPUT" && field.tagName !== "TEXTAREA") return;
+    if (!this.bodyEl.contains(field)) return;
+
+    // Reveal the whole row, not just the control: its label and explanation are what tell
+    // the user which field the keyboard is typing into, and a row that is only half on
+    // screen reads as a clipped form. The sticky footer is part of the body, so the row's
+    // visible band ends at the footer's top edge, not at the body's.
+    const row = field.closest(".setting-item") ?? field;
+    const bodyRect = this.bodyEl.getBoundingClientRect();
+    const footer = this.bodyEl.querySelector<HTMLElement>(".courier-setup-footer");
+    const footerTop = footer ? footer.getBoundingClientRect().top : bodyRect.bottom;
+    const visibleBody = {
+      top: bodyRect.top,
+      bottom: Math.min(bodyRect.bottom, footerTop),
+    };
+    const delta = revealScrollDelta(visibleBody, row.getBoundingClientRect(), 14);
+    if (delta !== 0) this.bodyEl.scrollTop += delta;
   }
 
   // ── Folder draft ──
