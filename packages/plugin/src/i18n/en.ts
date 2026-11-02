@@ -230,9 +230,11 @@ export const en: Record<PluginMessageKey, string> = {
 
   // ── Vault picker ──
   "dialog.vaultPicker.title": "Choose a remote vault",
+  "dialog.vaultPicker.subtitle": "Notes in a connected vault sync to this device, encrypted.",
   "dialog.vaultPicker.create": "Create remote vault",
   "dialog.vaultPicker.loading": "Loading remote vaults…",
-  "dialog.vaultPicker.empty": "No remote vaults yet. Create one first.",
+  "dialog.vaultPicker.emptyTitle": "No remote vaults yet",
+  "dialog.vaultPicker.emptyHint": "Create one to start syncing on this device.",
   "dialog.vaultPicker.deleteTooltip": "Delete remote vault",
   "dialog.vaultPicker.connect": "Connect",
   "dialog.vaultPicker.deleteTitle": 'Delete "{vault}"',

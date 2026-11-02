@@ -217,9 +217,11 @@ export const zh = {
 
   // ── Vault picker ──
   "dialog.vaultPicker.title": "选择远程库",
+  "dialog.vaultPicker.subtitle": "连接后，库中的笔记会加密同步到这台设备。",
   "dialog.vaultPicker.create": "创建远程库",
   "dialog.vaultPicker.loading": "正在加载远程库…",
-  "dialog.vaultPicker.empty": "还没有远程库，先创建一个。",
+  "dialog.vaultPicker.emptyTitle": "还没有远程库",
+  "dialog.vaultPicker.emptyHint": "创建一个远程库，开始在这台设备上同步。",
   "dialog.vaultPicker.deleteTooltip": "删除远程库",
   "dialog.vaultPicker.connect": "连接",
   "dialog.vaultPicker.deleteTitle": "删除「{vault}」",

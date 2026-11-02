@@ -48,6 +48,10 @@ import { keyExpiryText } from "../../plugin/src/shared/account-status";
 import { getSyncLog } from "../../plugin/src/shared/sync-log";
 import { t } from "../../plugin/src/i18n";
 import { PasswordPromptModal } from "../../plugin/src/ui/dialogs/password-prompt-modal";
+import {
+  VaultPickerModal,
+  type VaultPickerHost,
+} from "../../plugin/src/ui/dialogs/vault-picker-modal";
 import { FakeVault } from "./harness/fake-vault";
 import { createFakeApp, type FakeApp } from "./harness/fake-app";
 import {
@@ -369,6 +373,29 @@ async function openVaultPickerWith(plugin: CourierPlugin, vaultName: string): Pr
     () => settingsIn(picker.contentEl).some((setting) => setting.name === vaultName),
     `the vault picker never listed "${vaultName}"`,
   );
+  return picker;
+}
+
+/** A picker host whose list read is the one a state test supplies. */
+function pickerHostWith(listVaults: VaultPickerHost["actions"]["listVaults"]): VaultPickerHost {
+  return {
+    actions: { listVaults },
+    connectToVault: async () => ({ ok: false, error: "not used" }),
+    getConnectionSetup: () => ({
+      configured: false,
+      deviceName: "My Device",
+      excludedFolders: [],
+    }),
+    deleteVault: async () => ({ ok: false, error: "not used" }),
+    fetchVaultCredentials: async () => ({ kind: "invalid-password" }),
+    createVault: async () => ({ ok: false, error: "not used" }),
+  };
+}
+
+/** Open a picker over a fake host, for the states that need no real account. */
+function openPickerWithHost(host: VaultPickerHost): VaultPickerModal {
+  const picker = new VaultPickerModal(createFakeApp(new FakeVault()) as unknown as App, host);
+  picker.open();
   return picker;
 }
 
@@ -5722,7 +5749,16 @@ describe("plugin e2e — the real plugin against a real server", () => {
       const row = vaultRowIn(picker, remote.name);
       expect(row.buttons.map((button) => button.text)).toEqual(["连接"]);
       expect(row.extraButtons.map((button) => button.tooltip)).toEqual(["删除远程库"]);
+      expect(row.extraButtons[0]!.icon).toBe("trash-2");
       expect(row.desc).toMatch(/^创建于 /);
+      // The picker is a card list, not a settings page: the modal carries its own class,
+      // each vault has a cloud tile, and the create entry is the dashed row under the list.
+      expect(picker.modalEl.classes).toContain("courier-vault-picker-modal");
+      expect(allText(picker.contentEl).join(" ")).toContain(t("dialog.vaultPicker.subtitle"));
+      expect(row.settingEl.classes).toContain("courier-vault-row");
+      expect(row.settingEl.children[0]?.classes).toContain("courier-vault-icon");
+      expect(row.settingEl.querySelector(".courier-vault-icon")?.icon).toBe("cloud");
+      expect(row.buttons[0]!.buttonEl.classes).toContain("courier-vault-connect");
       // Both of the dialog's buttons keep their content width: Obsidian's phone layout
       // otherwise stretches every control in a settings row across the whole row.
       expect(row.buttons[0]!.buttonEl.style.flex).toBe("0 0 auto");
@@ -5731,6 +5767,45 @@ describe("plugin e2e — the real plugin against a real server", () => {
       )!;
       expect(createButton, "no 创建 Vault button").toBeDefined();
       expect(createButton.buttonEl.style.flex).toBe("0 0 auto");
+      expect(createButton.buttonEl.classes).toContain("courier-vault-create-button");
+      expect(createButton.buttonEl.querySelector(".courier-vault-create-icon")?.icon).toBe("plus");
+    });
+
+    describe("vault picker states", () => {
+      it("shows the empty state when the account has no vaults", async () => {
+        const picker = openPickerWithHost(pickerHostWith(async () => ({ vaults: [] })));
+        const content = picker.contentEl as unknown as FakeEl;
+        await waitFor(
+          () => allText(content).join(" ").includes(t("dialog.vaultPicker.emptyTitle")),
+          "the picker never rendered its empty state",
+        );
+        expect(elementsWithClass(content, "courier-vault-empty")).toHaveLength(1);
+        expect(allText(content).join(" ")).toContain(t("dialog.vaultPicker.emptyHint"));
+      });
+
+      it("shows a failed list and retries it", async () => {
+        let calls = 0;
+        const picker = openPickerWithHost(
+          pickerHostWith(async () => {
+            calls += 1;
+            if (calls === 1) throw new Error("listing failed");
+            return { vaults: [] };
+          }),
+        );
+        const content = picker.contentEl as unknown as FakeEl;
+        await waitFor(
+          () => elementsWithClass(content, "courier-vault-error").length === 1,
+          "the picker never rendered the list error",
+        );
+        const retry = buttonsIn(content).find((button) => button.text === t("common.retry"));
+        expect(retry, "no retry button").toBeDefined();
+        retry!.click();
+        await waitFor(
+          () => allText(content).join(" ").includes(t("dialog.vaultPicker.emptyTitle")),
+          "the retry never re-read the list",
+        );
+        expect(calls).toBe(2);
+      });
     });
 
     it("names the account from the server when nothing was stored on this device", async () => {

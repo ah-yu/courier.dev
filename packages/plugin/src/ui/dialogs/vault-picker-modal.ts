@@ -1,4 +1,4 @@
-import { App, Setting } from "obsidian";
+import { App, Setting, setIcon } from "obsidian";
 import type { ListVaultsResponse } from "@courier/shared";
 import { t } from "../../i18n";
 import { PromiseModal } from "./promise-modal";
@@ -81,51 +81,116 @@ export class VaultPickerModal extends PromiseModal<boolean> {
 
   override onOpen(): void {
     this.setTitle(t("dialog.vaultPicker.title"));
+    this.modalEl.addClass("courier-vault-picker-modal");
+    this.contentEl.addClass("courier-vault-picker");
+    this.contentEl.createDiv({
+      cls: "courier-vault-subtitle",
+      text: t("dialog.vaultPicker.subtitle"),
+    });
+
     this.listEl = this.contentEl.createDiv({ cls: "courier-vault-list" });
 
-    // One centred action under the list, like Obsidian's own vault picker: the dialog
-    // is closed with its ✕, so there is no second button to explain. A settings row
-    // lays its (empty) info area and its control out side by side and lets the info
-    // grow, which pins the button to the right; stacking them centres it instead.
-    const footer = new Setting(this.contentEl);
-    this.addAction(footer, t("dialog.vaultPicker.create"), () => void this.create(), {
-      cta: true,
-    });
-    footer.settingEl.setCssStyles({
-      display: "flex",
-      flexDirection: "column",
-      alignItems: "center",
+    // The create entry is the list's "add" row, not a second primary button: the row
+    // action is connecting, and two purple buttons on one dialog made neither read as
+    // the main one. A dashed row keeps it discoverable without competing for attention.
+    const create = new Setting(this.contentEl);
+    create.settingEl.addClass("courier-vault-create");
+    create.settingEl.setCssStyles({
+      display: "block",
       border: "none",
-      padding: "6px 0 0",
-      margin: "0",
+      padding: "0",
+      // The list is one block; the create row is its footer and gets a wider gap than
+      // the cards have between themselves.
+      margin: "18px 0 0",
     });
-    // The phone layout gives the control the row's full width and pushes its content to
-    // the right; the dialog's one entry point sits in the middle on every platform.
-    const control = footer.settingEl.querySelector<HTMLElement>(".setting-item-control");
-    if (control) control.setCssStyles({ justifyContent: "center" });
+    create.addButton((button) => {
+      button.setButtonText(t("dialog.vaultPicker.create")).onClick(() => void this.create());
+      button.buttonEl.addClass("courier-vault-create-button");
+      button.buttonEl.setCssStyles({ flex: "0 0 auto" });
+      const icon = button.buttonEl.createSpan({ cls: "courier-vault-create-icon" });
+      setIcon(icon, "plus");
+      // `setButtonText` writes the label as a text node; put the glyph before it. The
+      // guard keeps the stub (whose label is a property, not a node) from appending twice.
+      if (button.buttonEl.firstChild) {
+        button.buttonEl.insertBefore(icon, button.buttonEl.firstChild);
+      }
+    });
+    const createControl = create.settingEl.querySelector<HTMLElement>(".setting-item-control");
+    if (createControl) {
+      createControl.setCssStyles({ width: "100%", justifyContent: "stretch" });
+    }
 
     void this.load();
   }
 
   /**
-   * Add one of the dialog's buttons.
+   * One vault card: the cloud tile, its name and age, delete as a quiet icon and
+   * connect as the row's action.
    *
-   * Obsidian's phone layout stretches a settings row's control to the row's full width,
-   * which turns a list of vaults into a stack of full-width buttons (and its modal
-   * buttons are full width anyway). These are actions on a line, not the row's own
-   * control, so they keep their content width on every platform.
+   * The row is a `Setting` so its name/description stay the same semantic text the
+   * settings page and the e2e harness read; everything visual lives in `styles.css`.
+   * The inline layout is the one platform fact: Obsidian's phone layout stacks a
+   * settings row and stretches its control, while a picker row has to stay one line.
    */
-  private addAction(
-    setting: Setting,
-    label: string,
-    onClick: () => void,
-    options: { cta?: boolean } = {},
-  ): void {
-    setting.addButton((button) => {
-      button.setButtonText(label).onClick(onClick);
-      if (options.cta) button.setCta();
+  private renderVaultRow(vault: VaultSummary): void {
+    const row = new Setting(this.listEl)
+      .setName(vault.name)
+      .setDesc(createdAgoLabel(vault.createdAt));
+    row.settingEl.addClass("courier-vault-row");
+
+    const icon = row.settingEl.createDiv({ cls: "courier-vault-icon" });
+    // The app's `.setting-item > *:first-child` rule gives the first child an inline-end
+    // margin that outranks a class; clear it inline so the row's own gap is the spacing.
+    icon.setCssStyles({ marginInlineEnd: "0" });
+    setIcon(icon, "cloud");
+    const infoEl = row.settingEl.querySelector<HTMLElement>(".setting-item-info");
+    if (infoEl) row.settingEl.insertBefore(icon, infoEl);
+
+    row.addExtraButton((button) =>
+      button
+        .setIcon("trash-2")
+        .setTooltip(t("dialog.vaultPicker.deleteTooltip"))
+        .onClick(async () => {
+          await this.remove(vault);
+        }),
+    );
+
+    row.addButton((button) => {
+      button.setButtonText(t("dialog.vaultPicker.connect")).onClick(() => this.connect(vault));
+      button.setCta();
+      button.buttonEl.addClass("courier-vault-connect");
+      // `width` as well as `flex`: the phone layout gives a row's control the whole row
+      // width, which wins over a flex shorthand alone.
       button.buttonEl.setCssStyles({ flex: "0 0 auto", width: "auto" });
     });
+
+    row.settingEl.setCssStyles({
+      display: "flex",
+      flexDirection: "row",
+      flexWrap: "nowrap",
+      alignItems: "center",
+      gap: "12px",
+      margin: "0",
+    });
+    const info = row.settingEl.querySelector<HTMLElement>(".setting-item-info");
+    if (info) {
+      info.setCssStyles({
+        display: "flex",
+        flexDirection: "column",
+        gap: "1px",
+        flex: "1 1 auto",
+        minWidth: "0",
+      });
+    }
+    const control = row.settingEl.querySelector<HTMLElement>(".setting-item-control");
+    if (control) {
+      control.setCssStyles({
+        flex: "0 0 auto",
+        width: "auto",
+        justifyContent: "flex-end",
+        gap: "6px",
+      });
+    }
   }
 
   /** Read the vault list and paint it. */
@@ -150,23 +215,21 @@ export class VaultPickerModal extends PromiseModal<boolean> {
   private paint(): void {
     this.listEl.empty();
 
-    if (this.actionError) {
-      const error = this.listEl.createDiv({ cls: "courier-settings-error" });
-      error.setCssStyles({ color: "var(--text-error)", marginBottom: "8px" });
-      error.setText(`⚠ ${this.actionError}`);
-    }
+    if (this.actionError) this.renderError(this.actionError);
 
     if (this.loading) {
-      this.listEl.createEl("p", { text: t("dialog.vaultPicker.loading") });
+      const state = this.listEl.createDiv({ cls: "courier-vault-state" });
+      const icon = state.createSpan({ cls: "courier-vault-state-icon" });
+      setIcon(icon, "loader");
+      state.createSpan({ text: t("dialog.vaultPicker.loading") });
       return;
     }
     if (this.listError) {
-      const error = this.listEl.createEl("p", {
-        text: `⚠ ${this.listError}`,
-        cls: "courier-settings-error",
-      });
-      error.setCssStyles({ color: "var(--text-error)" });
-      new Setting(this.listEl).addButton((button) =>
+      this.renderError(this.listError);
+      const retry = new Setting(this.listEl);
+      retry.settingEl.addClass("courier-vault-retry");
+      retry.settingEl.setCssStyles({ padding: "0", border: "none", margin: "0" });
+      retry.addButton((button) =>
         button.setButtonText(t("common.retry")).onClick(() => void this.load()),
       );
       return;
@@ -174,69 +237,29 @@ export class VaultPickerModal extends PromiseModal<boolean> {
 
     const vaults = this.vaults ?? [];
     if (vaults.length === 0) {
-      this.listEl.createEl("p", { text: t("dialog.vaultPicker.empty") });
+      const empty = this.listEl.createDiv({ cls: "courier-vault-empty" });
+      const icon = empty.createDiv({ cls: "courier-vault-empty-icon" });
+      setIcon(icon, "cloud");
+      empty.createDiv({
+        cls: "courier-vault-empty-title",
+        text: t("dialog.vaultPicker.emptyTitle"),
+      });
+      empty.createDiv({
+        cls: "courier-vault-empty-hint",
+        text: t("dialog.vaultPicker.emptyHint"),
+      });
       return;
     }
 
-    for (const vault of vaults) {
-      // One row per vault: its name and how old it is on one line (the age is the only
-      // thing that tells two same-named vaults apart), deleting as an icon button, and
-      // connecting as the row's action.
-      const row = new Setting(this.listEl)
-        .setName(vault.name)
-        .setDesc(createdAgoLabel(vault.createdAt))
-        .addExtraButton((button) =>
-          button
-            .setIcon("x")
-            .setTooltip(t("dialog.vaultPicker.deleteTooltip"))
-            .onClick(async () => {
-              await this.remove(vault);
-            }),
-        );
-      this.addAction(row, t("dialog.vaultPicker.connect"), () => this.connect(vault), {
-        cta: true,
-      });
+    for (const vault of vaults) this.renderVaultRow(vault);
+  }
 
-      // A settings row stacks its name over its description, draws a rule above itself
-      // and pads like a settings page; a picker is a list, so its rows are one tight line
-      // each with no rules at all — on the phone layout too, which would otherwise stack
-      // the row and stretch its control across the whole width. The row itself never
-      // wraps (the buttons stay beside the name); when the line is too narrow for the
-      // name and its age, the *age* drops to a second line inside the row's own text.
-      row.settingEl.setCssStyles({
-        display: "flex",
-        flexDirection: "row",
-        flexWrap: "nowrap",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: "8px",
-        border: "none",
-        padding: "3px 0",
-        margin: "0",
-      });
-      const info = row.settingEl.querySelector<HTMLElement>(".setting-item-info");
-      if (info) {
-        info.setCssStyles({
-          display: "flex",
-          flexWrap: "wrap",
-          alignItems: "baseline",
-          gap: "4px 8px",
-          flex: "1 1 auto",
-          minWidth: "0",
-        });
-      }
-      const control = row.settingEl.querySelector<HTMLElement>(".setting-item-control");
-      if (control) {
-        // `width` as well as `flex`: the phone layout gives a row's control the whole row
-        // width, which wins over a flex shorthand alone.
-        control.setCssStyles({
-          flex: "0 0 auto",
-          width: "auto",
-          justifyContent: "flex-end",
-          gap: "8px",
-        });
-      }
-    }
+  /** One inline banner for a failed read or a failed action. */
+  private renderError(message: string): void {
+    const error = this.listEl.createDiv({ cls: "courier-vault-error" });
+    const icon = error.createSpan({ cls: "courier-vault-error-icon" });
+    setIcon(icon, "alert-triangle");
+    error.createSpan({ cls: "courier-vault-error-text", text: message });
   }
 
   /**
