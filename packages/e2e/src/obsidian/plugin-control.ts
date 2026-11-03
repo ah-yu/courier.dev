@@ -1278,6 +1278,99 @@ export async function readRecycleBinDialog(
 }
 
 /**
+ * Press the recycle-bin dialog's header control — the only way to re-read the bin — and
+ * answer the dialog's DOM **at the instant the click returns**.
+ *
+ * The read that click starts is still in flight then, which is what makes this readable as
+ * a flash assertion: `kept` is true only when the rows on screen are the very nodes that
+ * were there before the click, and `skeleton` is the loading state a re-read must not
+ * enter (the skeleton belongs to the first read, when there is nothing to keep).
+ */
+export async function clickRecycleBinRefresh(vault: string): Promise<{
+  open: boolean;
+  clicked: boolean;
+  kept: boolean;
+  skeleton: number;
+  countBefore: string;
+  count: string;
+  footer: string;
+  busy: boolean;
+}> {
+  return await evalInVault(
+    vault,
+    `
+    const container = ${DIALOG_EXPR};
+    if (!container) return { open: false, clicked: false, kept: false, skeleton: 0, countBefore: '', count: '', footer: '', busy: false };
+    const bin = container.querySelector('.courier-recycle-bin');
+    if (!bin) return { open: false, clicked: false, kept: false, skeleton: 0, countBefore: '', count: '', footer: '', busy: false };
+    const button = bin.querySelector('.courier-recycle-bin-header .extra-setting-button');
+    if (!button) return { open: true, clicked: false, kept: false, skeleton: 0, countBefore: '', count: '', footer: '', busy: false };
+    const rows = () => Array.from(bin.querySelectorAll('.courier-deleted-file-item'));
+    const text = (selector) => {
+      const el = bin.querySelector(selector);
+      return el ? (el.textContent || '').trim() : '';
+    };
+    const footer = bin.querySelector('.courier-recycle-bin-footer');
+    const before = rows();
+    const countBefore = text('.courier-recycle-bin-count');
+    button.click();
+    const after = rows();
+    return {
+      open: true,
+      clicked: true,
+      kept: before.length === after.length && before.every((el, index) => el === after[index]),
+      skeleton: bin.querySelectorAll('.courier-recycle-bin-skeleton').length,
+      countBefore: countBefore,
+      count: text('.courier-recycle-bin-count'),
+      footer: footer ? footer.style.display : '',
+      busy: bin.classList.contains('is-refreshing'),
+    };
+    `,
+    60_000,
+  );
+}
+
+/**
+ * What the recycle-bin dialog shows now: its rows, its header count and whether the header
+ * still says a read is running (the marker {@link clickRecycleBinRefresh} starts).
+ */
+export async function readRecycleBinRefresh(vault: string): Promise<{
+  open: boolean;
+  busy: boolean;
+  skeleton: number;
+  paths: string[];
+  count: string;
+  footer: string;
+}> {
+  return await evalInVault(
+    vault,
+    `
+    const container = ${DIALOG_EXPR};
+    const empty = { open: false, busy: false, skeleton: 0, paths: [], count: '', footer: '' };
+    if (!container) return empty;
+    const bin = container.querySelector('.courier-recycle-bin');
+    if (!bin) return empty;
+    const footer = bin.querySelector('.courier-recycle-bin-footer');
+    const count = bin.querySelector('.courier-recycle-bin-count');
+    const paths = [];
+    for (const item of bin.querySelectorAll('.courier-deleted-file-item')) {
+      const pathEl = item.querySelector('.courier-deleted-path');
+      if (pathEl && pathEl.textContent) paths.push(pathEl.textContent.trim());
+    }
+    return {
+      open: true,
+      busy: bin.classList.contains('is-refreshing'),
+      skeleton: bin.querySelectorAll('.courier-recycle-bin-skeleton').length,
+      paths: paths,
+      count: count ? (count.textContent || '').trim() : '',
+      footer: footer ? footer.style.display : '',
+    };
+    `,
+    60_000,
+  );
+}
+
+/**
  * Press the dialog's 恢复 button for one listed file, the way a user does. Returns false
  * when the row or the button is missing, so the caller can say which.
  */

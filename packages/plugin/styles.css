@@ -3927,3 +3927,27 @@ body.is-phone .modal.courier-vault-picker-modal .courier-vault-create-button {
   min-height: 46px;
   padding: 0 16px;
 }
+
+/*
+ * A re-read repaints the recycle bin in place, so nothing on screen disappears while it
+ * runs — the control that started it is the only thing that can say so. The icon turns
+ * until the answer arrives; `prefers-reduced-motion` gets a static dim instead of a
+ * rotation. Last in the file because it is the most specific `svg` rule here.
+ */
+.courier-recycle-bin.is-refreshing .courier-recycle-bin-header .extra-setting-button svg {
+  animation: courier-recycle-spin 0.9s linear infinite;
+  transform-origin: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .courier-recycle-bin.is-refreshing .courier-recycle-bin-header .extra-setting-button svg {
+    opacity: 0.6;
+    animation: none;
+  }
+}
+
+@keyframes courier-recycle-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

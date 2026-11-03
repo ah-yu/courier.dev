@@ -49,6 +49,7 @@ import {
   closeConflictDiffs,
   clickOpenModalButton,
   clickPauseRow,
+  clickRecycleBinRefresh,
   clickRecycleBinRestore,
   clickStatusBarItem,
   clickStatusMenuRow,
@@ -80,6 +81,7 @@ import {
   readPauseRow,
   readPluginStatus,
   readRecycleBinDialog,
+  readRecycleBinRefresh,
   readSettingsAccountUsage,
   readRestoreNameField,
   readStatusBar,
@@ -639,6 +641,60 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
     expect(await filesAtPath(server, remote.id, material.key, path)).toEqual([fileId!]);
     expect(await listVaultFiles(names.b)).toContain(path);
     await closeOpenModals(names.b);
+  });
+
+  it("re-reads the real recycle bin in place, without tearing its list down", async () => {
+    // The refresh control used to put the dialog back through its loading state: the rows
+    // and the footer went away, a skeleton took their place, and the list then refilled row
+    // by row. That is the flash a user saw on the desktop and on a phone, so what this case
+    // pins is the DOM at the moment of the click: the same row nodes are still on screen.
+    const path = `${PROBE_PREFIX}refresh-in-place.md`;
+    await vaultA.write(path, "refreshed in place");
+    await reconcile(names.b);
+    await waitForVaultState(
+      async () => (await vaultB.read(path)) === "refreshed in place",
+      "vault B never pulled the note",
+    );
+    const fileId = await fileIdForPath(names.a, path);
+    expect(fileId).toBeTruthy();
+
+    await vaultA.remove(path);
+    await waitForAsync(
+      async () => (await deletedFiles(server, remote.id)).some((file) => file.fileId === fileId),
+      "the delete never reached the server's recycle bin",
+      60_000,
+    );
+
+    await waitForVaultState(
+      () => openRecycleBinDialog(names.a),
+      "the plugin settings page never offered the recycle bin dialog",
+    );
+    await waitForVaultState(
+      async () => (await readRecycleBinDialog(names.a)).paths.includes(path),
+      "the recycle bin dialog never listed the deleted note",
+    );
+
+    // One evaluation: the read is still in flight when the click returns, so what it reports
+    // is the frame the user would be looking at — nothing blanked, no skeleton, same count.
+    const clicked = await clickRecycleBinRefresh(names.a);
+    expect(clicked.open, "the recycle bin dialog was gone").toBe(true);
+    expect(clicked.clicked, "the header offered no refresh control").toBe(true);
+    expect(clicked.kept, "the refresh rebuilt the rows instead of keeping them").toBe(true);
+    expect(clicked.skeleton, "the refresh put the dialog back through its skeleton").toBe(0);
+    expect(clicked.count).toBe(clicked.countBefore);
+    expect(clicked.footer, "the footer disappeared while the read ran").toBe("flex");
+    expect(clicked.busy, "the header never said the read was running").toBe(true);
+
+    // …and it settles into the same list, still drawn in place rather than reloaded.
+    await waitForVaultState(
+      async () => !(await readRecycleBinRefresh(names.a)).busy,
+      "the refresh never settled",
+    );
+    const settled = await readRecycleBinRefresh(names.a);
+    expect(settled.paths).toContain(path);
+    expect(settled.skeleton).toBe(0);
+    expect(settled.count).toBe(clicked.countBefore);
+    await closeOpenModals(names.a);
   });
 
   it("shows this run's sync events with a count, day groups and both arrow directions", async () => {

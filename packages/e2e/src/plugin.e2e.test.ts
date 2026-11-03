@@ -3082,11 +3082,35 @@ describe("plugin e2e — the real plugin against a real server", () => {
         (button) => button.tooltip === "刷新回收站",
       );
       expect(refresh, "the header offered no refresh control").toBeDefined();
+
+      // A re-read repaints in place: the rows on screen stay there until the new list is in
+      // hand. Emptying the list for the skeleton (or for an empty frame that fills in row by
+      // row) is the flash this pins — the desktop and the phone share this dialog.
+      const list = elementsWithClass(dialog.contentEl, "courier-recycle-bin-list")[0]!;
+      const footer = elementsWithClass(dialog.contentEl, "courier-recycle-bin-footer")[0]!;
+      list.scrollTop = 90;
       refresh!.click();
+
+      // Nothing was torn down, from the count over the list to the footer that owns 清空回收站.
+      expect(listedDeletedPaths(dialog)).toEqual(["second.md", "first.md"]);
+      expect(elementsWithClass(dialog.contentEl, "courier-recycle-bin-skeleton")).toEqual([]);
+      expect(elementsWithClass(dialog.contentEl, "courier-recycle-bin-status")).toEqual([]);
+      expect(elementsWithClass(dialog.contentEl, "courier-recycle-bin-count")[0]?.text).toBe("2");
+      expect(footer.style.display).toBe("flex");
+      // …and the header's control is what says the read is running.
+      expect(dialog.contentEl.classes).toContain("is-refreshing");
+
       await waitForAsync(
         async () => requestsMatching(/\/sync\/deleted$/).length > before,
         "the refresh control never re-read the recycle bin",
       );
+      await waitFor(
+        () => !dialog.contentEl.classes.includes("is-refreshing"),
+        "the refresh never settled",
+      );
+      expect(listedDeletedPaths(dialog)).toEqual(["second.md", "first.md"]);
+      // The list was replaced under the reader, not scrolled back to the top.
+      expect(list.scrollTop).toBe(90);
     });
 
     it("shows the empty state, with the footer gone, when nothing was deleted", async () => {
@@ -3100,6 +3124,30 @@ describe("plugin e2e — the real plugin against a real server", () => {
       const footer = elementsWithClass(dialog.contentEl, "courier-recycle-bin-footer")[0];
       expect(footer, "the dialog rendered no footer element").toBeDefined();
       expect(footer.style.display).toBe("none");
+
+      // Refreshing an empty bin goes through the placeholder, not back through the skeleton.
+      const refresh = extraButtonsIn(dialog.contentEl).find(
+        (button) => button.tooltip === "刷新回收站",
+      );
+      expect(refresh, "the header offered no refresh control").toBeDefined();
+      const before = requestsMatching(/\/sync\/deleted$/).length;
+      refresh!.click();
+      expect(elementsWithClass(dialog.contentEl, "courier-recycle-bin-skeleton")).toEqual([]);
+      expect(elementsWithClass(dialog.contentEl, "courier-recycle-bin-placeholder")).toHaveLength(
+        1,
+      );
+
+      await waitForAsync(
+        async () => requestsMatching(/\/sync\/deleted$/).length > before,
+        "the refresh control never re-read an empty recycle bin",
+      );
+      await waitFor(
+        () => !dialog.contentEl.classes.includes("is-refreshing"),
+        "the refresh never settled",
+      );
+      expect(elementsWithClass(dialog.contentEl, "courier-recycle-bin-placeholder")).toHaveLength(
+        1,
+      );
     });
   });
 
