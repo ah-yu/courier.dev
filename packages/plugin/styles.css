@@ -2848,6 +2848,32 @@ body.is-phone .courier-login-control.has-action .courier-login-input {
   background: var(--background-secondary);
 }
 
+/* ── The settings page's version-history rows ── */
+
+/*
+ * A row is a two-line explanation beside a one-line reading, so the two halves share one
+ * horizontal centre: the app aligns a row's **top** edges, which leaves the number and its
+ * pencil up beside the title while the explanation runs on below them, off the block it
+ * belongs to. The column layouts (a phone, or a pane under 400 px) stack the halves instead
+ * and keep the app's own leading-edge alignment for the label.
+ */
+.setting-item.courier-history-limit-row {
+  align-items: center;
+}
+
+/*
+ * The number and its pencil are one reading with one action, so they stay on the row's
+ * trailing edge — where the app puts a control in a row wide enough to hold one. Below a
+ * 400 px pane (a phone, or a narrow settings window) the app turns every other row into a
+ * column and aligns its control to the leading edge, because a text field wants the full
+ * width; this row is not a field until it is edited. The number takes the free space in
+ * front of it, so it and the icon after it keep the trailing edge the switches above and
+ * below sit on.
+ */
+.courier-history-limit-row .courier-history-limit-value {
+  margin-inline-start: auto;
+}
+
 /* ── The settings page's bound-but-stopped steps ── */
 
 /*
