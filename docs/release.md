@@ -194,6 +194,12 @@ developed in: `scripts/mirror-plugin.ts` writes it from `packages/plugin`, `pack
   directory reads `manifest.json` from the default branch, so the released version must be the one on
   `main`; a generated commit carries it, and the tag points at that commit so build verification
   rebuilds the bytes that were released.
+- **The copy is unconditional, and the version is asserted.** The push replaces the mirror's working
+  tree with `rsync --ignore-times`, because rsync's default quick check is size plus mtime and a file
+  whose only change is a version line keeps its size (`0.1.3` → `0.1.4`, `77adf9e` → `f1b335a`) — a
+  shared timestamp second then skips it. Before pushing, the job reads the copied `manifest.json` and
+  fails when it does not name the release version, so a stale manifest blocks the release instead of
+  leaving a mirror that builds the previous plugin.
 - **How the release triggers it**: the `mirror` job pushes `main` and then the tag to `ah-yu/courier`
   with a personal access token. The tag push is what starts the mirror's `release.yml` — `GITHUB_TOKEN`
   can neither write to another repository nor trigger a workflow with a push, so the token needs
@@ -328,6 +334,7 @@ manifest does the same per platform.
 | a binary, manifest, bundle or zip is missing  | the artifact upload or the release job fails; no publication                                 |
 | an upload fails midway                        | the release stays a draft; re-run the workflow to finish it                                  |
 | the repository token cannot write releases    | the `release` job fails; allow `contents: write` for Actions or use a PAT                    |
+| the generated mirror keeps a stale manifest   | the `mirror` job's version assertion fails; nothing is published until it is re-run          |
 | the CNB mirror fails (outage, token, quota)   | the `cnb` job is marked failed but allowed; the GitHub release is unaffected; re-run the job |
 | an older release's CNB job is re-run          | only that version's release is updated; `latest` and CNB's latest flag stay with the newest  |
 
