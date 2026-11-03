@@ -1335,22 +1335,19 @@ export async function clickRecycleBinRefresh(vault: string): Promise<{
  * still says a read is running (the marker {@link clickRecycleBinRefresh} starts).
  */
 export async function readRecycleBinRefresh(vault: string): Promise<{
-  open: boolean;
   busy: boolean;
   skeleton: number;
   paths: string[];
   count: string;
-  footer: string;
 }> {
   return await evalInVault(
     vault,
     `
     const container = ${DIALOG_EXPR};
-    const empty = { open: false, busy: false, skeleton: 0, paths: [], count: '', footer: '' };
+    const empty = { busy: false, skeleton: 0, paths: [], count: '' };
     if (!container) return empty;
     const bin = container.querySelector('.courier-recycle-bin');
     if (!bin) return empty;
-    const footer = bin.querySelector('.courier-recycle-bin-footer');
     const count = bin.querySelector('.courier-recycle-bin-count');
     const paths = [];
     for (const item of bin.querySelectorAll('.courier-deleted-file-item')) {
@@ -1358,12 +1355,10 @@ export async function readRecycleBinRefresh(vault: string): Promise<{
       if (pathEl && pathEl.textContent) paths.push(pathEl.textContent.trim());
     }
     return {
-      open: true,
       busy: bin.classList.contains('is-refreshing'),
       skeleton: bin.querySelectorAll('.courier-recycle-bin-skeleton').length,
       paths: paths,
       count: count ? (count.textContent || '').trim() : '',
-      footer: footer ? footer.style.display : '',
     };
     `,
     60_000,

@@ -50,8 +50,10 @@ interface RecycleBinRow {
  * the spinner on the header's control is what says a silent read is running.
  */
 export class RecycleBinModal extends Modal {
-  private files: DeletedFileInfo[] = [];
-  /** A deleted chain with its decrypted path, worked out before anything is painted. */
+  /**
+   * The deleted chains on screen, each with the plaintext path its row shows (`null` when
+   * it will not decrypt). Decrypted before a paint, so painting cannot yield halfway.
+   */
   private rows: RecycleBinRow[] = [];
   /** A read is in flight; only the first one is painted as a skeleton (see {@link paint}). */
   private loading = false;
@@ -86,7 +88,6 @@ export class RecycleBinModal extends Modal {
     this.contentEl.addClass("courier-recycle-bin");
     // A modal instance can be reopened: the read of the previous open is discarded and the
     // dialog starts from the skeleton again.
-    this.files = [];
     this.rows = [];
     this.loading = false;
     this.painted = false;
@@ -131,7 +132,7 @@ export class RecycleBinModal extends Modal {
   override onClose(): void {
     // Whatever read is still in flight belongs to a dialog nobody is looking at any more.
     this.loadGeneration += 1;
-    this.contentEl.removeClass("is-refreshing");
+    this.setRefreshing(false);
     this.contentEl.empty();
   }
 
@@ -185,9 +186,10 @@ export class RecycleBinModal extends Modal {
           : null,
       });
     }
+    // A newer read owns the dialog now: this answer is about a list nobody is waiting for,
+    // and painting it would put the rows back to what they were before that read.
     if (generation !== this.loadGeneration) return;
 
-    this.files = files;
     this.rows = rows;
     this.error = error;
     this.loading = false;
@@ -197,12 +199,18 @@ export class RecycleBinModal extends Modal {
   }
 
   /**
-   * Mark the header while a read is in flight. A silent re-read keeps the rows on screen,
-   * so the control that started it is the only thing that can say the read is running.
+   * Mark the dialog while a read is in flight. A silent re-read keeps the rows on screen,
+   * so the header's control is the only thing on screen that can say the read is running —
+   * and `aria-busy` is the same fact for a screen reader, which cannot see the icon turn.
    */
   private setRefreshing(refreshing: boolean): void {
-    if (refreshing) this.contentEl.addClass("is-refreshing");
-    else this.contentEl.removeClass("is-refreshing");
+    if (refreshing) {
+      this.contentEl.addClass("is-refreshing");
+      this.listEl.setAttribute("aria-busy", "true");
+    } else {
+      this.contentEl.removeClass("is-refreshing");
+      this.listEl.setAttribute("aria-busy", "false");
+    }
   }
 
   /** The count (or the state, when there is no count yet) over the list. */
@@ -234,14 +242,14 @@ export class RecycleBinModal extends Modal {
 
     this.headingEl.createSpan({
       cls: "courier-recycle-bin-count",
-      text: String(this.files.length),
+      text: String(this.rows.length),
     });
     this.headingEl.createSpan({
       cls: "courier-recycle-bin-count-label",
       text: plural(
         "dialog.recycleBin.countLabel.one",
         "dialog.recycleBin.countLabel.other",
-        this.files.length,
+        this.rows.length,
       ),
     });
   }
@@ -260,7 +268,7 @@ export class RecycleBinModal extends Modal {
     this.listEl.empty();
 
     const hasRows =
-      this.painted && this.error === null && this.vaultId() !== null && this.files.length > 0;
+      this.painted && this.error === null && this.vaultId() !== null && this.rows.length > 0;
     this.footerEl.setCssStyles({ display: hasRows ? "flex" : "none" });
 
     if (this.loading) {
@@ -477,7 +485,7 @@ export class RecycleBinModal extends Modal {
       return;
     }
 
-    const confirm = new ClearRecycleBinConfirmModal(this.app, this.files.length);
+    const confirm = new ClearRecycleBinConfirmModal(this.app, this.rows.length);
     confirm.open();
     if ((await confirm.getResult()) !== true) return;
 
