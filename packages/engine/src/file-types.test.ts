@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sortedCopy } from "@courier/shared";
+import { DEFAULT_HISTORY_LIMITS, sortedCopy } from "@courier/shared";
 import {
   ALWAYS_SYNCED_EXTENSIONS,
   DEFAULT_FILE_TYPES,
@@ -7,6 +7,7 @@ import {
   NO_FILE_TYPES,
   extensionOf,
   fileTypeOf,
+  historyKindFor,
   isTextPreviewPath,
 } from "./file-types";
 
@@ -121,6 +122,39 @@ describe("the default record", () => {
   it("lists every group, in the order the UI shows them", () => {
     expect(FILE_TYPE_GROUPS).toEqual(["images", "video", "audio", "pdf", "otherTypes"]);
     expect(sortedCopy(Object.keys(DEFAULT_FILE_TYPES))).toEqual(sortedCopy(FILE_TYPE_GROUPS));
+  });
+});
+
+describe("historyKindFor", () => {
+  it("classifies markdown and canvas as documents", () => {
+    for (const path of ["note.md", "notes/deep/plan.md", "board.canvas", "Board.CANVAS"]) {
+      expect(historyKindFor(path), path).toBe("documents");
+    }
+  });
+
+  it("classifies every other synced path as an attachment", () => {
+    for (const path of [
+      "photo.png",
+      "paper.pdf",
+      "clip.mp4",
+      "archive.zip",
+      ".obsidian/app.json",
+      "LICENSE",
+    ]) {
+      expect(historyKindFor(path), path).toBe("attachments");
+    }
+  });
+
+  it("is total: every path is one of the two kinds", () => {
+    // The push frame requires a kind, so a path the table has never seen still gets one
+    // instead of an empty field the server would refuse.
+    for (const path of ["a.md", "a.png", "a.zip", "a", "a/b/c.mp3"]) {
+      expect(["documents", "attachments"]).toContain(historyKindFor(path));
+    }
+  });
+
+  it("matches the two defaults the vault starts with", () => {
+    expect(DEFAULT_HISTORY_LIMITS).toEqual({ documents: 200, attachments: 10 });
   });
 });
 

@@ -48,6 +48,7 @@ import { RELOAD_POPUP_CLASS } from "../../plugin/src/shared/settings-reload-popu
 import { keyExpiryText } from "../../plugin/src/shared/account-status";
 import { getSyncLog } from "../../plugin/src/shared/sync-log";
 import { t } from "../../plugin/src/i18n";
+import { MAX_HISTORY_LIMIT } from "../../shared/src/index";
 import { PasswordPromptModal } from "../../plugin/src/ui/dialogs/password-prompt-modal";
 import {
   VaultPickerModal,
@@ -83,7 +84,15 @@ import {
   VERSION_HISTORY_VIEW_TYPE,
   type VersionHistoryView,
 } from "../../plugin/src/ui/version-history-view";
-import { deletedFiles, fileVersions, filesAtPath, pushVersion, vaultHistory } from "./harness/api";
+import {
+  deletedFiles,
+  fileVersions,
+  filesAtPath,
+  pushVersion,
+  updateVaultSettings,
+  vaultHistory,
+  vaultSettings,
+} from "./harness/api";
 import { waitFor, waitForAsync } from "./harness/wait";
 import {
   CONFLICT_ACTION_CLASS,
@@ -976,6 +985,7 @@ describe("plugin e2e — the real plugin against a real server", () => {
         mtimeMs: 0,
         // A brand-new fileId: the push is decided from "no chain yet".
         baseVersionId: null,
+        historyKind: "documents",
       },
     ]);
     expect(pushResult.results[0].status).toBe("ok");
@@ -6085,6 +6095,7 @@ describe("plugin e2e — the real plugin against a real server", () => {
         "这台设备",
         "远程库",
         "同步的文件类型",
+        "历史版本数量",
         "排除的文件夹",
         "Obsidian 设置同步",
         "账号",
@@ -6135,6 +6146,9 @@ describe("plugin e2e — the real plugin against a real server", () => {
       expect(tooltips).toContain("配置文件夹");
       expect(tooltips).toContain("Markdown");
       expect(tooltips).toContain("本机与远程库的连接");
+      // The history limits are explained where they are changed: the two fields show
+      // what the server keeps, and deleting the oldest versions is the user-facing cost.
+      expect(tooltips).toContain("历史版本数量");
 
       // The retired device section is gone, and nothing replaced it with a list.
       const texts = allText(tab.containerEl);
@@ -6319,6 +6333,143 @@ describe("plugin e2e — the real plugin against a real server", () => {
         deviceName: "书房笔记本",
         excludedFolders: [],
       });
+    });
+
+    it("edits a vault-level history limit with the pencil icon and Save, and refuses a nonsense value", async () => {
+      const { plugin, remote } = await startHostedPlugin("Settings History Limit");
+      const tab = settingsTabOf(plugin);
+      tab.display();
+
+      const row = settingsIn(tab.containerEl).find(
+        (candidate) => candidate.name === t("settings.historyLimit.documents.label"),
+      );
+      expect(row, "the notes/canvas history-limit row is missing").toBeDefined();
+      const button = row!.buttons[0]!;
+      const field = row!.texts[0]!;
+      const value = row!.controlEl.querySelector(".courier-history-limit-value");
+      expect(value, "the row has no value display").not.toBeNull();
+
+      // The row is a view of the **server's** vault value: the number is text, and the
+      // only control is the pencil icon that opens the field — no always-live input.
+      await waitFor(() => value!.text === "200", "the server's limit never reached the row");
+      expect(button.icon).toBe("pencil");
+      expect(button.text).toBe("");
+      expect(button.tooltip).toBe(t("settings.historyLimit.edit"));
+      // The borderless icon chrome, so the control reads as an icon rather than a button.
+      expect(button.buttonEl.classes).toContain("clickable-icon");
+
+      // The pencil turns the number into an input and itself into a check (the commit).
+      button.click();
+      expect(button.icon).toBe("check");
+      expect(button.text).toBe("");
+      expect(button.tooltip).toBe(t("settings.historyLimit.confirm"));
+      expect(field.getValue()).toBe("200");
+
+      // The check writes the vault; the row returns to text with the stored number and the
+      // pencil, and the description is the row's own explanation again — the press was the
+      // confirmation, so no extra "saved" line is added.
+      field.simulateChange("500");
+      button.click();
+      await waitForAsync(
+        async () => (await vaultSettings(server, remote.id)).historyLimitDocuments === 500,
+        "the history limit was never written to the vault",
+      );
+      await waitFor(() => value!.text === "500", "the row never showed the saved number");
+      expect(button.icon).toBe("pencil");
+      expect(button.text).toBe("");
+      expect(button.buttonEl.classes).toContain("clickable-icon");
+      expect(row!.desc).toBe(t("settings.historyLimit.documents.desc"));
+      // It is vault state, not device state: nothing lands in this device's data.json.
+      const persisted = (await plugin.loadData()) as { historyLimits?: unknown };
+      expect(persisted.historyLimits).toBeUndefined();
+
+      // `0` would read as "keep only the newest version": it is refused inline, no request
+      // is sent, and the row stays in the field so the user can correct it.
+      button.click();
+      field.simulateChange("0");
+      button.click();
+      expect(row!.desc).toBe(t("settings.historyLimit.invalid", { max: MAX_HISTORY_LIMIT }));
+      expect(button.icon).toBe("check");
+      expect((await vaultSettings(server, remote.id)).historyLimitDocuments).toBe(500);
+    });
+
+    it("follows a vault-settings change made on another device, without reopening the page", async () => {
+      const { plugin, remote } = await startHostedPlugin("Settings History Live");
+      const tab = settingsTabOf(plugin);
+      tab.display();
+
+      const row = settingsIn(tab.containerEl).find(
+        (candidate) => candidate.name === t("settings.historyLimit.documents.label"),
+      );
+      expect(row, "the notes/canvas history-limit row is missing").toBeDefined();
+      const value = row!.controlEl.querySelector(".courier-history-limit-value");
+      await waitFor(() => value!.text === "200", "the server's limit never reached the row");
+      // The update travels over the socket, so the subscription has to exist before the
+      // other device's change is made.
+      await waitFor(() => plugin.wsState === "connected", "the plugin's socket never connected");
+
+      // Another device changes the vault's limit — this client never reloads the page and
+      // never calls its own write path; the socket's `vault_settings` has to repaint it.
+      await updateVaultSettings(server, remote.id, { historyLimitDocuments: 40 });
+
+      await waitFor(
+        () => value!.text === "40",
+        "the open settings row never followed the change made elsewhere",
+      );
+      expect(plugin.vaultHistoryLimits?.documents).toBe(40);
+    });
+
+    it("re-reads an open version-history page when the vault's limit is lowered", async () => {
+      const { plugin, vault, remote } = await startHostedPlugin("Settings History Page");
+
+      // Three versions of one note, all on the server. Each wait names the version it adds,
+      // so two writes cannot coalesce into one push and leave the chain at two.
+      await vault.create("refresh.md", "v1");
+      await vault.settle();
+      const fileId = await trackedFileId(plugin, "refresh.md");
+      const chainLength = async (): Promise<number> =>
+        (await vaultHistory(server, remote.id)).find((chain) => chain.fileId === fileId)?.versions
+          .length ?? 0;
+      await waitForAsync(
+        async () => (await chainLength()) === 1,
+        "the first version never reached the server",
+      );
+      for (const [index, content] of ["v2", "v3"].entries()) {
+        await vault.modify("refresh.md", content);
+        await vault.settle();
+        await waitForAsync(
+          async () => (await chainLength()) === index + 2,
+          `version ${index + 2} never reached the server`,
+        );
+      }
+
+      // The page is open on the whole chain while the limit changes under it.
+      const view = await openVersionHistory(plugin, "refresh.md");
+      expect(versionRows(view)).toHaveLength(3);
+
+      const tab = settingsTabOf(plugin);
+      tab.display();
+      const row = settingsIn(tab.containerEl).find(
+        (candidate) => candidate.name === t("settings.historyLimit.documents.label"),
+      );
+      expect(row, "the notes/canvas history-limit row is missing").toBeDefined();
+      row!.buttons[0]!.click();
+      row!.texts[0]!.simulateChange("2");
+      row!.buttons[0]!.click();
+      await waitForAsync(
+        async () => (await vaultSettings(server, remote.id)).historyLimitDocuments === 2,
+        "the lowered limit never reached the vault",
+      );
+
+      // The open page follows on its own: the trimmed row is gone, the rest is the newest
+      // two, and the selection has moved to the head instead of naming a version the server
+      // has already reclaimed (which is what showed "cannot fetch or decrypt").
+      await waitFor(
+        () => versionRows(view).length === 2,
+        "the open history page never dropped the trimmed version",
+      );
+      expect(versionActions(view)).toEqual(["修改", "修改"]);
+      expect(selectedVersionRow(view)?.classes).toContain("is-selected");
     });
 
     it("opens this run's sync events in a scrollable, read-only dialog", async () => {

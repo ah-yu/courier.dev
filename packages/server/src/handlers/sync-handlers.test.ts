@@ -22,6 +22,7 @@ import type {
   SyncPushInput,
 } from "./sync-handlers";
 import type { SyncPushResponse } from "@courier/shared";
+import { DEFAULT_HISTORY_LIMITS, type HistoryLimits } from "@courier/shared";
 import { NotFoundError } from "../lib/errors";
 
 /**
@@ -66,6 +67,8 @@ function handleSyncPush(
       return heads;
     },
     broadcast: vi.fn(),
+    isContentHashReferenced: vi.fn(async () => false),
+    deleteBlob: vi.fn(async () => {}),
   });
 }
 
@@ -143,6 +146,7 @@ describe("handleSyncPush", () => {
     const result = await handleSyncPush(
       {
         vaultId: "v1",
+        historyLimits: DEFAULT_HISTORY_LIMITS,
         files: [
           {
             fileId: "f-001",
@@ -154,6 +158,7 @@ describe("handleSyncPush", () => {
             sizeBytes: bytes("enc_c1").length,
             mtimeMs: 0,
             baseVersionId: null,
+            historyKind: "documents",
           },
         ],
       },
@@ -179,6 +184,7 @@ describe("handleSyncPush", () => {
     const result = await handleSyncPush(
       {
         vaultId: "v1",
+        historyLimits: DEFAULT_HISTORY_LIMITS,
         files: [
           {
             fileId: "f-size",
@@ -191,6 +197,7 @@ describe("handleSyncPush", () => {
             sizeBytes: 99,
             mtimeMs: 0,
             baseVersionId: null,
+            historyKind: "documents",
           },
         ],
       },
@@ -212,6 +219,7 @@ describe("handleSyncPush", () => {
     const result = await handleSyncPush(
       {
         vaultId: "v1",
+        historyLimits: DEFAULT_HISTORY_LIMITS,
         files: [
           {
             fileId: "f-both",
@@ -224,6 +232,7 @@ describe("handleSyncPush", () => {
             sizeBytes: bytes("abc").length,
             mtimeMs: 0,
             baseVersionId: null,
+            historyKind: "documents",
           },
         ],
       },
@@ -244,6 +253,7 @@ describe("handleSyncPush", () => {
     await handleSyncPush(
       {
         vaultId: "v1",
+        historyLimits: DEFAULT_HISTORY_LIMITS,
         files: [
           {
             fileId: "f-001",
@@ -255,6 +265,7 @@ describe("handleSyncPush", () => {
             sizeBytes: bytes("enc_c1").length,
             mtimeMs: 1_760_000_123_456,
             baseVersionId: "v001",
+            historyKind: "documents",
           },
         ],
       },
@@ -275,6 +286,7 @@ describe("handleSyncPush", () => {
     const result = await handleSyncPush(
       {
         vaultId: "v1",
+        historyLimits: DEFAULT_HISTORY_LIMITS,
         files: [
           {
             fileId: "f-1",
@@ -286,6 +298,7 @@ describe("handleSyncPush", () => {
             sizeBytes: bytes("ca").length,
             mtimeMs: 0,
             baseVersionId: null,
+            historyKind: "documents",
           },
           {
             fileId: "f-2",
@@ -297,6 +310,7 @@ describe("handleSyncPush", () => {
             sizeBytes: bytes("cb").length,
             mtimeMs: 0,
             baseVersionId: null,
+            historyKind: "documents",
           },
         ],
       },
@@ -316,6 +330,7 @@ describe("handleSyncPush", () => {
     const result = await handleSyncPush(
       {
         vaultId: "v1",
+        historyLimits: DEFAULT_HISTORY_LIMITS,
         files: [
           {
             fileId: "f-1",
@@ -327,6 +342,7 @@ describe("handleSyncPush", () => {
             sizeBytes: bytes("c").length,
             mtimeMs: 0,
             baseVersionId: "v001",
+            historyKind: "documents",
           },
         ],
       },
@@ -349,6 +365,7 @@ describe("handleSyncPush", () => {
     const result = await handleSyncPush(
       {
         vaultId: "v1",
+        historyLimits: DEFAULT_HISTORY_LIMITS,
         files: [
           {
             fileId: "f-1",
@@ -360,6 +377,7 @@ describe("handleSyncPush", () => {
             sizeBytes: bytes("c").length,
             mtimeMs: 0,
             baseVersionId: "v001",
+            historyKind: "documents",
           },
         ],
       },
@@ -395,6 +413,7 @@ describe("handleSyncPush", () => {
     const result = await handleSyncPush(
       {
         vaultId: "v1",
+        historyLimits: DEFAULT_HISTORY_LIMITS,
         files: [
           {
             fileId: "f-1",
@@ -406,6 +425,7 @@ describe("handleSyncPush", () => {
             sizeBytes: bytes("c").length,
             mtimeMs: 0,
             baseVersionId: "v001",
+            historyKind: "documents",
           },
         ],
       },
@@ -429,6 +449,7 @@ describe("handleSyncPush", () => {
     const result = await handleSyncPush(
       {
         vaultId: "v1",
+        historyLimits: DEFAULT_HISTORY_LIMITS,
         files: [
           {
             fileId: "f-1",
@@ -440,6 +461,7 @@ describe("handleSyncPush", () => {
             sizeBytes: bytes("c").length,
             mtimeMs: 0,
             baseVersionId: null,
+            historyKind: "documents",
           },
         ],
       },
@@ -463,6 +485,7 @@ describe("handleSyncPush", () => {
     const result = await handleSyncPush(
       {
         vaultId: "v1",
+        historyLimits: DEFAULT_HISTORY_LIMITS,
         files: [
           {
             fileId: "f-1",
@@ -474,6 +497,7 @@ describe("handleSyncPush", () => {
             sizeBytes: bytes("c").length,
             mtimeMs: 0,
             baseVersionId: "v-gone",
+            historyKind: "documents",
           },
         ],
       },
@@ -498,6 +522,7 @@ describe("handleSyncPush", () => {
     const result = await handleSyncPush(
       {
         vaultId: "v1",
+        historyLimits: DEFAULT_HISTORY_LIMITS,
         files: [
           {
             fileId: "f-1",
@@ -509,6 +534,7 @@ describe("handleSyncPush", () => {
             sizeBytes: 6 * 1024 * 1024,
             mtimeMs: 0,
             baseVersionId: "v001",
+            historyKind: "documents",
           },
         ],
       },
@@ -538,6 +564,7 @@ describe("handleSyncPush", () => {
     const result = await handleSyncPush(
       {
         vaultId: "v1",
+        historyLimits: DEFAULT_HISTORY_LIMITS,
         files: [
           {
             fileId: "f-1",
@@ -549,6 +576,7 @@ describe("handleSyncPush", () => {
             sizeBytes: 10,
             mtimeMs: 0,
             baseVersionId: "v001",
+            historyKind: "documents",
           },
         ],
       },
@@ -573,6 +601,7 @@ describe("handleSyncPush", () => {
     const result = await handleSyncPush(
       {
         vaultId: "v1",
+        historyLimits: DEFAULT_HISTORY_LIMITS,
         files: [
           {
             fileId: "f-1",
@@ -584,6 +613,7 @@ describe("handleSyncPush", () => {
             sizeBytes: bytes("should never be stored").length,
             mtimeMs: 0,
             baseVersionId: "v001",
+            historyKind: "documents",
           },
         ],
       },
@@ -607,6 +637,7 @@ describe("handleSyncPush", () => {
     const result = await handleSyncPushWithDeps(
       {
         vaultId: "v1",
+        historyLimits: DEFAULT_HISTORY_LIMITS,
         files: [
           {
             fileId: "f-1",
@@ -618,6 +649,7 @@ describe("handleSyncPush", () => {
             sizeBytes: bytes("ca").length,
             mtimeMs: 0,
             baseVersionId: null,
+            historyKind: "documents",
           },
           {
             fileId: "f-2",
@@ -629,6 +661,7 @@ describe("handleSyncPush", () => {
             sizeBytes: bytes("cb").length,
             mtimeMs: 0,
             baseVersionId: null,
+            historyKind: "documents",
           },
         ],
       },
@@ -640,6 +673,8 @@ describe("handleSyncPush", () => {
         assembleChunks: vi.fn().mockResolvedValue(true),
         flushBlobs: vi.fn(async () => {}),
         broadcast,
+        isContentHashReferenced: vi.fn(async () => false),
+        deleteBlob: vi.fn(async () => {}),
       },
     );
 
@@ -681,6 +716,7 @@ describe("handleSyncPush", () => {
     const result = await handleSyncPushWithDeps(
       {
         vaultId: "v1",
+        historyLimits: DEFAULT_HISTORY_LIMITS,
         files: [
           {
             fileId: "f-1",
@@ -692,6 +728,7 @@ describe("handleSyncPush", () => {
             sizeBytes: bytes("ca").length,
             mtimeMs: 0,
             baseVersionId: null,
+            historyKind: "documents",
           },
         ],
       },
@@ -703,6 +740,8 @@ describe("handleSyncPush", () => {
         assembleChunks: vi.fn().mockResolvedValue(true),
         flushBlobs,
         broadcast: vi.fn(),
+        isContentHashReferenced: vi.fn(async () => false),
+        deleteBlob: vi.fn(async () => {}),
       },
     );
 
@@ -726,6 +765,7 @@ describe("handleSyncPush", () => {
     const result = await handleSyncPushWithDeps(
       {
         vaultId: "v1",
+        historyLimits: DEFAULT_HISTORY_LIMITS,
         files: ["f-1", "f-2", "f-3"].map((fileId) => ({
           fileId,
           encryptedPath: `p-${fileId}`,
@@ -736,6 +776,7 @@ describe("handleSyncPush", () => {
           sizeBytes: bytes(`c-${fileId}`).length,
           mtimeMs: 0,
           baseVersionId: null,
+          historyKind: "documents",
         })),
       },
       {
@@ -746,6 +787,8 @@ describe("handleSyncPush", () => {
         assembleChunks: vi.fn().mockResolvedValue(true),
         flushBlobs: vi.fn(async () => {}),
         broadcast,
+        isContentHashReferenced: vi.fn(async () => false),
+        deleteBlob: vi.fn(async () => {}),
       },
     );
 
@@ -780,6 +823,7 @@ describe("handleSyncPush", () => {
     const result = await handleSyncPushWithDeps(
       {
         vaultId: "v1",
+        historyLimits: DEFAULT_HISTORY_LIMITS,
         files: ["f-1", "f-2", "f-3"].map((fileId) => ({
           fileId,
           encryptedPath: `p-${fileId}`,
@@ -790,6 +834,7 @@ describe("handleSyncPush", () => {
           sizeBytes: bytes(`c-${fileId}`).length,
           mtimeMs: 0,
           baseVersionId: fileId === "f-1" ? "v-stale" : null,
+          historyKind: "documents",
         })),
       },
       {
@@ -800,6 +845,8 @@ describe("handleSyncPush", () => {
         assembleChunks: vi.fn().mockResolvedValue(true),
         flushBlobs: vi.fn(async () => {}),
         broadcast,
+        isContentHashReferenced: vi.fn(async () => false),
+        deleteBlob: vi.fn(async () => {}),
       },
     );
 
@@ -821,6 +868,7 @@ describe("handleSyncPush", () => {
     const result = await handleSyncPushWithDeps(
       {
         vaultId: "v1",
+        historyLimits: DEFAULT_HISTORY_LIMITS,
         files: [
           {
             fileId: "f-1",
@@ -832,6 +880,7 @@ describe("handleSyncPush", () => {
             sizeBytes: bytes("ca").length,
             mtimeMs: 0,
             baseVersionId: null,
+            historyKind: "documents",
           },
           {
             fileId: "f-2",
@@ -843,6 +892,7 @@ describe("handleSyncPush", () => {
             sizeBytes: bytes("cb").length,
             mtimeMs: 0,
             baseVersionId: null,
+            historyKind: "documents",
           },
         ],
       },
@@ -856,6 +906,8 @@ describe("handleSyncPush", () => {
         assembleChunks: vi.fn().mockResolvedValue(true),
         flushBlobs: vi.fn(async () => {}),
         broadcast,
+        isContentHashReferenced: vi.fn(async () => false),
+        deleteBlob: vi.fn(async () => {}),
       },
     );
 
@@ -877,6 +929,7 @@ describe("handleSyncPush", () => {
     const result = await handleSyncPushWithDeps(
       {
         vaultId: "v1",
+        historyLimits: DEFAULT_HISTORY_LIMITS,
         files: [
           {
             fileId: "f-1",
@@ -888,6 +941,7 @@ describe("handleSyncPush", () => {
             sizeBytes: bytes("ca").length,
             mtimeMs: 0,
             baseVersionId: null,
+            historyKind: "documents",
           },
         ],
       },
@@ -899,10 +953,156 @@ describe("handleSyncPush", () => {
         assembleChunks: vi.fn().mockResolvedValue(true),
         flushBlobs: vi.fn(async () => {}),
         broadcast: vi.fn(),
+        isContentHashReferenced: vi.fn(async () => false),
+        deleteBlob: vi.fn(async () => {}),
       },
     );
 
     expect(result.results[0]).toMatchObject({ fileId: "f-1", status: "error", error: "db gone" });
+  });
+
+  /** A push input with one content-carrying version, for the history-limit cases. */
+  function oneFile(
+    kind: "documents" | "attachments" = "documents",
+    historyLimits: HistoryLimits = DEFAULT_HISTORY_LIMITS,
+  ): SyncPushInput {
+    return {
+      vaultId: "v1",
+      historyLimits,
+      files: [
+        {
+          fileId: "f-trim",
+          encryptedPath: "enc",
+          content: cipher("ca"),
+          action: "create",
+          versionId: "v-2",
+          contentHash: "hash-v2",
+          sizeBytes: bytes("ca").length,
+          mtimeMs: 0,
+          baseVersionId: "v-1",
+          historyKind: kind,
+        },
+      ],
+    };
+  }
+
+  it("resolves each version's limit from the vault's values and the file's kind", async () => {
+    // The numbers are the vault's (the route reads them from its row); the client only
+    // states the kind. Both have to reach the row the transaction trims against.
+    const tryInsertFileVersion = vi.fn<RowInsert>().mockResolvedValue({ status: "ok" });
+
+    await handleSyncPush(
+      oneFile("attachments", { documents: 300, attachments: 7 }),
+      vi.fn<WriteBlobFn>().mockResolvedValue(undefined),
+      tryInsertFileVersion,
+      vi.fn<SingleHeadLookup>().mockResolvedValue("v-1"),
+      storesNothing(),
+    );
+
+    expect(tryInsertFileVersion).toHaveBeenCalledWith(
+      expect.objectContaining({ fileId: "f-trim", historyKind: "attachments", historyLimit: 7 }),
+    );
+  });
+
+  it("states the document limit for a document kind from the same vault values", async () => {
+    const tryInsertFileVersion = vi.fn<RowInsert>().mockResolvedValue({ status: "ok" });
+
+    await handleSyncPush(
+      oneFile("documents", { documents: 300, attachments: 7 }),
+      vi.fn<WriteBlobFn>().mockResolvedValue(undefined),
+      tryInsertFileVersion,
+      vi.fn<SingleHeadLookup>().mockResolvedValue("v-1"),
+      storesNothing(),
+    );
+
+    expect(tryInsertFileVersion).toHaveBeenCalledWith(
+      expect.objectContaining({ historyKind: "documents", historyLimit: 300 }),
+    );
+  });
+
+  it("reclaims the blobs a trim orphaned, and keeps one another file still references", async () => {
+    // The insert transaction answers the hashes of the rows it removed. Each of those
+    // blobs goes only when no remaining version row names it any more — two files can
+    // hold the same bytes, and the blob is one row per hash.
+    const isContentHashReferenced = vi.fn(
+      async (_vaultId: string, contentHash: string) => contentHash === "hash-shared",
+    );
+    const deleteBlob = vi.fn(async () => {});
+    const invalidateStorageUsage = vi.fn();
+
+    const result = await handleSyncPushWithDeps(oneFile(), {
+      writeBlob: vi.fn<WriteBlobFn>().mockResolvedValue(undefined),
+      tryInsertFileVersions: vi.fn<TryInsertFileVersionsFn>().mockImplementation(async (rows) =>
+        rows.map(() => ({
+          status: "ok" as const,
+          prunedContentHashes: ["hash-gone", "hash-shared"],
+        })),
+      ),
+      getLatestVersionIds: vi.fn<GetLatestVersionIdsFn>().mockResolvedValue(new Map()),
+      hasBlob: storesNothing(),
+      assembleChunks: vi.fn().mockResolvedValue(true),
+      flushBlobs: vi.fn(async () => {}),
+      broadcast: vi.fn(),
+      isContentHashReferenced,
+      deleteBlob,
+      invalidateStorageUsage,
+    });
+
+    expect(result.results.map((entry) => entry.status)).toEqual(["ok"]);
+    expect(isContentHashReferenced).toHaveBeenCalledWith("v1", "hash-gone");
+    expect(isContentHashReferenced).toHaveBeenCalledWith("v1", "hash-shared");
+    expect(deleteBlob).toHaveBeenCalledTimes(1);
+    expect(deleteBlob).toHaveBeenCalledWith("v1", "hash-gone");
+    // A trim freed bytes, so the route's cached usage has to be dropped (once, not per
+    // hash): otherwise a quota check keeps counting space the account no longer uses.
+    expect(invalidateStorageUsage).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not touch the store when no chain was trimmed", async () => {
+    const isContentHashReferenced = vi.fn(async () => false);
+    const deleteBlob = vi.fn(async () => {});
+    const invalidateStorageUsage = vi.fn();
+
+    await handleSyncPushWithDeps(oneFile(), {
+      writeBlob: vi.fn<WriteBlobFn>().mockResolvedValue(undefined),
+      tryInsertFileVersions: vi.fn<TryInsertFileVersionsFn>().mockResolvedValue([{ status: "ok" }]),
+      getLatestVersionIds: vi.fn<GetLatestVersionIdsFn>().mockResolvedValue(new Map()),
+      hasBlob: storesNothing(),
+      assembleChunks: vi.fn().mockResolvedValue(true),
+      flushBlobs: vi.fn(async () => {}),
+      broadcast: vi.fn(),
+      isContentHashReferenced,
+      deleteBlob,
+      invalidateStorageUsage,
+    });
+
+    expect(isContentHashReferenced).not.toHaveBeenCalled();
+    expect(deleteBlob).not.toHaveBeenCalled();
+    // Nothing was freed, so the route's cached usage is still correct.
+    expect(invalidateStorageUsage).not.toHaveBeenCalled();
+  });
+
+  it("answers the push as applied when the reclaim itself cannot delete a blob", async () => {
+    // The version committed before the reclaim ran. A store that refuses the delete is
+    // the orphan sweep's problem, not a push the client must retry — reporting an error
+    // here would say a stored version was lost.
+    const result = await handleSyncPushWithDeps(oneFile(), {
+      writeBlob: vi.fn<WriteBlobFn>().mockResolvedValue(undefined),
+      tryInsertFileVersions: vi
+        .fn<TryInsertFileVersionsFn>()
+        .mockResolvedValue([{ status: "ok", prunedContentHashes: ["hash-gone"] }]),
+      getLatestVersionIds: vi.fn<GetLatestVersionIdsFn>().mockResolvedValue(new Map()),
+      hasBlob: storesNothing(),
+      assembleChunks: vi.fn().mockResolvedValue(true),
+      flushBlobs: vi.fn(async () => {}),
+      broadcast: vi.fn(),
+      isContentHashReferenced: vi.fn(async () => false),
+      deleteBlob: vi.fn(async () => {
+        throw new Error("store locked");
+      }),
+    });
+
+    expect(result.results[0]).toMatchObject({ fileId: "f-trim", status: "ok" });
   });
 });
 
@@ -921,6 +1121,7 @@ it("writes a batch's payloads concurrently", async () => {
   const result = await handleSyncPushWithDeps(
     {
       vaultId: "v1",
+      historyLimits: DEFAULT_HISTORY_LIMITS,
       files: Array.from({ length: 8 }, (_, index) => ({
         fileId: `f-${index}`,
         encryptedPath: `p-${index}`,
@@ -931,6 +1132,7 @@ it("writes a batch's payloads concurrently", async () => {
         sizeBytes: bytes(`c-${index}`).length,
         mtimeMs: 0,
         baseVersionId: null,
+        historyKind: "documents",
       })),
     },
     {
@@ -943,6 +1145,8 @@ it("writes a batch's payloads concurrently", async () => {
       assembleChunks: vi.fn().mockResolvedValue(true),
       flushBlobs: vi.fn(async () => {}),
       broadcast: vi.fn(),
+      isContentHashReferenced: vi.fn(async () => false),
+      deleteBlob: vi.fn(async () => {}),
     },
   );
 
@@ -964,6 +1168,7 @@ it("keeps one failed blob write with its file", async () => {
   const result = await handleSyncPushWithDeps(
     {
       vaultId: "v1",
+      historyLimits: DEFAULT_HISTORY_LIMITS,
       files: ["f-1", "f-2", "f-3"].map((fileId) => ({
         fileId,
         encryptedPath: `p-${fileId}`,
@@ -974,6 +1179,7 @@ it("keeps one failed blob write with its file", async () => {
         sizeBytes: bytes(`c-${fileId}`).length,
         mtimeMs: 0,
         baseVersionId: null,
+        historyKind: "documents",
       })),
     },
     {
@@ -984,6 +1190,8 @@ it("keeps one failed blob write with its file", async () => {
       assembleChunks: vi.fn().mockResolvedValue(true),
       flushBlobs: vi.fn(async () => {}),
       broadcast: vi.fn(),
+      isContentHashReferenced: vi.fn(async () => false),
+      deleteBlob: vi.fn(async () => {}),
     },
   );
 
@@ -1012,6 +1220,7 @@ it("accepts a rename whose bytes a create in the same batch wrote", async () => 
   const result = await handleSyncPushWithDeps(
     {
       vaultId: "v1",
+      historyLimits: DEFAULT_HISTORY_LIMITS,
       files: [
         {
           fileId: "f-1",
@@ -1023,6 +1232,7 @@ it("accepts a rename whose bytes a create in the same batch wrote", async () => 
           sizeBytes: bytes("shared").length,
           mtimeMs: 0,
           baseVersionId: null,
+          historyKind: "documents",
         },
         {
           fileId: "f-2",
@@ -1034,6 +1244,7 @@ it("accepts a rename whose bytes a create in the same batch wrote", async () => 
           sizeBytes: bytes("shared").length,
           mtimeMs: 0,
           baseVersionId: "v-1",
+          historyKind: "documents",
         },
       ],
     },
@@ -1047,6 +1258,8 @@ it("accepts a rename whose bytes a create in the same batch wrote", async () => 
       assembleChunks: vi.fn().mockResolvedValue(true),
       flushBlobs: vi.fn(async () => {}),
       broadcast: vi.fn(),
+      isContentHashReferenced: vi.fn(async () => false),
+      deleteBlob: vi.fn(async () => {}),
     },
   );
 

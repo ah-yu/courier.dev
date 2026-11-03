@@ -243,6 +243,27 @@ describe("SyncWebSocket — messages", () => {
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
 
+  it("reports the vault's new retention limits without touching the connection", () => {
+    // Display state only: the server trims by its own copy, so the socket just hands the
+    // numbers to the host (which is what keeps an open settings page current).
+    const { socket, events, states } = makeSocket();
+    const ws = connected(socket);
+
+    ws.deliver({
+      type: "vault_settings",
+      vaultId: "v1",
+      historyLimits: { documents: 40, attachments: 5 },
+    });
+
+    expect(events).toContainEqual({
+      type: "vault_settings",
+      historyLimits: { documents: 40, attachments: 5 },
+    });
+    // The connection stays as it was: this is not a terminal event.
+    expect(states().at(-1)).toBe("connected");
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
   it("reports a revoked user key and stops", () => {
     const { socket, events, states } = makeSocket();
     const ws = connected(socket);

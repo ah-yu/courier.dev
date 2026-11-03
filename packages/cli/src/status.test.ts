@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { DEFAULT_MAX_FILE_BYTES } from "@courier/engine";
+import { DEFAULT_HISTORY_LIMITS, type HistoryLimits } from "@courier/shared";
 import { setLocale } from "./i18n";
 import {
   buildStatusReport,
@@ -107,6 +108,9 @@ describe("buildVaultSummary", () => {
       hasState: true,
       fileTypes: ["images", "video", "audio", "pdf"],
       maxFileBytes: DEFAULT_MAX_FILE_BYTES,
+      // The limits are the vault's, so a summary built without a server read has none —
+      // it is `null` rather than the default numbers, which would be a guess.
+      historyLimits: null,
       excludedFolders: [],
       oversizeFiles: [],
       conflictFiles: [],
@@ -120,11 +124,19 @@ describe("buildVaultSummary", () => {
         "hasState",
         "fileTypes",
         "maxFileBytes",
+        "historyLimits",
         "excludedFolders",
         "oversizeFiles",
         "conflictFiles",
       ]),
     );
+  });
+
+  it("carries the vault's limits when the server read succeeded", () => {
+    expect(
+      buildVaultSummary(config(), vault(), "{}", [], [], { documents: 500, attachments: 3 })
+        .historyLimits,
+    ).toEqual({ documents: 500, attachments: 3 });
   });
 
   it("says so when this vault has never synced", () => {
@@ -171,6 +183,7 @@ describe("buildStatusReport", () => {
         "hasState",
         "fileTypes",
         "maxFileBytes",
+        "historyLimits",
         "excludedFolders",
         "oversizeFiles",
         "conflictFiles",
@@ -185,7 +198,9 @@ describe("buildStatusReport", () => {
 describe("formatStatusLines", () => {
   it("renders the shared header and one block per vault", () => {
     const lines = formatStatusLines(
-      buildStatusReport(config([vault()]), [input(vault(), { conflictFiles: [] })]),
+      buildStatusReport(config([vault()]), [
+        input(vault(), { conflictFiles: [], historyLimits: DEFAULT_HISTORY_LIMITS }),
+      ]),
     );
 
     expect(lines).toEqual([
@@ -201,15 +216,33 @@ describe("formatStatusLines", () => {
       "Obsidian:    not open; the CLI owns sync",
       "State:       tracked",
       "File types:  md, canvas, images, video, audio, pdf (max 50 MB, admin-set)",
+      "History:     notes/canvas 200, attachments 10",
       "Excluded:    (none)",
       "Conflicts:   (none)",
       "",
       "Hint: each vault runs in its own process: start one with `courier-cli run --vault <id>`; the first process to take the vault's lease syncs it, and the other waits.",
     ]);
     // One column per block, so every label/value pair aligns.
-    const block = lines.slice(4, 13);
+    const block = lines.slice(4, 14);
     const widths = block.map((line) => displayWidth(/^\S+[^:]*: +/.exec(line)![0]));
     expect([...new Set(widths)]).toEqual([13]);
+  });
+
+  it("reads the history row from the server's answer, or says it could not", () => {
+    const line = (historyLimits: HistoryLimits | null): string =>
+      formatStatusLines(buildStatusReport(config(), [input(vault(), { historyLimits })])).find(
+        (candidate) => candidate.startsWith("History:"),
+      )!;
+
+    expect(line({ documents: 200, attachments: 10 })).toBe(
+      "History:     notes/canvas 200, attachments 10",
+    );
+    expect(line({ documents: 500, attachments: 3 })).toBe(
+      "History:     notes/canvas 500, attachments 3",
+    );
+    // The value is the vault's, so an unreachable server cannot be answered from a local
+    // copy — the row says so instead of printing a number nobody holds.
+    expect(line(null)).toBe("History:     (not readable from the server)");
   });
 
   it("renders the starting, stopped and activity states a status read can meet", () => {
@@ -356,7 +389,9 @@ describe("formatStatusLines — Chinese", () => {
 
   it("renders Chinese labels and values, aligned to one column", () => {
     setLocale("zh");
-    const lines = formatStatusLines(buildStatusReport(config(), [input(vault())]));
+    const lines = formatStatusLines(
+      buildStatusReport(config(), [input(vault(), { historyLimits: DEFAULT_HISTORY_LIMITS })]),
+    );
     const lineFor = (label: string): string => lines.find((line) => line.startsWith(`${label}:`))!;
 
     expect(lineFor("服务器")).toContain("http://vps.example.com");
@@ -370,6 +405,9 @@ describe("formatStatusLines — Chinese", () => {
     );
     expect(lineFor("排除的文件夹")).toContain("（无）");
     expect(lineFor("冲突副本")).toContain("（无）");
+    // The history limit is one more scope fact a headless machine has to be able to read
+    // back: the defaults, in the active language.
+    expect(lineFor("历史版本")).toContain("笔记/Canvas 200，附件 10");
 
     // The padding is computed in terminal columns, so the wide labels line up too.
     const widths = lines

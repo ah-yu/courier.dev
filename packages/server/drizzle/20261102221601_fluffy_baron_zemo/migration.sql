@@ -1,0 +1,1 @@
+CREATE INDEX `idx_file_versions_vault_hash` ON `file_versions` (`vault_id`,`content_hash`);

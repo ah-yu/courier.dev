@@ -236,6 +236,7 @@ describe("the CLI's sync api", () => {
         mtimeMs: 0,
         // Decided from a chain with no head yet.
         baseVersionId: null,
+        historyKind: "documents",
       },
     ]);
 

@@ -86,6 +86,7 @@ function pushBody(options: {
       sizeBytes: Math.max(0, content.byteLength - 28),
       mtimeMs: 0,
       baseVersionId: base,
+      historyKind: "documents",
     },
   ]);
 }

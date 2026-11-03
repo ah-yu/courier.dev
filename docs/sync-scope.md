@@ -96,6 +96,20 @@
   rail, not the server's resource limit (that is `storageBytesLimit`), because plaintext size is
   client-declared.
 
+## Version history kept on the server
+
+- **The history limit is the vault's, not this device's.** `vaults.history_limit_documents` (200) and
+  `vaults.history_limit_attachments` (10) live on the server, are edited through `PATCH /api/vaults/:id`
+  by the plugin's settings page and the CLI's `vault connect` / `vault update` flags, and are read by
+  every device of the vault — so one device changing them changes them for all, and the last device to
+  edit a file cannot impose its own bound. This module has **no** history field: the engine only
+  classifies each file with the table the file types use (`fileTypeOf` — markdown and canvas are
+  `"always"`, every other path is an attachment) and states that `historyKind` on the push
+  ([api.md](api.md#9-push-local-changes)), because the category is only visible in the plaintext path.
+  The server applies its own numbers in the insert transaction and, on a lowering, trims the chains
+  already stored ([server.md](server.md)). This is independent of the administrator's age-based
+  `retentionDays`.
+
 ## Conflict copies
 
 - **Conflict copies keep the original extension**: `{stem}-{YYYY-MM-DD-HHmmss}[-n].conflict{ext}` —

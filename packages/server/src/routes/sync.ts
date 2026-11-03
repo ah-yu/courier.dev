@@ -39,6 +39,7 @@ import {
   CHUNKED_TRANSFER_THRESHOLD,
   CHUNK_PLAINTEXT_BYTES,
   CONTENT_HASH_PATTERN,
+  HISTORY_KINDS,
   MAX_CHUNKS,
   MAX_DEVICE_NAME_LENGTH,
   MAX_ENCRYPTED_PATH_LENGTH,
@@ -48,6 +49,7 @@ import {
   SYNC_ACTIONS,
   WireFormatError,
   chunkCountFor,
+  historyLimitsOf,
   parsePushBody,
   storedChunkBytes,
   type PushBody,
@@ -56,6 +58,7 @@ import {
   deleteFileVersionsByFileIds,
   getLatestVersionIds,
   getVersionChain,
+  isContentHashReferenced,
   listDeletedChains,
   listDeletedFileIds,
   listFileHeadsByVaultId,
@@ -115,6 +118,9 @@ const pushFileSchema = z.object({
   mtimeMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   baseVersionId: z.string().min(1).max(MAX_ID_LENGTH).nullable(),
   contentChunks: z.number().int().nonnegative().max(MAX_CHUNKS).optional(),
+  // What kind of file this version is. The client states it (only the plaintext path can
+  // say); the server maps it to the **vault's** retention limit and stores it on the row.
+  historyKind: z.enum(HISTORY_KINDS),
 });
 
 const syncPushSchema = z.object({
@@ -281,7 +287,7 @@ export function syncRoutes(hub: WsHub, logger: Logger): RouteTable {
 
   return {
     "/api/vaults/:id/sync/push": {
-      POST: sync(syncLimit, async (request, { vaultId, user }: SyncRequestContext) => {
+      POST: sync(syncLimit, async (request, { vaultId, user, vault }: SyncRequestContext) => {
         const excludeSessionId = request.headers.get("x-courier-session-id") ?? undefined;
         const { deviceName, files } = await readPushBody(request);
 
@@ -298,7 +304,15 @@ export function syncRoutes(hub: WsHub, logger: Logger): RouteTable {
         );
 
         const response = await handleSyncPush(
-          { vaultId, excludeSessionId, files, deviceName },
+          {
+            vaultId,
+            // The vault's own limits: the policy the trim applies, read here so a push
+            // cannot state a value of its own.
+            historyLimits: historyLimitsOf(vault),
+            excludeSessionId,
+            files,
+            deviceName,
+          },
           {
             writeBlob,
             tryInsertFileVersions,
@@ -307,6 +321,12 @@ export function syncRoutes(hub: WsHub, logger: Logger): RouteTable {
             assembleChunks: assembleUploadedChunks,
             flushBlobs: flushBlobWrites,
             broadcast: hub.broadcastFilePushed,
+            // The history trim inside the insert transaction removes old rows; these two
+            // reclaim the blobs those rows were the last reference to, and the third
+            // drops the cached usage a reclaim has just made too high.
+            isContentHashReferenced,
+            deleteBlob,
+            invalidateStorageUsage: () => invalidateUserStorageUsage(user.id),
           },
         );
         // What was just written is added to the cached usage, so the rest of this

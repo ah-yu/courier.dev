@@ -85,7 +85,7 @@ GET /api/vaults
 
 Lists the vault metadata visible to the current user: the vaults they own, plus owner-less legacy
 vaults (visible to every authenticated user). This endpoint **requires a user key** (`ck_`) and returns
-only `id`, `name` and `createdAt`; it contains nothing sensitive.
+`id`, `name`, `createdAt` and the vault's two **retention limits**; it contains nothing sensitive.
 
 **Response** `200 OK`
 
@@ -95,17 +95,21 @@ only `id`, `name` and `createdAt`; it contains nothing sensitive.
     {
       "id": "Lcl2pM7xQaKbDn9fR3sT...",
       "name": "My remote vault",
-      "createdAt": "2026-06-10T21:00:00.000Z"
+      "createdAt": "2026-06-10T21:00:00.000Z",
+      "historyLimitDocuments": 200,
+      "historyLimitAttachments": 10
     }
   ]
 }
 ```
 
-| Field                | Description                 |
-| -------------------- | --------------------------- |
-| `vaults[].id`        | Vault identifier            |
-| `vaults[].name`      | Vault name                  |
-| `vaults[].createdAt` | ISO 8601 creation timestamp |
+| Field                              | Description                                          |
+| ---------------------------------- | ---------------------------------------------------- |
+| `vaults[].id`                      | Vault identifier                                     |
+| `vaults[].name`                    | Vault name                                           |
+| `vaults[].createdAt`               | ISO 8601 creation timestamp                          |
+| `vaults[].historyLimitDocuments`   | Versions kept per markdown note / canvas file        |
+| `vaults[].historyLimitAttachments` | Versions kept per other file (see **History limit**) |
 
 ---
 
@@ -148,14 +152,18 @@ Authorization: Bearer ck_xxxxxxxxxxxx
 {
   "id": "Lcl2pM7xQaKbDn9fR3sT...",
   "name": "My remote vault",
-  "createdAt": "2026-06-10T21:00:00.000Z"
+  "createdAt": "2026-06-10T21:00:00.000Z",
+  "historyLimitDocuments": 200,
+  "historyLimitAttachments": 10
 }
 ```
 
-| Field       | Description                                 |
-| ----------- | ------------------------------------------- |
-| `id`        | 32-byte random vault identifier (base64url) |
-| `createdAt` | ISO 8601 timestamp                          |
+| Field                     | Description                                   |
+| ------------------------- | --------------------------------------------- |
+| `id`                      | 32-byte random vault identifier (base64url)   |
+| `createdAt`               | ISO 8601 timestamp                            |
+| `historyLimitDocuments`   | Versions kept per note / canvas (default 200) |
+| `historyLimitAttachments` | Versions kept per other file (default 10)     |
 
 **Errors**
 
@@ -249,12 +257,17 @@ endpoints rests entirely on API keys.
 
 ### 7. Vault management (HTTP)
 
-Creating, renaming and deleting a vault exist only as HTTP endpoints (managed from the plugin; the
-server no longer offers `courier vault …` commands):
+Creating, renaming, re-configuring and deleting a vault exist only as HTTP endpoints (managed from the
+plugin and the CLI; the server no longer offers `courier vault …` commands):
 
 - `POST   /api/vaults` (needs a user key; the vault belongs to that user)
-- `PATCH  /api/vaults/:id` (body `{ name }`, allowed only for the owner, or for a legacy vault any
-  authenticated user)
+- `PATCH  /api/vaults/:id` (body `{ name?, historyLimitDocuments?, historyLimitAttachments? }`, at
+  least one; allowed only for the owner, or for a legacy vault any authenticated user). Response:
+  `{ id, name, historyLimitDocuments, historyLimitAttachments }` — the vault as it now stands. The
+  two limits are the vault's **retention policy** (see **History limit** under 9); lowering either one
+  trims the chains already stored before the response, so an idle file is bounded too. A request that
+  states a limit also broadcasts `vault_settings` to every subscriber of the vault, so a settings page
+  that is already open on another device repaints instead of waiting for a reopen.
 - `DELETE /api/vaults/:id` (allowed only for the owner, or for a legacy vault any authenticated user;
   **also broadcasts `vault_deleted` to every subscriber of that vault, within the process**, and
   **deletes the vault's whole directory in blob storage**)
@@ -263,8 +276,9 @@ Before creating or deleting, the client verifies the password the user typed aga
 canary **locally** (to prevent accidental deletion). Deletion is thorough: `file_versions` rows are
 deleted by cascade with the vault (`ON DELETE CASCADE`), and the ciphertext directory goes with
 them — keeping it would mean "the freed space can never be reclaimed", and the per-vault usage would
-then be under-counted for this user. Pruning old versions by retention is a different path (a scheduled
-task inside the service process; see `retentionDays` in 7b).
+then be under-counted for this user. Pruning old versions by **age** is a different path (a scheduled
+task inside the service process; see `retentionDays` in 7b); pruning by **count** is the vault's two
+limits, applied on every push and on a limits update.
 
 ### 7a. Current account (`GET /api/me`)
 
@@ -402,6 +416,13 @@ VALIDATION_ERROR`, with `details[].field` naming the field):
   the retention period has pruned that one too, the chain holds only a tombstone and the client offers no
   restore (see the "recycle bin" section). The shorter the retention period, the fewer early accidental
   deletions can be rescued.
+
+`retentionDays` is the administrator's **age** policy. It is not the only bound on history: each
+**vault** also carries a **count** policy — `historyLimitDocuments` / `historyLimitAttachments` on
+the vault row, editable through `PATCH /api/vaults/:id` — which the server applies inside the insert
+transaction (see **History limit** under 9) and to the chains already stored when it is lowered. The
+two are independent: a vault can keep years of history under the default `null` `retentionDays` and
+still be bounded by its own two counts.
 
 ### 7b-2. Host key scopes and expiry
 
@@ -544,6 +565,7 @@ Server → Client:  { "type": "subscribe_success", "vaultId": "...", "sessionId"
 | `ping`              | —                                               | Sent once every 30 seconds; the client should reply `pong`                                                                                                                                                                                                                                                                                                                                                  |
 | `file_pushed`       | `vaultId`, `fileId`, `versionId`, `deviceName?` | A file has a new version; the client should pull that file's version chain and apply it (the content is fetched separately with `GET …/sync/versions/:contentHash/content`). `deviceName` is the pusher's self-declared label, for display. The pusher's own session does not receive an echo (see `X-Courier-Session-Id`).                                                                                 |
 | `vault_deleted`     | `vaultId: string`                               | The vault was deleted; the client should disconnect and clean up its local settings                                                                                                                                                                                                                                                                                                                         |
+| `vault_settings`    | `vaultId`, `historyLimits`                      | The vault's retention limits changed (`{ documents, attachments }`), on another device or through `PATCH /api/vaults/:id`. Display state only — the server applies the limits itself when it trims — so a host forwards it to whatever shows them; an open settings page repaints without being reopened.                                                                                                   |
 | `api_key_revoked`   | `vaultId: string`                               | The user key was revoked (the account and its vaults were deleted); the client should disconnect and drop the binding                                                                                                                                                                                                                                                                                       |
 | `api_key_disabled`  | `vaultId: string`                               | The account was disabled by the host: the key and all its data are still there, so the client should stop and **keep** the binding (a pause it can resume from), not forget the key                                                                                                                                                                                                                         |
 
@@ -768,6 +790,7 @@ Sender and receiver share one implementation: `wire.ts` in `@courier/shared` (`b
 | `files[].mtimeMs`       | number         | Yes      | The file's **last modification time** on the pusher's device (Unix milliseconds). Stored as metadata only and not used to order the chain head; for conflicts inside the config folder (`.obsidian/`) the client uses it to compare "who modified last" (see below) |
 | `files[].baseVersionId` | string \| null | Yes      | The chain-head version id this push is based on; the client passes `null` when it believes the file has no version yet (a new file)                                                                                                                                 |
 | `files[].contentChunks` | number         | No       | Number of chunks staged for this file; positive means `contentLength: 0` and the server assembles the blob before inserting the row (see **Chunked uploads**)                                                                                                       |
+| `files[].historyKind`   | string         | Yes      | `documents` (markdown / canvas) or `attachments` (every other file). The client states it because only the plaintext path can say; the server maps it to the **vault's** own limit (see **History limit** below)                                                    |
 
 > `sizeBytes` is **metadata for clients**: it plans a chunked transfer and drives the progress report.
 > It does **not** decide whether a peer accepts the version — each user key's file cap (see 7b) bounds
@@ -837,6 +860,30 @@ A payload's length must also agree with the row: `contentLength` is `sizeBytes +
 mismatch is answered per file with `error: "size_mismatch"` and writes nothing, because a peer sizes its
 read ranges and buffers from `sizeBytes`.
 
+**History limit (`files[].historyKind` + the vault's row)**
+
+How many versions of a chain the server keeps is a **property of the vault**, not of the device and
+not of the account: `vaults.history_limit_documents` (default 200) and `vaults.history_limit_attachments`
+(default 10), read/written through `PATCH /api/vaults/:id` and returned by `GET /api/vaults`. Every
+device of that vault is therefore trimmed by the same numbers — the plugin's settings page and the CLI
+edit that one row — and the value a device _pushes_ is only the file's **kind** (`historyKind`),
+because the category is visible in the plaintext path and nowhere else.
+
+The server applies the limit in the same transaction that appends the row: a chain is trimmed to its
+newest N rows — the version just pushed is always kept, so a limit of 1 leaves only the current state —
+and the content hashes of the removed rows are collected. After the commit, each of those blobs is
+deleted **only if no remaining version row of the vault still names it** (the same bytes may be another
+file's content), and its file goes with the last row that named it. A push that trims nothing reclaims
+nothing.
+
+Because the numbers live on the vault, a **lowering** is applied without waiting for the next push: the
+`PATCH` trims every chain of the vault to the new values (the same row deletion and blob reclaim, per
+chain, choosing the limit from the chain's `history_kind`) before it answers. A chain no device touches
+again is therefore bounded too. The deleted versions are not recoverable afterwards.
+
+Trimming is independent of the account's `retentionDays` window (7b), which prunes by **age** in a
+scheduled pass; both can apply to the same vault.
+
 **Example** (header part; the actual request body continues with the ciphertext immediately after it)
 
 ```json
@@ -851,7 +898,8 @@ read ranges and buffers from `sizeBytes`.
       "contentHash": "a1b2c3d4e5f6...",
       "sizeBytes": 24913,
       "mtimeMs": 1760000000000,
-      "baseVersionId": "550e8400-e29b-41d4-a716-446655440000"
+      "baseVersionId": "550e8400-e29b-41d4-a716-446655440000",
+      "historyKind": "documents"
     }
   ]
 }
@@ -1221,8 +1269,8 @@ versions, so the payload grows only with the number of files, not with the vault
 - `previousLive`: only when `head.action === "delete"`, the last non-`delete` version on the chain;
   otherwise `null`. The engine uses it to decide "whether the local content is still the version the
   tombstone deleted".
-- When the chain holds only `delete` rows (or the restorable version has been pruned by retention),
-  `previousLive` is `null`.
+- When the chain holds only `delete` rows (or the restorable version has been pruned by retention or
+  by the vault's history limit), `previousLive` is `null`.
 
 **Request headers**
 
@@ -1301,9 +1349,10 @@ Authorization: Bearer ck_xxxxxxxxxxxx
 
 - Restoring needs no dedicated endpoint: fetch the content with
   `GET /sync/versions/:contentHash/content`, then push it back with `action: "restore"`
-- When the chain holds only `delete` rows (retention pruning leaves such chains; see
-  `packages/server/src/lib/prune.ts`), `lastEncryptedPath` and `previousContentHash` are both `null`:
-  that row has nothing to restore, and the UI must say so and disable restore
+- When the chain holds only `delete` rows (retention pruning, or a vault history limit of 1, leaves such
+  chains; see `packages/server/src/lib/prune.ts` and the **History limit** section above),
+  `lastEncryptedPath` and `previousContentHash` are both `null`: that row has nothing to restore, and
+  the UI must say so and disable restore
 - `deletedByDeviceName` is simply the name recorded on the delete version row; the UI displays it
   directly, with no query needed
 - `POST /sync/deleted/clear` is a wholesale and **irreversible** cleanup (deleting rows + reclaiming

@@ -1,4 +1,5 @@
 import type { ApiErrorCode } from "./errors";
+import type { HistoryLimits } from "./sync";
 
 /**
  * Fixed plaintext encrypted with the vault's AES-256-GCM key at creation time.
@@ -9,10 +10,36 @@ import type { ApiErrorCode } from "./errors";
  */
 export const KEY_CHECK_VALUE = "courier-key-check";
 
+/**
+ * How many versions of each file the **vault** keeps — the server-side retention
+ * policy, shared by every device of that vault.
+ *
+ * Stored on the vault row (not on a device, not on the account): a limit changed on one
+ * device applies to the next push from any device, because the number the trim uses is
+ * read from the vault by the server, not stated by the pusher. The pusher only states the
+ * file's **kind** (`files[].historyKind` in the push frame), which is the one thing the
+ * server cannot see inside an encrypted path.
+ */
+export interface VaultHistorySettings {
+  /** Versions kept for each markdown note and `.canvas` file. */
+  historyLimitDocuments: number;
+  /** Versions kept for every other file (images, audio, video, PDFs, …). */
+  historyLimitAttachments: number;
+}
+
+/** A vault as the API lists it: identity, name and the two retention limits. */
+export type VaultSummary = {
+  id: string;
+  name: string;
+  createdAt: string;
+} & VaultHistorySettings;
+
 export interface CreateVaultResponse {
   id: string;
   name: string;
   createdAt: string;
+  historyLimitDocuments: number;
+  historyLimitAttachments: number;
 }
 
 export interface VaultKeyCheckResponse {
@@ -25,7 +52,30 @@ export interface VaultEncryptionSaltResponse {
 }
 
 export interface ListVaultsResponse {
-  vaults: Array<{ id: string; name: string; createdAt: string }>;
+  vaults: VaultSummary[];
+}
+
+/**
+ * `PATCH /api/vaults/:id`: rename the vault and/or change its retention limits.
+ *
+ * Every field is optional, but a body with none of them is refused — an empty update is
+ * a caller that built its request wrong, not a no-op to acknowledge.
+ */
+export interface UpdateVaultRequest {
+  name?: string;
+  historyLimitDocuments?: number;
+  historyLimitAttachments?: number;
+}
+
+/** The vault after an update (or read back), with the limits now in force. */
+export type VaultSettingsResponse = {
+  id: string;
+  name: string;
+} & VaultHistorySettings;
+
+/** A vault's two limits as the `HistoryLimits` record the trim and the UI work with. */
+export function historyLimitsOf(vault: VaultHistorySettings): HistoryLimits {
+  return { documents: vault.historyLimitDocuments, attachments: vault.historyLimitAttachments };
 }
 
 export type WsClientMessage =
@@ -61,6 +111,14 @@ export type WsServerMessage =
     }
   | { type: "unsubscribed"; vaultId: string }
   | { type: "vault_deleted"; vaultId: string }
+  /**
+   * The vault's retention limits changed — on another device, or through the API.
+   *
+   * Sent to every session subscribed to the vault, so an open settings page shows the new
+   * numbers without being reopened. The limits are display state for the client (the
+   * server applies them itself when it trims); the event is not a sync instruction.
+   */
+  | { type: "vault_settings"; vaultId: string; historyLimits: HistoryLimits }
   | { type: "api_key_revoked"; vaultId: string }
   /**
    * The account was disabled by the host: the key, its vaults and their data are all

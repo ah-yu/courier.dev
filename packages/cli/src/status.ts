@@ -1,6 +1,8 @@
 import { FILE_TYPE_GROUPS, type SyncLeaseInfo } from "@courier/engine";
+import type { HistoryLimits } from "@courier/shared";
 import {
   describeExcludedFolderList,
+  describeHistoryLimits,
   formatMegabytes,
   syncScopeOf,
   vaultDeviceName,
@@ -37,6 +39,11 @@ export interface CliVaultSummary {
   fileTypes: string[];
   /** The account's size cap in bytes; `0` means unlimited. Same for every vault. */
   maxFileBytes: number;
+  /**
+   * The vault's retention limits, as the server reported them; `null` when it could not
+   * be read (an offline machine still has to render a status block).
+   */
+  historyLimits: HistoryLimits | null;
   excludedFolders: string[];
   oversizeFiles: string[];
   conflictFiles: string[];
@@ -64,6 +71,11 @@ export interface VaultStatusInput {
   state: string | null;
   conflictFiles: string[];
   oversizeFiles?: string[];
+  /**
+   * The vault's retention limits, from the server (`GET /api/vaults`); omitted or `null`
+   * when the read was impossible — a status block must still render offline.
+   */
+  historyLimits?: HistoryLimits | null;
   daemon: DaemonStatus;
   lease: SyncLeaseInfo | null;
   coexistence: Coexistence;
@@ -82,6 +94,7 @@ export function buildVaultSummary(
   state: string | null,
   conflictFiles: string[],
   oversizeFiles: string[] = [],
+  historyLimits: HistoryLimits | null = null,
 ): CliVaultSummary {
   const scope = syncScopeOf(vault, config.accountMaxFileBytes);
   return {
@@ -92,6 +105,7 @@ export function buildVaultSummary(
     hasState: state !== null,
     fileTypes: FILE_TYPE_GROUPS.filter((group) => scope.fileTypes[group]),
     maxFileBytes: scope.maxFileBytes,
+    historyLimits,
     excludedFolders: scope.excludedFolders,
     oversizeFiles,
     conflictFiles,
@@ -113,6 +127,7 @@ export function buildStatusReport(
         input.state,
         input.conflictFiles,
         input.oversizeFiles ?? [],
+        input.historyLimits ?? null,
       ),
       daemon: input.daemon,
       lease: input.lease,
@@ -174,6 +189,12 @@ export function formatStatusLines(report: CliStatusReport): string[] {
         vault.hasState ? t("cli.status.value.tracked") : t("cli.status.value.noState"),
       ],
       [t("cli.status.label.fileTypes"), describeFileTypeLine(vault)],
+      [
+        t("cli.status.label.historyLimit"),
+        vault.historyLimits
+          ? describeHistoryLimits(vault.historyLimits)
+          : t("cli.status.historyLimit.unknown"),
+      ],
       [t("cli.status.label.excluded"), describeExcludedFolderList(vault.excludedFolders)],
       [t("cli.status.label.conflicts"), describeConflicts(vault.conflictFiles)],
     ];

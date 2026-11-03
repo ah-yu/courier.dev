@@ -17,6 +17,7 @@ import {
   statePath,
 } from "../../cli/src/config";
 import { setUserMaxFileBytes, startTestServer, type TestServer } from "./harness/server";
+import { vaultSettings } from "./harness/api";
 import { createTestVault, makeVaultMaterial } from "./harness/vault";
 
 /**
@@ -254,10 +255,16 @@ describe("cli commands e2e — the contract a supervising process reads", () => 
       "pdf,images",
       "--exclude-folders",
       "private,cache",
+      "--history-limit-documents",
+      "500",
+      "--history-limit-attachments",
+      "5",
     ]);
 
     expect(lines[0]).toContain(remote.id);
     expect(lines[0]).toContain(vaultPath);
+    // The scope flags print what they stored, including the two history limits.
+    expect(lines.join("\n")).toContain("History versions: notes/canvas 500, attachments 5.");
     const bound = loadConfig()?.vaults[0];
     expect(bound).toMatchObject({
       vaultId: remote.id,
@@ -271,6 +278,13 @@ describe("cli commands e2e — the contract a supervising process reads", () => 
     expect(bound?.encryptionKeyB64).not.toBe("vault-pass-1");
     expect(bound?.fileTypes).toMatchObject({ pdf: true, images: true });
     expect(bound?.excludedFolders?.toSorted()).toEqual(["cache", "private"]);
+    // The limits are the **vault's** state, not the binding's: the flags were sent to the
+    // server, and the printed line is what the vault now holds.
+    expect(bound).not.toHaveProperty("historyLimits");
+    expect(await vaultSettings(server, remote.id)).toMatchObject({
+      historyLimitDocuments: 500,
+      historyLimitAttachments: 5,
+    });
   }, 120_000);
 
   it("refuses a wrong vault password without changing the stored binding", async () => {
@@ -319,7 +333,7 @@ describe("cli commands e2e — the contract a supervising process reads", () => 
     expect(loadConfig()?.vaults.map((vault) => vault.vaultId)).toEqual([first.id]);
   }, 120_000);
 
-  it("updates a binding's label, file types and exclusions without reconnecting", async () => {
+  it("updates a binding's label, file types, exclusions and history limits without reconnecting", async () => {
     resetConfig();
     const material = await makeVaultMaterial("pass-update");
     const remote = await createTestVault(server, "更新库", material);
@@ -346,12 +360,22 @@ describe("cli commands e2e — the contract a supervising process reads", () => 
       "images",
       "--exclude-folders",
       "archive",
+      // One flag only: the other half of the vault's record has to survive the update.
+      "--history-limit-documents",
+      "50",
     ]);
 
     const bound = loadConfig()?.vaults[0];
     expect(bound?.deviceName).toBe("客厅");
     expect(bound?.fileTypes).toMatchObject({ images: true });
     expect(bound?.excludedFolders).toEqual(["archive"]);
+    // The untouched half keeps the vault's default, and nothing about the limits is
+    // written to this machine's config: they are the vault's server state.
+    expect(bound).not.toHaveProperty("historyLimits");
+    expect(await vaultSettings(server, remote.id)).toMatchObject({
+      historyLimitDocuments: 50,
+      historyLimitAttachments: 10,
+    });
     // Still the same binding: no new vault id, no second entry.
     expect(loadConfig()?.vaults).toHaveLength(1);
     expect(bound?.vaultId).toBe(remote.id);
@@ -422,6 +446,7 @@ describe("cli commands e2e — the contract a supervising process reads", () => 
         vaultName: string;
         hasState: boolean;
         excludedFolders: string[];
+        historyLimits: { documents: number; attachments: number };
         conflictFiles: string[];
         oversizeFiles: string[];
         daemon: { running: boolean };
@@ -432,6 +457,8 @@ describe("cli commands e2e — the contract a supervising process reads", () => 
     expect(summary?.vaultName).toBe("状态库");
     expect(summary?.hasState).toBe(true);
     expect(summary?.excludedFolders).toEqual(["private"]);
+    // What the server keeps of each file is part of the binding a supervisor reports.
+    expect(summary?.historyLimits).toEqual({ documents: 200, attachments: 10 });
     expect(summary?.conflictFiles).toEqual([parked]);
     expect(summary?.oversizeFiles).toEqual([]);
     expect(summary?.daemon.running).toBe(false);

@@ -209,6 +209,21 @@ export class VersionHistoryView extends ItemView {
   }
 
   /**
+   * Re-read the chain because the vault's retention limits changed.
+   *
+   * A trim is not a vault event, so nothing else would tell this tab: without this the list
+   * keeps rows whose content the server has already reclaimed, and opening one shows "cannot
+   * fetch or decrypt". The re-read is **silent** (a reader keeps their place unless the row
+   * itself is gone, which `reload` then moves to the head) and skips a tab that shows a vault
+   * other than the connected one.
+   */
+  refreshAfterLimitsChange(): void {
+    if (!this.opened || !this.target) return;
+    if (this.host.settings.connectedVaultId !== this.target.vaultId) return;
+    void this.reload(true);
+  }
+
+  /**
    * Follow the chain's file while the tab is open.
    *
    * A save in another pane pushes a version, and a rename moves the chain: without this the

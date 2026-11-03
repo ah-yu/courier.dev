@@ -56,6 +56,7 @@ function handBuiltFile(overrides: Record<string, unknown> = {}): Record<string, 
     mtimeMs: 0,
     baseVersionId: null,
     contentLength: 0,
+    historyKind: "documents",
     ...overrides,
   };
 }
@@ -483,6 +484,7 @@ describe("large files and many files e2e", () => {
             baseVersionId,
             content: null,
             contentChunks: chunkCount,
+            historyKind: "documents",
           },
         ],
         { deviceName: "chunk-test" },

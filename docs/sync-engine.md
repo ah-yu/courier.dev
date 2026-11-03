@@ -554,7 +554,10 @@ file now lives at.
   desktop, Bun's timers are `unref`'d so an idle daemon can exit, and a runtime with no process table
   (the plugin on mobile) leaves the lease deciding on expiry alone.
   `user_key_revoked` / `user_key_disabled` / `vault_deleted` stop the host **before**
-  reporting, on both clients. So does an **HTTP** `401`/`403` (`UNAUTHORIZED`, `KEY_EXPIRED`,
+  reporting, on both clients. `vault_settings` is the one exception that is neither terminal nor
+  sync work: the vault's retention limits are display state (the server trims by its own copy), so the
+  host only forwards the pair to `onVaultSettings`, which is how an open settings page follows a change
+  made on another device. So does an **HTTP** `401`/`403` (`UNAUTHORIZED`, `KEY_EXPIRED`,
   `KEY_DISABLED`): a pass that fails on a dead credential used to be retried every pass, which left a
   client that looked like it was syncing while every request it made was refused. One callback,
   `onAuthFailure(reason)`, carries the three ways a credential stops working; each host decides what the
@@ -625,4 +628,4 @@ file now lives at.
   moved on from — writing there would leave one chain live at two paths; and the version-history view and
   the recycle bin share one interaction (`packages/plugin/src/shared/restore-flow.ts`), so an occupied path
   is answered with the same name dialog on both. A chain whose only remaining version is the tombstone
-  (retention pruning removed the restorable one) is not offered a restore at all.
+  (retention pruning or the vault's history limit removed the restorable one) is not offered a restore at all.

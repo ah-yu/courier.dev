@@ -14,9 +14,11 @@ import {
   clearState,
   describeExcludedFolders,
   describeFileTypes,
+  describeHistoryLimits,
   excludedFoldersFromFlags,
   fileTypesFromFlags,
   findVault,
+  historyLimitPatchFromFlags,
   loadConfig,
   loadState,
   overlappingVaults,
@@ -43,9 +45,11 @@ import { buildStatusReport, formatStatusLines, type VaultStatusInput } from "./s
 import { BUILD_TIME, GIT_SHA, VERSION } from "./version";
 import {
   ApiClientError,
+  historyLimitsOf,
   normalizeDeviceName,
   runtimeLabel,
   type CreateVaultResponse,
+  type HistoryLimits,
 } from "@courier/shared";
 
 /** Read the stored config or exit with the command that creates one. */
@@ -75,6 +79,10 @@ interface BindVaultOptions {
   syncFileTypes?: string | boolean;
   syncOtherTypes?: boolean;
   excludeFolders?: string;
+  /** How many versions of notes/canvas to keep on the server (absent = keep stored). */
+  historyLimitDocuments?: string;
+  /** How many versions of every other file to keep (absent = keep stored). */
+  historyLimitAttachments?: string;
 }
 
 /**
@@ -108,11 +116,16 @@ function sameVaultPath(left: string, right: string): boolean {
  * Bind a local folder to a remote vault and store the binding. It prints nothing: the
  * command that called it decides what to report, so `vault create --json` can emit one
  * machine-readable line.
+ *
+ * When the command states `--history-limit-*`, those flags go to the **server** (the
+ * limits are vault-level state) and the returned `historyLimits` is what the vault now
+ * holds; without them it is whatever the server last reported (or `null` if that read
+ * failed — the limits are not something a bind has to have).
  */
 async function bindVault(
   config: CliConfig,
   options: BindVaultOptions,
-): Promise<{ vault: CliVault; count: number }> {
+): Promise<{ vault: CliVault; count: number; historyLimits: HistoryLimits | null }> {
   const previous = findVault(config, options.vaultId) ?? undefined;
   assertPathFree(config, options.vaultId, options.path);
   // A binding's sync state is keyed by vault id, not by folder. Re-binding the same vault
@@ -126,9 +139,11 @@ async function bindVault(
 
   let fileTypes;
   let excludedFolders;
+  let historyLimitPatch = null;
   try {
     fileTypes = fileTypesFromFlags(previous?.fileTypes, options);
     excludedFolders = excludedFoldersFromFlags(previous?.excludedFolders, options);
+    historyLimitPatch = historyLimitPatchFromFlags(options);
   } catch (err) {
     fail(err instanceof Error ? err.message : String(err));
   }
@@ -138,10 +153,8 @@ async function bindVault(
   // "工作笔记" rather than the local folder's name. A failed list must not fail the bind:
   // the name is display metadata, and the folder/key are what the binding needs.
   const listed = await client.listVaults().catch(() => null);
-  const remoteName =
-    options.vaultName?.trim() ||
-    listed?.vaults.find((entry) => entry.id === options.vaultId)?.name?.trim() ||
-    previous?.vaultName;
+  const listedVault = listed?.vaults.find((entry) => entry.id === options.vaultId);
+  const remoteName = options.vaultName?.trim() || listedVault?.name?.trim() || previous?.vaultName;
   const { encryptionSalt } = await client.getEncryptionSalt(options.vaultId);
   const { keyCheck } = await client.getKeyCheck(options.vaultId);
   const key = await deriveEncryptionKey(options.password, encryptionSalt);
@@ -178,7 +191,12 @@ async function bindVault(
     );
   }
   saveConfig({ ...config, vaults, accountMaxFileBytes: me.maxFileBytes });
-  return { vault: nextVault, count: vaults.length };
+  const historyLimits = historyLimitPatch
+    ? historyLimitsOf(await client.updateVault(options.vaultId, historyLimitPatch))
+    : listedVault
+      ? historyLimitsOf(listedVault)
+      : null;
+  return { vault: nextVault, count: vaults.length, historyLimits };
 }
 
 /**
@@ -292,6 +310,8 @@ export function createProgram(): Command {
     .option("--sync-file-types [types]", t("cli.option.syncFileTypes"))
     .option("--sync-other-types", t("cli.option.syncOtherTypes"))
     .option("--exclude-folders <paths>", t("cli.option.excludeFolders"))
+    .option("--history-limit-documents <n>", t("cli.option.historyLimitDocuments"))
+    .option("--history-limit-attachments <n>", t("cli.option.historyLimitAttachments"))
     .action(
       async (options: {
         id: string;
@@ -301,6 +321,8 @@ export function createProgram(): Command {
         syncFileTypes?: string | boolean;
         syncOtherTypes?: boolean;
         excludeFolders?: string;
+        historyLimitDocuments?: string;
+        historyLimitAttachments?: string;
       }) => {
         const config = requireConfig();
         const password = options.password ?? process.env.COURIER_VAULT_PASSWORD;
@@ -308,7 +330,11 @@ export function createProgram(): Command {
         if (options.deviceName !== undefined && !options.deviceName.trim()) {
           fail(t("cli.error.deviceNameRequired"));
         }
-        const { vault: bound, count } = await bindVault(config, {
+        const {
+          vault: bound,
+          count,
+          historyLimits,
+        } = await bindVault(config, {
           vaultId: options.id,
           path: options.path,
           password,
@@ -316,6 +342,8 @@ export function createProgram(): Command {
           syncFileTypes: options.syncFileTypes,
           syncOtherTypes: options.syncOtherTypes,
           excludeFolders: options.excludeFolders,
+          historyLimitDocuments: options.historyLimitDocuments,
+          historyLimitAttachments: options.historyLimitAttachments,
         });
         console.log(
           t("cli.connect.connected", {
@@ -331,6 +359,11 @@ export function createProgram(): Command {
             value: describeExcludedFolders(bound),
           }),
         );
+        if (historyLimits) {
+          console.log(
+            t("cli.connect.historyLimits", { value: describeHistoryLimits(historyLimits) }),
+          );
+        }
       },
     );
 
@@ -344,6 +377,8 @@ export function createProgram(): Command {
     .option("--sync-file-types [types]", t("cli.option.syncFileTypes"))
     .option("--sync-other-types", t("cli.option.syncOtherTypes"))
     .option("--exclude-folders <paths>", t("cli.option.excludeFolders"))
+    .option("--history-limit-documents <n>", t("cli.option.historyLimitDocuments"))
+    .option("--history-limit-attachments <n>", t("cli.option.historyLimitAttachments"))
     .option("--json", t("cli.option.json"))
     .action(
       async (options: {
@@ -354,6 +389,8 @@ export function createProgram(): Command {
         syncFileTypes?: string | boolean;
         syncOtherTypes?: boolean;
         excludeFolders?: string;
+        historyLimitDocuments?: string;
+        historyLimitAttachments?: string;
         json?: boolean;
       }) => {
         const config = requireConfig();
@@ -383,8 +420,13 @@ export function createProgram(): Command {
         // command.
         let bound: CliVault;
         let count: number;
+        let historyLimits: HistoryLimits | null;
         try {
-          ({ vault: bound, count } = await bindVault(config, {
+          ({
+            vault: bound,
+            count,
+            historyLimits,
+          } = await bindVault(config, {
             vaultId: created.id,
             path: options.path,
             password,
@@ -393,6 +435,8 @@ export function createProgram(): Command {
             syncFileTypes: options.syncFileTypes,
             syncOtherTypes: options.syncOtherTypes,
             excludeFolders: options.excludeFolders,
+            historyLimitDocuments: options.historyLimitDocuments,
+            historyLimitAttachments: options.historyLimitAttachments,
           }));
         } catch (err) {
           await client.deleteVault(created.id).catch(() => undefined);
@@ -409,6 +453,11 @@ export function createProgram(): Command {
         console.log(t("cli.connect.deviceName", { value: vaultDeviceName(config, bound) }));
         console.log(t("cli.connect.fileTypes", { value: describeFileTypes(bound) }));
         console.log(t("cli.connect.excludedFolders", { value: describeExcludedFolders(bound) }));
+        if (historyLimits) {
+          console.log(
+            t("cli.connect.historyLimits", { value: describeHistoryLimits(historyLimits) }),
+          );
+        }
       },
     );
 
@@ -420,6 +469,8 @@ export function createProgram(): Command {
     .option("--sync-file-types [types]", t("cli.option.syncFileTypes"))
     .option("--sync-other-types", t("cli.option.syncOtherTypes"))
     .option("--exclude-folders <paths>", t("cli.option.excludeFolders"))
+    .option("--history-limit-documents <n>", t("cli.option.historyLimitDocuments"))
+    .option("--history-limit-attachments <n>", t("cli.option.historyLimitAttachments"))
     .action(
       async (options: {
         id: string;
@@ -427,6 +478,8 @@ export function createProgram(): Command {
         syncFileTypes?: string | boolean;
         syncOtherTypes?: boolean;
         excludeFolders?: string;
+        historyLimitDocuments?: string;
+        historyLimitAttachments?: string;
       }) => {
         const config = requireConfig();
         const bound = findVault(config, options.id);
@@ -437,9 +490,11 @@ export function createProgram(): Command {
         }
         let fileTypes;
         let excludedFolders;
+        let historyLimitPatch = null;
         try {
           fileTypes = fileTypesFromFlags(bound.fileTypes, options);
           excludedFolders = excludedFoldersFromFlags(bound.excludedFolders, options);
+          historyLimitPatch = historyLimitPatchFromFlags(options);
         } catch (err) {
           fail(err instanceof Error ? err.message : String(err));
         }
@@ -447,9 +502,8 @@ export function createProgram(): Command {
         // pick it up without reconnecting; a failed read keeps the stored one.
         const client = createCliClient({ serverUrl: config.serverUrl, userKey: config.userKey });
         const listed = await client.listVaults().catch(() => null);
-        const vaultName =
-          listed?.vaults.find((entry) => entry.id === bound.vaultId)?.name?.trim() ||
-          bound.vaultName;
+        const listedVault = listed?.vaults.find((entry) => entry.id === bound.vaultId);
+        const vaultName = listedVault?.name?.trim() || bound.vaultName;
         const next: CliVault = {
           ...bound,
           vaultName,
@@ -461,6 +515,20 @@ export function createProgram(): Command {
           ...config,
           vaults: config.vaults.map((entry) => (entry.vaultId === bound.vaultId ? next : entry)),
         });
+        // The limits are the vault's, so a flag is a request to the server; the line below
+        // prints what the vault holds afterwards (the PATCH answer, or the read above).
+        let historyLimits: HistoryLimits | null = null;
+        if (historyLimitPatch) {
+          try {
+            historyLimits = historyLimitsOf(
+              await client.updateVault(bound.vaultId, historyLimitPatch),
+            );
+          } catch (err) {
+            fail(err instanceof Error ? err.message : String(err));
+          }
+        } else if (listedVault) {
+          historyLimits = historyLimitsOf(listedVault);
+        }
         console.log(
           t("cli.update.saved", {
             vaultId: bound.vaultId,
@@ -469,6 +537,11 @@ export function createProgram(): Command {
             folders: describeExcludedFolders(next),
           }),
         );
+        if (historyLimits) {
+          console.log(
+            t("cli.connect.historyLimits", { value: describeHistoryLimits(historyLimits) }),
+          );
+        }
       },
     );
 
@@ -570,16 +643,23 @@ export function createProgram(): Command {
       const selected = options.vault ? selectVaults(config, options.vault) : config.vaults;
       // The file cap belongs to the account's key and the administrator sets it, so
       // ask the server for the current value; a cached value is the fallback when it
-      // cannot be reached (the daemon would be unable to sync then anyway).
+      // cannot be reached (the daemon would be unable to sync then anyway). The same
+      // client reads each vault's retention limits, which are **vault-level** server
+      // state: a status read has to show what the server holds, not a local copy.
+      const client = createCliClient({ serverUrl: config.serverUrl, userKey: config.userKey });
       let effective = config;
+      let vaultLimits = new Map<string, HistoryLimits>();
       try {
-        const me = await createCliClient({
-          serverUrl: config.serverUrl,
-          userKey: config.userKey,
-        }).getMe();
+        const me = await client.getMe();
         effective = { ...config, accountMaxFileBytes: me.maxFileBytes };
       } catch {
         // Keep the last value written by register/connect/run.
+      }
+      try {
+        const { vaults } = await client.listVaults();
+        vaultLimits = new Map(vaults.map((entry) => [entry.id, historyLimitsOf(entry)]));
+      } catch {
+        // A status block still renders offline; the limit row says it could not be read.
       }
       // Conflict files never sync, so they are the only place a resolved conflict is
       // visible on a headless machine; the same listing answers which files the size
@@ -594,6 +674,7 @@ export function createProgram(): Command {
           state: loadState(current.vaultId),
           conflictFiles: await adapter.listConflictFiles(),
           oversizeFiles: (await adapter.listOversizeFiles()).map((entry) => entry.path),
+          historyLimits: vaultLimits.get(current.vaultId) ?? null,
           daemon: daemonStatus(current.vaultId),
           // A record that has expired, or whose CLI process no longer exists on this
           // machine, is not a current owner: the next acquire takes it over.

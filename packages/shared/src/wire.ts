@@ -1,4 +1,10 @@
-import { SYNC_ACTIONS, trimDeviceName, type SyncAction } from "./sync";
+import {
+  HISTORY_KINDS,
+  SYNC_ACTIONS,
+  trimDeviceName,
+  type HistoryKind,
+  type SyncAction,
+} from "./sync";
 import { CHUNKED_TRANSFER_THRESHOLD, chunkCountFor } from "./blob";
 
 /**
@@ -85,6 +91,17 @@ export interface PushFileFrame {
    * version always has `content: null` and `sizeBytes > 0`.
    */
   contentChunks?: number;
+  /**
+   * What kind of file this version belongs to.
+   *
+   * The server maps it to the **vault's** own `HistoryLimits` when it trims the chain:
+   * `"documents"` for markdown and canvas, `"attachments"` for everything else. The
+   * client states it because the category is only visible in the plaintext path, which
+   * the server never sees; the numbers themselves live on the vault, so every device of
+   * the vault is trimmed by the same policy (see `@courier/shared`'s `vault.ts` and
+   * `@courier/server`'s `tryInsertFileVersions`).
+   */
+  historyKind: HistoryKind;
 }
 
 /** The per-file header entry, as it appears in the JSON header. */
@@ -99,6 +116,7 @@ interface PushFileHeaderEntry {
   baseVersionId: string | null;
   contentLength: number;
   contentChunks?: number;
+  historyKind: HistoryKind;
 }
 
 /**
@@ -167,6 +185,14 @@ export function buildPushBody(
     }
     const contentLength = file.content?.byteLength ?? 0;
     contentBytes += contentLength;
+    // The kind is what the server's trim is decided from — it picks the vault's document
+    // or attachment limit — so a frame without one, or with a value the server does not
+    // know, must fail here on the client rather than as a 422 on the whole batch.
+    if (!HISTORY_KINDS.includes(file.historyKind)) {
+      throw new WireFormatError(
+        `${file.fileId} states historyKind ${String(file.historyKind)}; it must be one of ${HISTORY_KINDS.join(", ")}`,
+      );
+    }
     header.push({
       fileId: file.fileId,
       encryptedPath: file.encryptedPath,
@@ -178,6 +204,7 @@ export function buildPushBody(
       baseVersionId: file.baseVersionId,
       contentLength,
       ...(file.contentChunks === undefined ? {} : { contentChunks: file.contentChunks }),
+      historyKind: file.historyKind,
     });
   }
 
@@ -267,6 +294,7 @@ export function parsePushBody(body: Uint8Array): PushBody {
       content:
         entry.contentLength === 0 ? null : body.subarray(offset, offset + entry.contentLength),
       ...(entry.contentChunks === undefined ? {} : { contentChunks: entry.contentChunks }),
+      historyKind: entry.historyKind,
     });
     offset += entry.contentLength;
   }
@@ -332,6 +360,7 @@ function readHeaderEntries(parsed: unknown): PushFileHeaderEntry[] {
       ...(entry.contentChunks === undefined
         ? {}
         : { contentChunks: readCount(entry, "contentChunks", index) }),
+      historyKind: readHistoryKind(entry, index),
     };
   });
 }
@@ -350,4 +379,15 @@ function readCount(entry: Record<string, unknown>, field: string, index: number)
     throw new WireFormatError(`files[${index}].${field} is not a non-negative integer`);
   }
   return value as number;
+}
+
+/** The file kind the server's trim is decided by: one of {@link HISTORY_KINDS}. */
+function readHistoryKind(entry: Record<string, unknown>, index: number): HistoryKind {
+  const value = entry["historyKind"];
+  if (typeof value !== "string" || !HISTORY_KINDS.includes(value as HistoryKind)) {
+    throw new WireFormatError(
+      `files[${index}].historyKind is not one of ${HISTORY_KINDS.join(", ")}`,
+    );
+  }
+  return value as HistoryKind;
 }

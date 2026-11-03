@@ -1,9 +1,11 @@
 import type {
   CreateVaultResponse,
   ListVaultsResponse,
+  UpdateVaultRequest,
   UserSummary,
   VaultEncryptionSaltResponse,
   VaultKeyCheckResponse,
+  VaultSettingsResponse,
   ListDeletedFilesResponse,
   ClearDeletedResponse,
   FileVersionHistoryResponse,
@@ -47,6 +49,17 @@ export type CreateVaultAction = (
 
 /** Action that lists all the user's remote vaults. */
 export type ListVaultsAction = () => Promise<ListVaultsResponse>;
+
+/**
+ * Action that changes a vault's name and/or its retention limits.
+ *
+ * The limits are **vault-level** server state, so this is the settings page's write path:
+ * the number the server trims with, shared by every device of the vault.
+ */
+export type UpdateVaultAction = (
+  id: string,
+  patch: UpdateVaultRequest,
+) => Promise<VaultSettingsResponse>;
 
 /**
  * Action that asks the server which account the configured user key belongs to.
@@ -117,6 +130,7 @@ export type ClearDeletedAction = (vaultId: string) => Promise<ClearDeletedRespon
 export interface PluginActions {
   createVault: CreateVaultAction;
   listVaults: ListVaultsAction;
+  updateVault: UpdateVaultAction;
   getMe: GetMeAction;
   getEncryptionSalt: GetEncryptionSaltAction;
   getKeyCheck: GetKeyCheckAction;

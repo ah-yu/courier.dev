@@ -18,6 +18,8 @@
  * decides *what kind of thing* a vault path is.
  */
 
+import type { HistoryKind } from "@courier/shared";
+
 /** A vault-wide file category the user can switch, besides the always-synced ones. */
 export type FileTypeGroup = "images" | "video" | "audio" | "pdf" | "otherTypes";
 
@@ -111,6 +113,21 @@ export function fileTypeOf(path: string): FileTypeGroup | "always" {
   const extension = extensionOf(path);
   if (ALWAYS_SYNCED_EXTENSIONS.includes(extension)) return "always";
   return EXTENSION_OWNER.get(extension) ?? "otherTypes";
+}
+
+/**
+ * Which side of the vault's retention split `path` falls on.
+ *
+ * Markdown and canvas are the vault's own content and get the deep history; every other
+ * synced path (an image, a PDF, a config-folder JSON) is an attachment and gets the
+ * shallow one. The number itself is the **vault's** (`VaultHistorySettings`, read by the
+ * server when it trims); the client only states this kind on each push, because the
+ * category is visible in the plaintext path and nowhere else. The rule is stated here,
+ * beside the table that already decides what kind of thing a path is, so both hosts
+ * classify a file the same way.
+ */
+export function historyKindFor(path: string): HistoryKind {
+  return fileTypeOf(path) === "always" ? "documents" : "attachments";
 }
 
 /**

@@ -12,8 +12,10 @@ import type {
 import type {
   CreateVaultResponse,
   ListVaultsResponse,
+  UpdateVaultRequest,
   VaultEncryptionSaltResponse,
   VaultKeyCheckResponse,
+  VaultSettingsResponse,
 } from "./vault";
 
 /**
@@ -182,6 +184,13 @@ export interface CourierClient {
 
   createVault(name: string, encryptionSalt: string, keyCheck: string): Promise<CreateVaultResponse>;
   listVaults(): Promise<ListVaultsResponse>;
+  /**
+   * Rename a vault and/or change its retention limits (`PATCH /api/vaults/:id`).
+   *
+   * The limits are **vault-level** state, so this is the write path every device of the
+   * vault shares; the answer is the vault as it now stands, limits included.
+   */
+  updateVault(vaultId: string, patch: UpdateVaultRequest): Promise<VaultSettingsResponse>;
   /** The account the configured key belongs to — the cheapest "is this key good" read. */
   getMe(): Promise<UserSummary>;
   getEncryptionSalt(vaultId: string): Promise<VaultEncryptionSaltResponse>;
@@ -313,6 +322,13 @@ export function createCourierClient(options: CourierClientOptions): CourierClien
 
     async listVaults() {
       return await json<ListVaultsResponse>("/vaults");
+    },
+
+    async updateVault(vaultId, patch) {
+      return await json<VaultSettingsResponse>(`/vaults/${segment(vaultId)}`, {
+        method: "PATCH",
+        body: patch,
+      });
     },
 
     async getMe() {

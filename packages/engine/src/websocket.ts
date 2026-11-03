@@ -1,10 +1,11 @@
-import type { ApiErrorCode, WsServerMessage } from "@courier/shared";
+import type { ApiErrorCode, HistoryLimits, WsServerMessage } from "@courier/shared";
 import type { Platform, TimerHandle } from "./platform";
 
 export type WsConnectionState = "disconnected" | "connecting" | "connected" | "error";
 
 export type WsEvent =
   | { type: "vault_deleted"; vaultId: string }
+  | { type: "vault_settings"; historyLimits: HistoryLimits }
   | { type: "user_key_revoked" }
   | { type: "user_key_disabled" }
   | {
@@ -128,6 +129,12 @@ export class SyncWebSocket {
         case "vault_deleted":
           this.opts.onEvent({ type: "vault_deleted", vaultId: msg.vaultId });
           this.disconnect();
+          break;
+        case "vault_settings":
+          // The vault's retention limits moved. Nothing in the engine reads them (the
+          // server trims by its own copy); a host forwards the numbers to whatever shows
+          // them, such as the settings page that may already be open.
+          this.opts.onEvent({ type: "vault_settings", historyLimits: msg.historyLimits });
           break;
         case "api_key_revoked":
           this.opts.onEvent({ type: "user_key_revoked" });

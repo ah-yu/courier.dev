@@ -481,6 +481,31 @@ describe("obsidian-stub — the leaves a view lives in", () => {
     expect(container.children).toEqual([button.buttonEl]);
     expect(button.buttonEl.text).toBe("替换");
   });
+
+  it("makes a button's label and icon replace each other, and its tooltip an aria-label", () => {
+    // The app writes `textContent` for a label and empties the element before painting an
+    // icon: a stub that kept both would let a test see a button the app never renders.
+    const button = new ButtonComponent(createFakeEl());
+
+    button.setButtonText("保存");
+    expect(button.text).toBe("保存");
+    expect(button.icon).toBe("");
+    expect(button.buttonEl.text).toBe("保存");
+
+    button.setIcon("pencil");
+    expect(button.icon).toBe("pencil");
+    expect(button.text).toBe("");
+    expect(button.buttonEl.text).toBe("");
+
+    button.setTooltip("修改");
+    expect(button.tooltip).toBe("修改");
+    expect(button.buttonEl.getAttribute("aria-label")).toBe("修改");
+
+    // …and the other way round: an icon painted first is gone once a label is written.
+    button.setButtonText("保存");
+    expect(button.icon).toBe("");
+    expect(button.buttonEl.text).toBe("保存");
+  });
 });
 
 /**

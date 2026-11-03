@@ -199,6 +199,8 @@ describe("syncScopeOf", () => {
     // Normalized like every other entry point: a trailing slash is not a second folder.
     expect(scope.excludedFolders).toEqual(["private"]);
     expect(scope.maxFileBytes).toBe(4096);
+    // The retention limits are the vault's server state, not part of this device's scope.
+    expect(scope).not.toHaveProperty("historyLimits");
   });
 
   it("uses the vault's own config folder rather than assuming .obsidian", () => {

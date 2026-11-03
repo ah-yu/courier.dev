@@ -1249,6 +1249,189 @@ export async function clickPauseRow(vault: string, label: string): Promise<boole
 }
 
 /**
+ * Open Courier's settings tab in the vault window.
+ *
+ * The history-limit rows are drawn from the server's vault settings, which the plugin
+ * reads when the row renders; a caller waits for {@link readHistoryLimitRow} to answer
+ * afterwards instead of assuming the request finished.
+ */
+export async function openPluginSettings(vault: string): Promise<boolean> {
+  // Before the open: this closes any Settings modal that popped out, so the one opened
+  // below renders in the vault window (an already-open popout would keep its focus branch).
+  await keepSettingsInVaultWindow(vault);
+  return await evalInVault<boolean>(
+    vault,
+    `
+    const p = app.plugins.plugins.courier;
+    if (!p) throw new Error('the Courier plugin is not loaded');
+    app.setting.open();
+    app.setting.openTabById(p.manifest.id);
+    if (p.settingTab && p.settingTab.update) p.settingTab.update();
+    ${SETTINGS_IN_WINDOW_ASSERTION}
+    // The settings page renders in this window; later reads find it through this.
+    window.__courierE2eSettingsDoc = (activeWindow && activeWindow.document) || document;
+    return true;
+    `,
+    60_000,
+  );
+}
+
+/** The settings page's history-limit row, read from its real DOM. */
+export interface HistoryLimitRowReading {
+  /** The number as displayed (the value span, not the hidden input). */
+  value: string;
+  /** The action button's label; `""` while it is the icon-only edit control. */
+  button: string;
+  /** Whether the button renders an icon (the pencil that opens the field). */
+  icon: boolean;
+  /** The button's `aria-label`/tooltip, which names the icon control. */
+  tooltip: string;
+  desc: string;
+  /** Whether the editable input is the control on screen. */
+  editing: boolean;
+}
+
+/**
+ * The history-limit row for `label` (the row's name), as the user sees it.
+ *
+ * Returns `null` while the row is not rendered, so the test waits instead of reading a
+ * half-built page. `editing` is the input's own `display`, which is what Obsidian's
+ * `hide()`/`show()` write; `icon` is the SVG the app paints for the icon-only edit
+ * control.
+ */
+export async function readHistoryLimitRow(
+  vault: string,
+  label: string,
+): Promise<HistoryLimitRowReading | null> {
+  return await evalInVault<HistoryLimitRowReading | null>(
+    vault,
+    `
+    const doc = ${SETTINGS_DOC_EXPR};
+    for (const row of doc.querySelectorAll('.modal.mod-settings .setting-item')) {
+      const name = row.querySelector('.setting-item-name');
+      if (!name || (name.textContent || '').trim() !== ${jsLiteral(label)}) continue;
+      const descEl = row.querySelector('.setting-item-description');
+      const valueEl = row.querySelector('.courier-history-limit-value');
+      const input = row.querySelector('.courier-history-limit-input');
+      const button = row.querySelector('button');
+      return {
+        value: valueEl ? (valueEl.textContent || '').trim() : '',
+        button: button ? (button.textContent || '').trim() : '',
+        icon: !!button && button.querySelector('svg') !== null,
+        tooltip: button ? button.getAttribute('aria-label') || '' : '',
+        desc: descEl ? (descEl.textContent || '').trim() : '',
+        editing: !!input && input.style.display !== 'none',
+      };
+    }
+    return null;
+    `,
+    60_000,
+  );
+}
+
+/**
+ * Put a history-limit row into edit mode through its pencil icon, without committing.
+ *
+ * Returns `false` while the row's control is missing; the answer is `true` only after the
+ * field it opens is on screen, so a caller can assert the edit state next.
+ */
+export async function openHistoryLimitEditor(vault: string, label: string): Promise<boolean> {
+  await keepSettingsInVaultWindow(vault);
+  return await evalInVault<boolean>(
+    vault,
+    `
+    const p = app.plugins.plugins.courier;
+    if (!p) throw new Error('the Courier plugin is not loaded');
+    app.setting.open();
+    app.setting.openTabById(p.manifest.id);
+    if (p.settingTab && p.settingTab.update) p.settingTab.update();
+    ${SETTINGS_IN_WINDOW_ASSERTION}
+    const doc = (activeWindow && activeWindow.document) || document;
+    window.__courierE2eSettingsDoc = doc;
+    for (const row of doc.querySelectorAll('.modal.mod-settings .setting-item')) {
+      const name = row.querySelector('.setting-item-name');
+      if (!name || (name.textContent || '').trim() !== ${jsLiteral(label)}) continue;
+      const control = row.querySelector('.setting-item-control button');
+      if (!control) return false;
+      control.click();
+      return row.querySelector('.courier-history-limit-input') !== null;
+    }
+    return false;
+    `,
+    60_000,
+  );
+}
+
+/**
+ * Press blank space in the settings page — outside every row.
+ *
+ * This is the gesture that must **cancel** an in-progress history-limit edit: the press
+ * lands on the content column, not on a row, so nothing belongs to the field.
+ */
+export async function clickSettingsBlank(vault: string): Promise<boolean> {
+  return await evalInVault<boolean>(
+    vault,
+    `
+    const doc = ${SETTINGS_DOC_EXPR};
+    const modal = doc.querySelector('.modal.mod-settings');
+    if (!modal) return false;
+    const content =
+      modal.querySelector('.vertical-tab-content') ||
+      modal.querySelector('.modal-content') ||
+      modal;
+    content.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true }));
+    return true;
+    `,
+    60_000,
+  );
+}
+
+/**
+ * Change a history-limit row through its **pencil → input → check** interaction.
+ *
+ * This is the user's path, not a direct call into the plugin: press the icon-only control
+ * (the pencil), type the number into the field the row now shows, press the same control
+ * again (now the check). Returns `false` while the control or the field is missing, so the
+ * caller can wait for the page.
+ */
+export async function editHistoryLimitRow(
+  vault: string,
+  label: string,
+  value: number,
+): Promise<boolean> {
+  await keepSettingsInVaultWindow(vault);
+  return await evalInVault<boolean>(
+    vault,
+    `
+    const p = app.plugins.plugins.courier;
+    if (!p) throw new Error('the Courier plugin is not loaded');
+    app.setting.open();
+    app.setting.openTabById(p.manifest.id);
+    if (p.settingTab && p.settingTab.update) p.settingTab.update();
+    ${SETTINGS_IN_WINDOW_ASSERTION}
+    const doc = (activeWindow && activeWindow.document) || document;
+    window.__courierE2eSettingsDoc = doc;
+    for (const row of doc.querySelectorAll('.modal.mod-settings .setting-item')) {
+      const name = row.querySelector('.setting-item-name');
+      if (!name || (name.textContent || '').trim() !== ${jsLiteral(label)}) continue;
+      // One control, two icons: the pencil opens the field, the check commits it.
+      const control = row.querySelector('.setting-item-control button');
+      if (!control) return false;
+      control.click();
+      const input = row.querySelector('.courier-history-limit-input');
+      if (!input) return false;
+      input.value = ${jsLiteral(String(value))};
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      control.click();
+      return true;
+    }
+    return false;
+    `,
+    60_000,
+  );
+}
+
+/**
  * The deleted paths and per-row warnings the recycle-bin dialog renders, read from its
  * real DOM.
  *

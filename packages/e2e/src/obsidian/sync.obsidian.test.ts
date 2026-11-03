@@ -19,7 +19,9 @@ import {
   deletedFiles,
   fileVersions,
   filesAtPath,
+  updateVaultSettings,
   vaultHistory,
+  vaultSettings,
   versionDeviceNames,
 } from "../harness/api";
 import { waitForAsync } from "../harness/wait";
@@ -30,6 +32,7 @@ import {
   NO_SETTINGS_GROUPS,
   type SettingsGroup,
 } from "../../../engine/src/index";
+import { DEFAULT_HISTORY_LIMITS } from "../../../shared/src/index";
 import { EXCLUDED_PATH_ROW_CLASS } from "../../../plugin/src/ui/file-explorer-excluded-folders";
 import { VERSION_HISTORY_ACTION_CLASS } from "../../../plugin/src/ui/file-explorer-actions";
 import { t } from "../../../plugin/src/i18n";
@@ -58,6 +61,7 @@ import {
   closeOpenModals,
   closeVersionHistories,
   configurePluginHost,
+  clickSettingsBlank,
   ensurePluginHostRunning,
   expandFileExplorerFolder,
   fileIdForPath,
@@ -77,6 +81,7 @@ import {
   readFileExplorerRowClass,
   readFileExplorerRowChips,
   readFileMenuTitles,
+  readHistoryLimitRow,
   readNotices,
   readPauseRow,
   readPluginStatus,
@@ -102,6 +107,9 @@ import {
   syncPluginLocale,
   vaultBasePath,
   writeConfigFileInVault,
+  editHistoryLimitRow,
+  openHistoryLimitEditor,
+  openPluginSettings,
   type PluginHostSetup,
 } from "./plugin-control";
 import {
@@ -3602,6 +3610,233 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
    * Deliberately the last case in the file: it pauses a vault that every earlier case
    * shares, so a failure here must not cascade into them.
    */
+  it("changes the vault's history limits from the settings page's pencil icon and Save", async () => {
+    // The limits are the vault's; this device edits them through the real row, and the
+    // value it shows afterwards is what the server stored.
+    const label = t("settings.historyLimit.documents.label");
+    const freshScope = {
+      resetSyncState: false,
+      settingsGroups: NO_SETTINGS_GROUPS,
+      fileTypes: DEFAULT_FILE_TYPES,
+      excludedFolders: [],
+    };
+    // Start from the documented defaults, so a failed earlier run cannot mask the read.
+    await updateVaultSettings(server, remote.id, {
+      historyLimitDocuments: DEFAULT_HISTORY_LIMITS.documents,
+      historyLimitAttachments: DEFAULT_HISTORY_LIMITS.attachments,
+    });
+    await configurePluginHost(names.a, { ...setup, deviceName: "obsidian-A" }, freshScope);
+
+    // The row renders the server's number as text, with a button that offers the change.
+    await waitForVaultState(() => openPluginSettings(names.a), "the settings page never opened");
+    await waitForVaultState(
+      async () =>
+        (await readHistoryLimitRow(names.a, label))?.value ===
+        String(DEFAULT_HISTORY_LIMITS.documents),
+      "the settings row never showed the vault's limit",
+    );
+    const before = (await readHistoryLimitRow(names.a, label))!;
+    // The idle control is a pencil icon, not a word; its tooltip carries the label.
+    expect(before.icon).toBe(true);
+    expect(before.button).toBe("");
+    expect(before.tooltip).toBe(t("settings.historyLimit.edit"));
+    expect(before.editing).toBe(false);
+
+    // Pressing blank space while the field is open cancels: the row goes back to its text
+    // and the number the vault holds is untouched (only the check icon commits).
+    await waitForVaultState(
+      () => openHistoryLimitEditor(names.a, label),
+      "the settings row never entered edit mode",
+    );
+    expect((await readHistoryLimitRow(names.a, label))?.editing).toBe(true);
+    await waitForVaultState(
+      () => clickSettingsBlank(names.a),
+      "the settings page had no blank space to press",
+    );
+    await waitForVaultState(
+      async () => (await readHistoryLimitRow(names.a, label))?.editing === false,
+      "pressing outside never cancelled the edit",
+    );
+    const cancelled = (await readHistoryLimitRow(names.a, label))!;
+    expect(cancelled.icon).toBe(true);
+    expect(cancelled.tooltip).toBe(t("settings.historyLimit.edit"));
+    expect(cancelled.desc).toBe(t("settings.historyLimit.documents.desc"));
+    expect((await vaultSettings(server, remote.id)).historyLimitDocuments).toBe(
+      DEFAULT_HISTORY_LIMITS.documents,
+    );
+
+    // Pencil → type → check, exactly the interaction a user performs.
+    await waitForVaultState(
+      () => editHistoryLimitRow(names.a, label, 60),
+      "the settings row never offered the pencil/check interaction",
+    );
+    await waitForVaultState(
+      async () => (await vaultSettings(server, remote.id)).historyLimitDocuments === 60,
+      "the vault's history limit never changed",
+    );
+    await waitForVaultState(async () => {
+      const row = await readHistoryLimitRow(names.a, label);
+      return (
+        row?.value === "60" &&
+        row.icon === true &&
+        row.button === "" &&
+        row.tooltip === t("settings.historyLimit.edit") &&
+        // The press was the confirmation: the description is the row's own text again.
+        row.desc === t("settings.historyLimit.documents.desc")
+      );
+    }, "the row never showed the saved number and its confirmation");
+
+    // Back to the defaults, so the cases after this one (and the next run) start clean.
+    await updateVaultSettings(server, remote.id, {
+      historyLimitDocuments: DEFAULT_HISTORY_LIMITS.documents,
+    });
+  });
+
+  it("shows a limit changed on the other device without reopening the settings page", async () => {
+    // The limits are the vault's; a page already open on B has to follow a change made on
+    // A. B never reopens the page and never calls its own write path — the socket's
+    // `vault_settings` repaints the row.
+    const label = t("settings.historyLimit.documents.label");
+    const freshScope = {
+      resetSyncState: false,
+      settingsGroups: NO_SETTINGS_GROUPS,
+      fileTypes: DEFAULT_FILE_TYPES,
+      excludedFolders: [],
+    };
+    await updateVaultSettings(server, remote.id, {
+      historyLimitDocuments: DEFAULT_HISTORY_LIMITS.documents,
+      historyLimitAttachments: DEFAULT_HISTORY_LIMITS.attachments,
+    });
+    await configurePluginHost(names.a, { ...setup, deviceName: "obsidian-A" }, freshScope);
+    await configurePluginHost(names.b, { ...setup, deviceName: "obsidian-B" }, freshScope);
+    await waitForVaultState(
+      async () =>
+        (await readPluginStatus(names.a)).wsState === "connected" &&
+        (await readPluginStatus(names.b)).wsState === "connected",
+      "one of the two vaults never connected its socket",
+    );
+
+    // B's settings page is open on the number the vault holds today.
+    await waitForVaultState(() => openPluginSettings(names.b), "the settings page never opened");
+    await waitForVaultState(
+      async () =>
+        (await readHistoryLimitRow(names.b, label))?.value ===
+        String(DEFAULT_HISTORY_LIMITS.documents),
+      "B's page never showed the vault's limit",
+    );
+
+    // A changes it through its own page.
+    await waitForVaultState(
+      () => editHistoryLimitRow(names.a, label, 45),
+      "A's settings page never accepted the change",
+    );
+    await waitForVaultState(
+      async () => (await vaultSettings(server, remote.id)).historyLimitDocuments === 45,
+      "the vault's history limit never changed",
+    );
+
+    // B's row follows, with no reopen and no manual refresh.
+    await waitForVaultState(
+      async () => (await readHistoryLimitRow(names.b, label))?.value === "45",
+      "B's open settings page never followed the change made on A",
+    );
+
+    // Restore the default for the cases after this one.
+    await updateVaultSettings(server, remote.id, {
+      historyLimitDocuments: DEFAULT_HISTORY_LIMITS.documents,
+    });
+  });
+
+  it("re-reads an open version-history page when the vault's limit trims it", async () => {
+    // The page is open on the whole chain, with an old version selected; the limit drops and
+    // the server reclaims that version. Without the re-read the list would keep the row and
+    // the pane would say it cannot fetch the content.
+    const path = "history-refresh.md";
+    const label = t("settings.historyLimit.documents.label");
+    const freshScope = {
+      resetSyncState: false,
+      settingsGroups: NO_SETTINGS_GROUPS,
+      fileTypes: DEFAULT_FILE_TYPES,
+      excludedFolders: [],
+    };
+    await updateVaultSettings(server, remote.id, {
+      historyLimitDocuments: DEFAULT_HISTORY_LIMITS.documents,
+      historyLimitAttachments: DEFAULT_HISTORY_LIMITS.attachments,
+    });
+    await configurePluginHost(names.a, { ...setup, deviceName: "obsidian-A" }, freshScope);
+
+    await vaultA.write(path, "v1");
+    await waitForVaultState(
+      async () => (await filesAtPath(server, remote.id, material.key, path)).length === 1,
+      "the note never reached the server",
+    );
+    await waitForVaultState(
+      async () => (await fileIdForPath(names.a, path)) !== null,
+      "the engine never tracked the note",
+    );
+    const fileId = (await fileIdForPath(names.a, path))!;
+    const chainLength = async (): Promise<number> =>
+      (await vaultHistory(server, remote.id)).find((chain) => chain.fileId === fileId)?.versions
+        .length ?? 0;
+    for (const [index, content] of ["v2", "v3"].entries()) {
+      await vaultA.write(path, content);
+      await waitForVaultState(
+        async () => (await chainLength()) === index + 2,
+        `version ${index + 2} never reached the server`,
+      );
+    }
+
+    await waitForVaultState(
+      () => clickVersionHistoryChip(names.a, path),
+      "the explorer never offered the version-history action",
+    );
+    await waitForVaultState(async () => {
+      const view = await readVersionHistoryView(names.a);
+      return view.open && view.rows.length === 3;
+    }, "the version-history page never listed the whole chain");
+
+    // Select the oldest version, which is the one the lowered limit will reclaim.
+    await waitForVaultState(
+      () => clickVersionHistoryRow(names.a, 2),
+      "the oldest version could not be selected",
+    );
+    await waitForVaultState(async () => {
+      const view = await readVersionHistoryView(names.a);
+      return view.rows[2]?.selected === true;
+    }, "the oldest version was never marked as the selection");
+
+    // Lower the limit from the settings page; this device trims and then re-reads the tab.
+    await waitForVaultState(
+      () => editHistoryLimitRow(names.a, label, 2),
+      "the settings page never accepted the lower limit",
+    );
+    await waitForVaultState(
+      async () => (await vaultSettings(server, remote.id)).historyLimitDocuments === 2,
+      "the vault's history limit never changed",
+    );
+
+    await waitForVaultState(async () => {
+      const view = await readVersionHistoryView(names.a);
+      // Two rows, the head selected, and no "cannot fetch" line where the pane now shows
+      // the head's content.
+      return view.rows.length === 2 && view.rows[0]?.selected === true && view.pane !== "";
+    }, "the open history page never re-read the trimmed chain");
+    const view = await readVersionHistoryView(names.a);
+    // Labels come from the plugin's catalog, so they follow the app's language: assert
+    // through `t()` (the suite syncs the test locale to the app) rather than a literal.
+    expect(view.rows.map((row) => row.action)).toEqual([
+      t("history.action.modify"),
+      t("history.action.modify"),
+    ]);
+    expect(view.pane).not.toContain(t("dialog.versionHistory.contentError"));
+
+    // Restore the default and leave the window as the next case expects to find it.
+    await updateVaultSettings(server, remote.id, {
+      historyLimitDocuments: DEFAULT_HISTORY_LIMITS.documents,
+    });
+    await closeVersionHistories(names.a);
+  });
+
   it("pauses and resumes syncing from the settings page's own row", async () => {
     const path = `${PROBE_DIR}/${PROBE_PREFIX}pause.md`;
     const peerPath = `${PROBE_DIR}/${PROBE_PREFIX}pause-peer.md`;

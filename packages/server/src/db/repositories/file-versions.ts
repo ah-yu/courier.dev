@@ -1,5 +1,6 @@
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
-import type { SyncAction } from "@courier/shared";
+import type { Statement } from "bun:sqlite";
+import type { HistoryLimits, SyncAction } from "@courier/shared";
 import { db, sqlite } from "../../db";
 import { fileVersions } from "../../db/schema";
 import type {
@@ -7,6 +8,7 @@ import type {
   DeleteFileVersionsByFileIdsFn,
   GetLatestVersionIdsFn,
   GetVersionChainFn,
+  IsContentHashReferencedFn,
   ListDeletedChainsFn,
   ListDeletedFileIdsFn,
   ListFileHeadsByVaultIdFn,
@@ -95,12 +97,30 @@ function placeholders(count: number): string {
  * A batch is a single `BEGIN … COMMIT`: at 100 files that is one fsync instead of a
  * hundred, which is where most of a first bind's server time used to go (see
  * `docs/first-bind-performance.md`).
+ *
+ * The same transaction also **trims** each chain to the limit the handler resolved from
+ * the vault's two values and the version's kind — the newest N rows, the row just
+ * appended included — and answers the content hashes of the rows it removed, so the
+ * caller can reclaim the blobs those rows were the last reference to (`handleSyncPush`).
+ * Doing it here rather than in a later pass is what makes the limit hold: the chain never
+ * outgrows N between a push and a sweep, and nothing else can append to it while the
+ * insert runs.
  */
 export const tryInsertFileVersions: TryInsertFileVersionsFn = async (rows) => {
   if (rows.length === 0) return [];
+  // Prepared once per batch, not once per row: a bind pushes 100 versions in one request,
+  // and compiling the trim statement 100 times is the kind of per-row cost the batch
+  // path exists to avoid.
+  const trimStatement = sqlite.prepare(
+    `SELECT id, content_hash AS contentHash
+     FROM file_versions
+     WHERE vault_id = ? AND file_id = ?
+     ORDER BY created_at DESC, rowid DESC
+     LIMIT -1 OFFSET ?`,
+  );
   return db.transaction((tx) =>
     rows.map((data) => {
-      const { baseVersionId, ...row } = data;
+      const { baseVersionId, historyLimit, ...row } = data;
       const head = tx
         .select({ versionId: fileVersions.versionId })
         .from(fileVersions)
@@ -112,10 +132,45 @@ export const tryInsertFileVersions: TryInsertFileVersionsFn = async (rows) => {
         return { status: "stale_base" as const, currentVersionId: head.versionId };
       }
       tx.insert(fileVersions).values(row).run();
-      return { status: "ok" as const };
+
+      // One index scan of this chain, oldest rows skipped: under the limit it finds
+      // nothing and costs a handful of index entries.
+      const removed = rowsBeyondHistoryLimit(trimStatement, row.vaultId, row.fileId, historyLimit);
+      if (removed.length === 0) return { status: "ok" as const };
+      for (const batch of chunks(
+        removed.map((entry) => entry.id),
+        ID_CHUNK,
+      )) {
+        tx.delete(fileVersions).where(inArray(fileVersions.id, batch)).run();
+      }
+      return {
+        status: "ok" as const,
+        prunedContentHashes: [...new Set(removed.map((entry) => entry.contentHash))],
+      };
     }),
   );
 };
+
+/**
+ * The rows of one chain beyond its newest `historyLimit`.
+ *
+ * Ordered by `(created_at, rowid)` descending — the order every reader of the chain
+ * calls "newest", so the rows kept are the ones the head check and the pull treat as
+ * the current ones — and skipping the newest `historyLimit` of them. `LIMIT -1` is
+ * SQLite's "no upper bound": every row past the offset is answered. The caller prepares
+ * the statement once per batch (see {@link tryInsertFileVersions}).
+ */
+function rowsBeyondHistoryLimit(
+  statement: Statement,
+  vaultId: string,
+  fileId: string,
+  historyLimit: number,
+): Array<{ id: string; contentHash: string }> {
+  return statement.all(vaultId, fileId, Math.max(1, Math.floor(historyLimit))) as Array<{
+    id: string;
+    contentHash: string;
+  }>;
+}
 
 // ── Reads ──
 
@@ -345,6 +400,74 @@ export async function listReferencedContentHashes(vaultId: string): Promise<stri
     .from(fileVersions)
     .where(eq(fileVersions.vaultId, vaultId));
   return rows.map((row) => row.contentHash);
+}
+
+/**
+ * Whether **any** row of this vault still names `contentHash`.
+ *
+ * The question a history trim asks before it reclaims a blob: the hash a removed row
+ * held may also be the content of another file (two copies of one image), and deleting
+ * a blob another chain still points at would turn it into a `content_missing`. Answered
+ * by the `(vault_id, content_hash)` index rather than by reading every version row of
+ * the vault, because this runs on the push path of every file past its limit.
+ */
+export const isContentHashReferenced: IsContentHashReferencedFn = async (vaultId, contentHash) =>
+  db
+    .select({ id: fileVersions.id })
+    .from(fileVersions)
+    .where(and(eq(fileVersions.vaultId, vaultId), eq(fileVersions.contentHash, contentHash)))
+    .limit(1)
+    .get() !== undefined;
+
+/**
+ * Every version row of a vault that sits past its chain's limit, with the content each
+ * one held — what a vault-wide trim deletes.
+ *
+ * The bound is the chain's: the kind is read from the chain's **head** (`history_kind`
+ * of the newest row), because a chain is one file whose category does not change from
+ * version to version, and the ranking is the `(created_at, rowid)` order every reader
+ * calls newest. Used when a vault's limits are lowered — chains no device pushes again
+ * would otherwise keep their old history for ever.
+ */
+export function listVersionRowsBeyondHistoryLimits(
+  vaultId: string,
+  limits: HistoryLimits,
+): Array<{ id: string; contentHash: string }> {
+  return sqlite
+    .prepare(
+      `WITH head_kind AS (
+         SELECT file_id, history_kind FROM (
+           SELECT file_id, history_kind,
+                  ROW_NUMBER() OVER (PARTITION BY file_id ORDER BY created_at DESC, rowid DESC) AS rn
+           FROM file_versions
+           WHERE vault_id = ?
+         ) WHERE rn = 1
+       ), ranked AS (
+         SELECT file_id, id, content_hash,
+                ROW_NUMBER() OVER (PARTITION BY file_id ORDER BY created_at DESC, rowid DESC) AS rn
+         FROM file_versions
+         WHERE vault_id = ?
+       )
+       SELECT ranked.id AS id, ranked.content_hash AS contentHash
+       FROM ranked JOIN head_kind ON head_kind.file_id = ranked.file_id
+       WHERE ranked.rn > CASE WHEN head_kind.history_kind = 'documents' THEN ? ELSE ? END`,
+    )
+    .all(vaultId, vaultId, limits.documents, limits.attachments) as Array<{
+    id: string;
+    contentHash: string;
+  }>;
+}
+
+/** Remove version rows by their primary keys, in one transaction (see {@link ID_CHUNK}). */
+export function deleteFileVersionRowsByIds(vaultId: string, ids: readonly string[]): void {
+  if (ids.length === 0) return;
+  db.transaction((tx) => {
+    for (const batch of chunks([...new Set(ids)], ID_CHUNK)) {
+      tx.delete(fileVersions)
+        .where(and(eq(fileVersions.vaultId, vaultId), inArray(fileVersions.id, batch)))
+        .run();
+    }
+  });
 }
 
 /** Remove every row of every listed chain, atomically (see {@link ID_CHUNK}). */

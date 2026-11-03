@@ -9,6 +9,7 @@ import {
   type SyncActivityEvent,
   type SyncProgress,
 } from "./engine";
+import type { HistoryLimits } from "@courier/shared";
 import type { SyncAdapter } from "./adapter";
 import type { SyncApi } from "./api";
 import { DEFAULT_OP_QUEUE_LIMITS, OpQueue, weightForSize, type OpQueueLimits } from "./op-queue";
@@ -283,6 +284,14 @@ export interface SyncHostOptions {
   onRateLimited?: (event: { waitMs: number }) => void;
   onStateChange?: (state: WsConnectionState) => void;
   onVaultDeleted?: () => void;
+  /**
+   * The vault's retention limits changed — on another device, or through the API.
+   *
+   * The engine never reads these numbers (the server trims with its own copy), so this is
+   * display state: a host forwards it to whatever shows the limits, which is how an open
+   * settings page follows a change made elsewhere without being reopened.
+   */
+  onVaultSettings?: (limits: HistoryLimits) => void;
   /**
    * The credential this host runs on stopped working — over the WebSocket, or on an
    * HTTP request that came back 401/403.
@@ -939,6 +948,11 @@ export class SyncHost {
         this.stop();
         this.opts.onVaultDeleted?.();
         return;
+      case "vault_settings":
+        // Display state only: the server trims by the numbers it stores, so a host that
+        // ignores this event syncs exactly the same.
+        this.opts.onVaultSettings?.(event.historyLimits);
+        break;
     }
     this.syncSessionId();
   }

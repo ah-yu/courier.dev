@@ -28,6 +28,7 @@ function frame(overrides: Partial<PushFileFrame> = {}): PushFileFrame {
     mtimeMs: 1_760_000_000_000,
     baseVersionId: null,
     content: bytes(1024),
+    historyKind: "documents",
     ...overrides,
   };
 }
@@ -55,6 +56,7 @@ function headerEntry(overrides: Record<string, unknown> = {}): Record<string, un
     mtimeMs: 1_760_000_000_000,
     baseVersionId: null,
     contentLength: 0,
+    historyKind: "documents",
     ...overrides,
   };
 }
@@ -83,6 +85,7 @@ describe("the push wire frame", () => {
       expect(file.sizeBytes).toBe(source.sizeBytes);
       expect(file.mtimeMs).toBe(source.mtimeMs);
       expect(file.baseVersionId).toBe(source.baseVersionId);
+      expect(file.historyKind).toBe(source.historyKind);
       if (source.content === null) {
         expect(file.content).toBeNull();
       } else {
@@ -136,6 +139,37 @@ describe("the push wire frame", () => {
       buildPushBody([frame({ action: "modify", baseVersionId: "head-9", content: bytes(8) })]),
     );
     expect(files[0]!.baseVersionId).toBe("head-9");
+  });
+
+  it("carries the per-file history kind, so one batch can hold a note and an attachment", () => {
+    // The kind is what the server maps to the **vault's** two limits; a batch may mix both,
+    // and each version states its own.
+    const { files } = parsePushBody(
+      buildPushBody([
+        frame({ fileId: "note", content: bytes(8), historyKind: "documents" }),
+        frame({ fileId: "photo", content: bytes(8), historyKind: "attachments" }),
+      ]),
+    );
+    expect(files.map((file) => file.historyKind)).toEqual(["documents", "attachments"]);
+  });
+
+  it("refuses to build a frame whose history kind is not one of the two", () => {
+    // The server refuses the whole batch over an unknown kind (422, so the device never
+    // syncs). The producer's mistake has to fail here, naming the file.
+    for (const historyKind of ["notes", "", 7, undefined]) {
+      expect(() =>
+        buildPushBody([frame({ historyKind: historyKind as unknown as "documents" })]),
+      ).toThrow(/historyKind/);
+    }
+  });
+
+  it("rejects a header whose history kind is missing or not a known value", () => {
+    expect(() =>
+      parsePushBody(handBuiltBody({ files: [headerEntry({ historyKind: undefined })] })),
+    ).toThrow(/historyKind/);
+    expect(() =>
+      parsePushBody(handBuiltBody({ files: [headerEntry({ historyKind: "notes" })] })),
+    ).toThrow(/historyKind/);
   });
 
   it("rejects a body shorter than its own length prefix", () => {
