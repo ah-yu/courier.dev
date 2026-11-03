@@ -483,7 +483,10 @@ describe("obsidian-stub — the leaves a view lives in", () => {
   });
 });
 
-/** The rows a tab drew, in order; a heading is a row with a name and nothing else. */
+/**
+ * The rows a tab drew, in order. A group's heading is a row too: its title, plus the
+ * buttons the group put on it (the info icon a section explains itself with).
+ */
 function drawnRows(tab: PluginSettingTab): Setting[] {
   return tab.containerEl.attached.filter((entry): entry is Setting => entry instanceof Setting);
 }
@@ -495,7 +498,7 @@ describe("declarative settings (Obsidian 1.13)", () => {
     tab.getSettingDefinitions = () => [
       {
         type: "group",
-        name: "Device",
+        heading: "Device",
         items: [
           { name: "Device name", control: { type: "text", key: "deviceName" } },
           {
@@ -520,6 +523,34 @@ describe("declarative settings (Obsidian 1.13)", () => {
     expect(nameRow.controlEl.children[0].text).toBe("laptop");
     const toggleRow = drawnRows(tab)[2];
     expect(toggleRow.toggles[0].value).toBe(true);
+  });
+
+  it("puts a group's buttons on its heading, and gives a group that only sets `name` no title", () => {
+    const tab = new PluginSettingTab({}, { settings: {} });
+    tab.getSettingDefinitions = () => [
+      {
+        type: "group",
+        heading: "Device",
+        extraButtons: [
+          (button) => button.setIcon("help-circle").setTooltip("a label, not a device"),
+        ],
+        items: [{ name: "Device name" }],
+      },
+      // A group has `heading` in the typings, never `name`; the app draws no title for
+      // this one, so the stub must not draw one either.
+      { type: "group", name: "Ignored", items: [{ name: "Row" }] },
+    ];
+
+    tab.display();
+
+    // The heading row is the group's title, and the button reaches the component the app
+    // would give the plugin — the only way a test can read a section's tooltip.
+    const rows = drawnRows(tab);
+    expect(rows.map((row) => row.name)).toEqual(["Device", "Device name", "Row"]);
+    expect(rows[0]!.extraButtons.map((button) => [button.icon, button.tooltip])).toEqual([
+      ["help-circle", "a label, not a device"],
+    ]);
+    expect(rows[1]!.extraButtons).toHaveLength(0);
   });
 
   it("writes a control's value back through the key's path", () => {
