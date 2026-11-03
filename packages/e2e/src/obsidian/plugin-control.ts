@@ -1387,16 +1387,20 @@ export async function clickSettingsBlank(vault: string): Promise<boolean> {
 }
 
 /**
- * Press the row's own blank space — inside the row, but on neither of its controls.
+ * Press the row's label — the text beside the number, on neither of the row's controls.
  *
- * This is the gesture a **narrow** pane makes natural: below 400 px the app lays a
- * settings row out as a column with a full-width control, so the row's label and the space
- * beside the field are most of what the user can see and touch, and pressing there has to
- * cancel the edit just like pressing the page does. The press is dispatched on the row
- * element itself — the area that belongs to no control — so it cannot be satisfied by
- * pressing a child.
+ * This is the gesture a **narrow** pane makes natural: below 400 px the app lays a settings
+ * row out as a column with a full-width control, so the label and the space beside the
+ * field are most of what the user can see and touch, and pressing there has to cancel the
+ * edit just like pressing the page does. The press lands on the label element, which is
+ * what a finger actually hits, and not on the row's padding — a future rule that exempted
+ * the row's info block would otherwise pass while the documented behaviour regressed.
+ *
+ * Like {@link clickSettingsBlank} it dispatches the **press** (`pointerdown`) and not a
+ * click: that is the event the row's dismiss listener reads, and the one a finger produces
+ * first.
  */
-export async function clickHistoryLimitRowBlank(vault: string, label: string): Promise<boolean> {
+export async function clickHistoryLimitRowLabel(vault: string, label: string): Promise<boolean> {
   return await evalInVault<boolean>(
     vault,
     `
@@ -1405,7 +1409,33 @@ export async function clickHistoryLimitRowBlank(vault: string, label: string): P
     for (const row of doc.querySelectorAll('.modal.mod-settings .setting-item')) {
       const name = row.querySelector('.setting-item-name');
       if (!name || (name.textContent || '').trim() !== ${jsLiteral(label)}) continue;
-      row.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true }));
+      name.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true }));
+      return true;
+    }
+    return false;
+    `,
+    60_000,
+  );
+}
+
+/**
+ * Press the row's number field, which is the one press that must **keep** the edit open.
+ *
+ * It is the same `pointerdown` as {@link clickHistoryLimitRowLabel}, aimed at the input the
+ * row shows while it is edited, so a listener that cancels too eagerly fails here.
+ */
+export async function clickHistoryLimitRowField(vault: string, label: string): Promise<boolean> {
+  return await evalInVault<boolean>(
+    vault,
+    `
+    const doc = ${SETTINGS_DOC_EXPR};
+    if (!doc.querySelector('.modal.mod-settings')) return false;
+    for (const row of doc.querySelectorAll('.modal.mod-settings .setting-item')) {
+      const name = row.querySelector('.setting-item-name');
+      if (!name || (name.textContent || '').trim() !== ${jsLiteral(label)}) continue;
+      const input = row.querySelector('.courier-history-limit-input');
+      if (!input) return false;
+      input.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true }));
       return true;
     }
     return false;
@@ -1444,7 +1474,8 @@ export interface HistoryLimitRowLayout {
  * vertical alignment is read from.
  *
  * Returns `null` while the row is not rendered, so the test waits instead of measuring a
- * half-built page.
+ * half-built page. The pane is read as the **first** `.vertical-tab-content` in the settings
+ * modal: Obsidian keeps only the active tab's pane mounted, so that is this tab's page.
  */
 export async function measureHistoryLimitRow(
   vault: string,
@@ -1501,8 +1532,11 @@ export async function measureHistoryLimitRow(
  *
  * This is the user's path, not a direct call into the plugin: press the icon-only control
  * (the pencil), type the number into the field the row now shows, press the same control
- * again (now the check). Returns `false` while the control or the field is missing, so the
- * caller can wait for the page.
+ * again (now the check). Each press is a real one — `pointerdown` and then `click`, the
+ * order a pointer produces — because the row's dismiss listener sees the first half: a press
+ * on the check has to leave the edit alone, or the `click` that follows finds the row out of
+ * edit mode and opens it again with the typed value gone. Returns `false` while the control
+ * or the field is missing, so the caller can wait for the page.
  */
 export async function editHistoryLimitRow(
   vault: string,
@@ -1521,18 +1555,22 @@ export async function editHistoryLimitRow(
     ${SETTINGS_IN_WINDOW_ASSERTION}
     const doc = (activeWindow && activeWindow.document) || document;
     window.__courierE2eSettingsDoc = doc;
+    const press = (el) => {
+      el.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true }));
+      el.click();
+    };
     for (const row of doc.querySelectorAll('.modal.mod-settings .setting-item')) {
       const name = row.querySelector('.setting-item-name');
       if (!name || (name.textContent || '').trim() !== ${jsLiteral(label)}) continue;
       // One control, two icons: the pencil opens the field, the check commits it.
       const control = row.querySelector('.setting-item-control button');
       if (!control) return false;
-      control.click();
+      press(control);
       const input = row.querySelector('.courier-history-limit-input');
       if (!input) return false;
       input.value = ${jsLiteral(String(value))};
       input.dispatchEvent(new Event('input', { bubbles: true }));
-      control.click();
+      press(control);
       return true;
     }
     return false;

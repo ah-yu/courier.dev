@@ -108,7 +108,8 @@ import {
   vaultBasePath,
   writeConfigFileInVault,
   editHistoryLimitRow,
-  clickHistoryLimitRowBlank,
+  clickHistoryLimitRowLabel,
+  clickHistoryLimitRowField,
   measureHistoryLimitRow,
   openHistoryLimitEditor,
   openPluginSettings,
@@ -3694,13 +3695,15 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
     });
   });
 
-  it("cancels a history-limit edit from anywhere in the row but the field and the check", async () => {
-    // The row is the field and one check, and *nothing else in it* keeps the edit alive. A
-    // narrow pane (a phone's 390 px, or a squeezed window) turns the row into a column with
-    // a full-width control, so its label and the space beside the field are most of what the
-    // user can press; a press there is the user moving on, exactly like a press outside the
-    // row. The attachments row is the one this case edits, so the number stays at its default
-    // and no write has to be undone.
+  it("cancels a history-limit edit from the row's label, and keeps it in the field", async () => {
+    // The field is the one press that belongs to an edit in progress, and everything else in
+    // the row is the user moving on. A narrow pane (a phone's 390 px, or a squeezed window)
+    // turns the row into a column with a full-width control, so its label and the space
+    // beside the field are most of what the user can press — pressing there has to cancel
+    // exactly like pressing outside the row does. The check's own press is the other half of
+    // the rule and is pinned by every case that saves through `editHistoryLimitRow`, which
+    // now presses before it clicks. The attachments row is the one this case edits, so the
+    // number stays at its default and no write has to be undone.
     const label = t("settings.historyLimit.attachments.label");
     const freshScope = {
       resetSyncState: false,
@@ -3727,14 +3730,25 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
     );
     expect((await readHistoryLimitRow(names.a, label))?.editing).toBe(true);
 
-    // The press lands on the row itself — inside it, on neither the field nor the icon.
+    // The user goes on typing: a press on the field itself keeps the edit alive, which is
+    // the half a dismiss rule that fires too eagerly loses.
     await waitForVaultState(
-      () => clickHistoryLimitRowBlank(names.a, label),
+      () => clickHistoryLimitRowField(names.a, label),
+      "the row had no field to press",
+    );
+    expect(
+      (await readHistoryLimitRow(names.a, label))?.editing,
+      "pressing the field cancelled the edit",
+    ).toBe(true);
+
+    // The press lands on the row's label — inside the row, on neither the field nor the icon.
+    await waitForVaultState(
+      () => clickHistoryLimitRowLabel(names.a, label),
       "the settings page had no attachments row to press",
     );
     await waitForVaultState(
       async () => (await readHistoryLimitRow(names.a, label))?.editing === false,
-      "pressing the row's own blank space never cancelled the edit",
+      "pressing the row's own label never cancelled the edit",
     );
     const cancelled = (await readHistoryLimitRow(names.a, label))!;
     expect(cancelled.icon).toBe(true);
@@ -3789,13 +3803,16 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
         control.left + control.width / 2,
       );
       expect(value.right, "the number is not beside its icon").toBeLessThanOrEqual(button.left + 1);
-      expect(button.right, "the icon is not at the row's trailing edge").toBeGreaterThanOrEqual(
-        row.right - 24,
+      // The icon is the last thing on the control's own line, whatever the row's padding is.
+      // The 4 px slack covers two independently rounded edges; a control that is not at the
+      // trailing edge is off by far more than that.
+      expect(button.right, "the icon is not at the control's trailing edge").toBeGreaterThanOrEqual(
+        control.right - 4,
       );
 
       // The wide pane, 720 px: the text on the left, the control on the right, both centred on
-      // the same horizontal line. The text block is two lines tall, so a top-aligned control
-      // reads as "too high" by the height of the number itself.
+      // the same horizontal line. The text block is two lines tall and the reading is one, so
+      // a top-aligned control reads as "too high" by half that difference.
       const wide = await measureHistoryLimitRow(names.a, label, 720);
       expect(wide, "the settings row was not rendered at a wide pane").not.toBeNull();
       const wideValue = wide!.value;
