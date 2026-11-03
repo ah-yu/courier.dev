@@ -1,4 +1,12 @@
-import { App, PluginSettingTab, Setting, setIcon, type SettingDefinitionItem } from "obsidian";
+import {
+  App,
+  PluginSettingTab,
+  Setting,
+  setIcon,
+  type SettingDefinition,
+  type SettingDefinitionItem,
+  type SettingGroupItem,
+} from "obsidian";
 import {
   FILE_TYPE_GROUPS,
   SETTINGS_GROUPS,
@@ -268,18 +276,27 @@ export class CourierSettingTab extends PluginSettingTab {
   // ── Section chrome ──
 
   /**
-   * A section header: the title, plus an info icon whose tooltip carries what a paragraph
-   * used to say (`setHeading()` is Obsidian's own section-heading row, and the extra button
-   * is where the explanation lives).
+   * A section: its title, the info icon whose tooltip carries what a paragraph used to say,
+   * and the rows under it.
+   *
+   * A `group` is the app's own section, not a heading row this page draws itself: the title
+   * is rendered above the group's card and the button sits on that heading (see
+   * `SettingDefinitionGroup`). That is also why the spacing around a title is the app's
+   * business — a title drawn as a row inherits the app's rule for a heading outside a card
+   * and ends up against the card's edge.
    */
-  private heading(name: string, tooltip: string, visible: () => boolean): SettingDefinitionItem {
+  private group(
+    heading: string,
+    tooltip: string,
+    visible: () => boolean,
+    items: SettingGroupItem[],
+  ): SettingDefinitionItem {
     return {
-      name,
+      type: "group",
+      heading,
       visible,
-      render: (setting) => {
-        setting.setName(name).setHeading();
-        setting.addExtraButton((button) => button.setIcon("help-circle").setTooltip(tooltip));
-      },
+      extraButtons: [(button) => button.setIcon("help-circle").setTooltip(tooltip)],
+      items,
     };
   }
 
@@ -288,7 +305,7 @@ export class CourierSettingTab extends PluginSettingTab {
    *
    * It is not a settings row: the row it is given loses its chrome and holds the line.
    */
-  private stageErrorItem(visible: () => boolean): SettingDefinitionItem {
+  private stageErrorItem(visible: () => boolean): SettingDefinition {
     return {
       name: "",
       visible: () => visible() && this.stageError !== null,
@@ -455,91 +472,96 @@ export class CourierSettingTab extends PluginSettingTab {
   private readyDefinitions(visible: () => boolean): SettingDefinitionItem[] {
     const unlocked = this.plugin.encryptionKey !== null;
     return [
-      this.heading(t("settings.section.device"), t("settings.section.device.tooltip"), visible),
-      {
-        name: t("settings.device.name"),
-        desc: t("settings.device.desc"),
-        visible,
-        // A `render` item, not a `text` control: the field caps what can be typed
-        // (`maxLength`, rather than a validation message after the fact) and commits when it
-        // loses focus, and a control has nowhere to hang either of those.
-        render: (setting) => this.buildDeviceNameRow(setting),
-      },
+      this.group(t("settings.section.device"), t("settings.section.device.tooltip"), visible, [
+        {
+          name: t("settings.device.name"),
+          desc: t("settings.device.desc"),
+          visible,
+          // A `render` item, not a `text` control: the field caps what can be typed
+          // (`maxLength`, rather than a validation message after the fact) and commits when it
+          // loses focus, and a control has nowhere to hang either of those.
+          render: (setting) => this.buildDeviceNameRow(setting),
+        },
+      ]),
 
-      this.heading(t("settings.section.vault"), t("settings.section.vault.tooltip"), visible),
-      {
-        name: t("settings.ready.connected", {
-          vault: this.plugin.settings.connectedVaultName ?? "",
-        }),
-        desc: this.syncStateLabel(),
-        visible,
-        render: (setting) => this.buildConnectionRow(setting),
-      },
-      {
-        name: t("settings.pause.name"),
-        visible,
-        render: (setting) => this.buildPauseRow(setting),
-      },
-      {
-        name: t("settings.vaultPassword.name"),
-        visible: () => visible() && this.hasRememberedPasswordRow(),
-        render: (setting) => this.buildRememberedPasswordRow(setting),
-      },
+      this.group(t("settings.section.vault"), t("settings.section.vault.tooltip"), visible, [
+        {
+          name: t("settings.ready.connected", {
+            vault: this.plugin.settings.connectedVaultName ?? "",
+          }),
+          desc: this.syncStateLabel(),
+          visible,
+          render: (setting) => this.buildConnectionRow(setting),
+        },
+        {
+          name: t("settings.pause.name"),
+          visible,
+          render: (setting) => this.buildPauseRow(setting),
+        },
+        {
+          name: t("settings.vaultPassword.name"),
+          visible: () => visible() && this.hasRememberedPasswordRow(),
+          render: (setting) => this.buildRememberedPasswordRow(setting),
+        },
+      ]),
 
-      this.heading(
+      this.group(
         t("settings.section.fileTypes"),
         t("settings.section.fileTypes.tooltip"),
         visible,
+        FILE_TYPE_GROUPS.map((group): SettingDefinition => ({
+          name: t(FILE_TYPE_LABEL_KEYS[group]),
+          desc: t(FILE_TYPE_DESCRIPTION_KEYS[group]),
+          visible,
+          control: { type: "toggle", key: `fileTypes.${group}` },
+        })),
       ),
-      ...FILE_TYPE_GROUPS.map((group): SettingDefinitionItem => ({
-        name: t(FILE_TYPE_LABEL_KEYS[group]),
-        desc: t(FILE_TYPE_DESCRIPTION_KEYS[group]),
-        visible,
-        control: { type: "toggle", key: `fileTypes.${group}` },
-      })),
 
-      this.heading(
+      this.group(
         t("settings.section.excludedFolders"),
         t("settings.section.excludedFolders.tooltip"),
         visible,
+        [
+          {
+            name: t("settings.excludedFolders.list.name"),
+            visible,
+            render: (setting) => this.buildExcludedFoldersRow(setting),
+          },
+        ],
       ),
-      {
-        name: t("settings.excludedFolders.list.name"),
-        visible,
-        render: (setting) => this.buildExcludedFoldersRow(setting),
-      },
 
-      this.heading(
+      this.group(
         t("settings.section.settingsSync"),
         t("settings.section.settingsSync.tooltip"),
         visible,
+        [
+          ...SETTINGS_GROUPS.map((group): SettingDefinition => ({
+            name: t(SETTINGS_GROUP_LABEL_KEYS[group]),
+            desc: describeSettingsGroup(group),
+            visible,
+            control: { type: "toggle", key: `settingsGroups.${group}` },
+          })),
+          {
+            name: t("settings.history.name"),
+            desc: t("settings.history.desc"),
+            visible,
+            render: (setting) => this.buildHistoryRow(setting),
+          },
+          {
+            name: t("settings.recycleBin.name"),
+            visible,
+            render: (setting) => this.buildRecycleBinRow(setting, unlocked),
+          },
+        ],
       ),
-      ...SETTINGS_GROUPS.map((group): SettingDefinitionItem => ({
-        name: t(SETTINGS_GROUP_LABEL_KEYS[group]),
-        desc: describeSettingsGroup(group),
-        visible,
-        control: { type: "toggle", key: `settingsGroups.${group}` },
-      })),
 
-      {
-        name: t("settings.history.name"),
-        desc: t("settings.history.desc"),
-        visible,
-        render: (setting) => this.buildHistoryRow(setting),
-      },
-      {
-        name: t("settings.recycleBin.name"),
-        visible,
-        render: (setting) => this.buildRecycleBinRow(setting, unlocked),
-      },
-
-      this.heading(t("settings.section.account"), t("settings.section.account.tooltip"), visible),
-      {
-        name: this.plugin.settings.userName ?? t("settings.account.reading"),
-        visible,
-        render: (setting) => this.buildAccountRow(setting),
-      },
-      this.stageErrorItem(visible),
+      this.group(t("settings.section.account"), t("settings.section.account.tooltip"), visible, [
+        {
+          name: this.plugin.settings.userName ?? t("settings.account.reading"),
+          visible,
+          render: (setting) => this.buildAccountRow(setting),
+        },
+      ]),
     ];
   }
 

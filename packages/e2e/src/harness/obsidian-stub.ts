@@ -1149,6 +1149,10 @@ export interface SettingDefinitionItem {
   desc?: string;
   /** A `group`, `list` or `page` holds items under its own heading. */
   type?: "group" | "list" | "page";
+  /** A group's title, drawn above its items — the app's own section heading. */
+  heading?: string;
+  /** Buttons the app puts on a group's heading; each is handed the component it builds. */
+  extraButtons?: ((button: ExtraButtonComponent) => unknown)[];
   items?: SettingDefinitionItem[];
   control?: SettingControlDefinition;
   action?: (...args: unknown[]) => unknown;
@@ -1224,7 +1228,15 @@ function renderSettingDefinitions(tab: PluginSettingTab, containerEl: FakeEl): v
     for (const item of items) {
       if (!isVisible(item)) continue;
       if (item.type === "group" || item.type === "list" || item.type === "page") {
-        if (item.name) new Setting(containerEl).setName(item.name).setHeading();
+        // A group's title is the app's section heading, not a row: it comes from `heading`
+        // (a `page` names itself with `name`), with the group's own buttons on it. A group
+        // that sets only `name` gets no title — the typings give it none, and being kinder
+        // here would hide that mistake in a test.
+        const title = item.type === "page" ? item.name : item.heading;
+        if (title) {
+          const heading = new Setting(containerEl).setName(title).setHeading();
+          for (const addButton of item.extraButtons ?? []) heading.addExtraButton(addButton);
+        }
         if (item.items) draw(item.items);
         continue;
       }

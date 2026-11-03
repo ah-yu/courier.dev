@@ -41,6 +41,7 @@ import {
   type MenuItem,
   type Modal,
   type FakeEl,
+  type SettingDefinitionItem,
 } from "./harness/obsidian-stub";
 import { VAULT_CREDENTIAL_KEY } from "../../plugin/src/shared/credential-store";
 import { RELOAD_POPUP_CLASS } from "../../plugin/src/shared/settings-reload-popup";
@@ -277,12 +278,12 @@ function settingsIn(root: FakeEl): Setting[] {
 function settingsTabOf(plugin: CourierPlugin): {
   containerEl: FakeEl;
   display(): void;
-  getSettingDefinitions(): Array<{ name?: string }>;
+  getSettingDefinitions(): SettingDefinitionItem[];
 } {
   const tab = recordedSurface(plugin).settingTabs[0] as unknown as {
     containerEl: FakeEl;
     display(): void;
-    getSettingDefinitions(): Array<{ name?: string }>;
+    getSettingDefinitions(): SettingDefinitionItem[];
   };
   if (!tab?.containerEl) throw new Error("the plugin registered no settings tab");
   return tab;
@@ -5904,8 +5905,9 @@ describe("plugin e2e — the real plugin against a real server", () => {
       const tab = settingsTabOf(plugin);
       tab.display();
 
-      // A section heading is a settings row (`setHeading()`), which is where Obsidian
-      // renders the title — the stub records that row rather than drawing it.
+      // A section is one of the app's groups: its title is the group's `heading`, which the
+      // stub draws as a heading row before the section's rows (the real app draws it above
+      // the group's card, which this stub has no layout for).
       const rows = settingsIn(tab.containerEl);
       const sections = [
         "这台设备",
@@ -5922,18 +5924,23 @@ describe("plugin e2e — the real plugin against a real server", () => {
         expect(heading!.desc).toBe("");
       }
       // In that order, with the device label at the top: it is a label, not a setting
-      // of the account it happens to be signed in with.
+      // of the account it happens to be signed in with. The titles are unique, so the row
+      // order is also the section order.
       const headings = rows
-        .filter(
-          (row) =>
-            row.name &&
-            row.desc === "" &&
-            !row.buttons.length &&
-            !row.texts.length &&
-            !row.toggles.length,
-        )
-        .map((row) => row.name);
+        .map((row) => row.name)
+        .filter((name): name is string => name !== "" && sections.includes(name));
       expect(headings).toEqual(sections);
+
+      // Every section is one of the app's own groups, not a heading row drawn inside the
+      // page: the app renders `heading` above the group's rows, which is what gives the
+      // title its spacing, and the group carries the information button. A page-level row
+      // here would be laid out as a settings row, against its card's edge.
+      const groups = tab
+        .getSettingDefinitions()
+        .map((item) => ({ type: item.type, heading: item.heading, items: item.items ?? [] }));
+      expect(groups.map((group) => group.type)).toEqual(sections.map(() => "group"));
+      expect(groups.map((group) => group.heading)).toEqual(sections);
+      expect(groups.every((group) => group.items.length > 0)).toBe(true);
 
       // The account row also carries the two facts a mobile user cannot see in a
       // status-bar menu. The account read fills them into its description.
