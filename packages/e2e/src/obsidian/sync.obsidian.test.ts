@@ -109,7 +109,7 @@ import {
   writeConfigFileInVault,
   editHistoryLimitRow,
   clickHistoryLimitRowBlank,
-  measureHistoryLimitRowNarrow,
+  measureHistoryLimitRow,
   openHistoryLimitEditor,
   openPluginSettings,
   type PluginHostSetup,
@@ -3746,46 +3746,72 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
     );
   });
 
-  itL("keeps the number and the pencil at a narrow history-limit row's trailing edge", async () => {
-    // The app's narrow-pane rule is a container query on the settings pane (under 400 px):
-    // the row becomes a column and every control moves to the leading edge, because a text
-    // field wants the full width. This row is a number and one icon, so it belongs at the
-    // trailing edge — the same place the switches above and below it sit. The pane is
-    // squeezed for the measurement and restored inside the same eval.
-    const label = t("settings.historyLimit.documents.label");
-    const freshScope = {
-      resetSyncState: false,
-      settingsGroups: NO_SETTINGS_GROUPS,
-      fileTypes: DEFAULT_FILE_TYPES,
-      excludedFolders: [],
-    };
-    await updateVaultSettings(server, remote.id, {
-      historyLimitDocuments: DEFAULT_HISTORY_LIMITS.documents,
-    });
-    await configurePluginHost(names.a, { ...setup, deviceName: "obsidian-A" }, freshScope);
-    await waitForVaultState(() => openPluginSettings(names.a), "the settings page never opened");
-    await waitForVaultState(
-      async () =>
-        (await readHistoryLimitRow(names.a, label))?.value ===
-        String(DEFAULT_HISTORY_LIMITS.documents),
-      "the settings row never showed the vault's limit",
-    );
+  itL(
+    "keeps the history-limit row's number at the trailing edge and centred on its text",
+    async () => {
+      // Two rules, one row. On a narrow pane the app's container query on the settings pane
+      // (under 400 px) turns the row into a column and moves every control to the leading
+      // edge, because it is laying out text fields; this row is a number and one icon, so it
+      // belongs at the trailing edge, where the switches above and below it sit. On a wide
+      // pane the row is horizontal again and the app aligns its **top** edges, which leaves
+      // the one-line control up beside the title while the explanation runs on below it — so
+      // the two halves share a centre line instead. The pane is resized for each measurement
+      // and restored inside the same eval.
+      const label = t("settings.historyLimit.documents.label");
+      const freshScope = {
+        resetSyncState: false,
+        settingsGroups: NO_SETTINGS_GROUPS,
+        fileTypes: DEFAULT_FILE_TYPES,
+        excludedFolders: [],
+      };
+      await updateVaultSettings(server, remote.id, {
+        historyLimitDocuments: DEFAULT_HISTORY_LIMITS.documents,
+      });
+      await configurePluginHost(names.a, { ...setup, deviceName: "obsidian-A" }, freshScope);
+      await waitForVaultState(() => openPluginSettings(names.a), "the settings page never opened");
+      await waitForVaultState(
+        async () =>
+          (await readHistoryLimitRow(names.a, label))?.value ===
+          String(DEFAULT_HISTORY_LIMITS.documents),
+        "the settings row never showed the vault's limit",
+      );
 
-    const narrow = await measureHistoryLimitRowNarrow(names.a, label);
-    expect(narrow, "the settings row was not rendered").not.toBeNull();
-    const { row, control, value, button } = narrow!;
-    // The column layout really happened: a full-width control under the label.
-    expect(control.width, "the narrow pane did not stack the row").toBeGreaterThan(row.width * 0.8);
-    // The regression this case pins: the number was at the leading edge, under the label's
-    // left end. It stays in the trailing half, next to its icon, and the icon closes the row.
-    expect(value.left, "the number sits at the row's leading edge").toBeGreaterThan(
-      control.left + control.width / 2,
-    );
-    expect(value.right, "the number is not beside its icon").toBeLessThanOrEqual(button.left + 1);
-    expect(button.right, "the icon is not at the row's trailing edge").toBeGreaterThanOrEqual(
-      row.right - 24,
-    );
-  });
+      // The narrow pane, 380 px: a column with a full-width control under the label.
+      const narrow = await measureHistoryLimitRow(names.a, label, 380);
+      expect(narrow, "the settings row was not rendered").not.toBeNull();
+      const { row, control, value, button } = narrow!;
+      expect(control.width, "the narrow pane did not stack the row").toBeGreaterThan(
+        row.width * 0.8,
+      );
+      // The regression this case pins: the number was at the leading edge, under the label's
+      // left end. It stays in the trailing half, next to its icon, and the icon closes the row.
+      expect(value.left, "the number sits at the row's leading edge").toBeGreaterThan(
+        control.left + control.width / 2,
+      );
+      expect(value.right, "the number is not beside its icon").toBeLessThanOrEqual(button.left + 1);
+      expect(button.right, "the icon is not at the row's trailing edge").toBeGreaterThanOrEqual(
+        row.right - 24,
+      );
+
+      // The wide pane, 720 px: the text on the left, the control on the right, both centred on
+      // the same horizontal line. The text block is two lines tall, so a top-aligned control
+      // reads as "too high" by the height of the number itself.
+      const wide = await measureHistoryLimitRow(names.a, label, 720);
+      expect(wide, "the settings row was not rendered at a wide pane").not.toBeNull();
+      const wideValue = wide!.value;
+      const wideInfo = wide!.info;
+      expect(
+        wide!.control.left,
+        "the wide pane did not put the control on the right",
+      ).toBeGreaterThan(wideInfo.left + wideInfo.width / 2);
+      const valueCentre = wideValue.top + wideValue.height / 2;
+      const textCentre = wideInfo.top + wideInfo.height / 2;
+      expect(
+        Math.abs(valueCentre - textCentre),
+        `the number's centre (${valueCentre}) is off the text block's (${textCentre})`,
+      ).toBeLessThanOrEqual(4);
+    },
+  );
 
   it("shows a limit changed on the other device without reopening the settings page", async () => {
     // The limits are the vault's; a page already open on B has to follow a change made on

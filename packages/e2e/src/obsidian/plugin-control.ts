@@ -1423,27 +1423,30 @@ export interface HistoryLimitRowBox {
   height: number;
 }
 
-/** A history-limit row as the app laid it out: the row, its control column, the number, the icon. */
+/** A history-limit row as the app laid it out: text block, control column, number, icon. */
 export interface HistoryLimitRowLayout {
   row: HistoryLimitRowBox;
+  info: HistoryLimitRowBox;
   control: HistoryLimitRowBox;
   value: HistoryLimitRowBox;
   button: HistoryLimitRowBox;
 }
 
 /**
- * Measure a history-limit row with the settings pane squeezed to `width` px.
+ * Measure a history-limit row with the settings pane pinned to `width` px.
  *
  * The app's narrow-row rule is a **container query** on `.vertical-tab-content` (under
  * 400 px), not a platform branch: a phone hits it because its pane is 390 px wide, and so
- * does a narrow window. Pinning the container's inline size reproduces exactly that layout
- * on the desk, with no reload into mobile emulation, and the width is put back inside the
- * same eval — a failed assertion cannot leave the page squeezed for the next case.
+ * does a narrow window. Pinning the container's inline size reproduces either layout on the
+ * desk, with no reload into mobile emulation, and the width is put back inside the same eval
+ * — a failed assertion cannot leave the page resized for the next case. The default is the
+ * narrow pane; a wider `width` is the horizontal row, which is where the two halves'
+ * vertical alignment is read from.
  *
  * Returns `null` while the row is not rendered, so the test waits instead of measuring a
  * half-built page.
  */
-export async function measureHistoryLimitRowNarrow(
+export async function measureHistoryLimitRow(
   vault: string,
   label: string,
   width = 380,
@@ -1471,11 +1474,13 @@ export async function measureHistoryLimitRowNarrow(
       for (const row of doc.querySelectorAll('.modal.mod-settings .setting-item')) {
         const name = row.querySelector('.setting-item-name');
         if (!name || (name.textContent || '').trim() !== ${jsLiteral(label)}) continue;
+        const info = row.querySelector('.setting-item-info');
         const value = row.querySelector('.courier-history-limit-value');
         const button = row.querySelector('.setting-item-control button');
-        if (!value || !button) break;
+        if (!info || !value || !button) break;
         layout = {
           row: box(row),
+          info: box(info),
           control: box(row.querySelector('.setting-item-control')),
           value: box(value),
           button: box(button),
