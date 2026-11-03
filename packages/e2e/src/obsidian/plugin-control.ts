@@ -1387,6 +1387,111 @@ export async function clickSettingsBlank(vault: string): Promise<boolean> {
 }
 
 /**
+ * Press the row's own blank space — inside the row, but on neither of its controls.
+ *
+ * This is the gesture a **narrow** pane makes natural: below 400 px the app lays a
+ * settings row out as a column with a full-width control, so the row's label and the space
+ * beside the field are most of what the user can see and touch, and pressing there has to
+ * cancel the edit just like pressing the page does. The press is dispatched on the row
+ * element itself — the area that belongs to no control — so it cannot be satisfied by
+ * pressing a child.
+ */
+export async function clickHistoryLimitRowBlank(vault: string, label: string): Promise<boolean> {
+  return await evalInVault<boolean>(
+    vault,
+    `
+    const doc = ${SETTINGS_DOC_EXPR};
+    if (!doc.querySelector('.modal.mod-settings')) return false;
+    for (const row of doc.querySelectorAll('.modal.mod-settings .setting-item')) {
+      const name = row.querySelector('.setting-item-name');
+      if (!name || (name.textContent || '').trim() !== ${jsLiteral(label)}) continue;
+      row.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, cancelable: true }));
+      return true;
+    }
+    return false;
+    `,
+    60_000,
+  );
+}
+
+/** One element's box in CSS pixels, rounded: the four edges a layout assertion needs. */
+export interface HistoryLimitRowBox {
+  left: number;
+  right: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/** A history-limit row as the app laid it out: the row, its control column, the number, the icon. */
+export interface HistoryLimitRowLayout {
+  row: HistoryLimitRowBox;
+  control: HistoryLimitRowBox;
+  value: HistoryLimitRowBox;
+  button: HistoryLimitRowBox;
+}
+
+/**
+ * Measure a history-limit row with the settings pane squeezed to `width` px.
+ *
+ * The app's narrow-row rule is a **container query** on `.vertical-tab-content` (under
+ * 400 px), not a platform branch: a phone hits it because its pane is 390 px wide, and so
+ * does a narrow window. Pinning the container's inline size reproduces exactly that layout
+ * on the desk, with no reload into mobile emulation, and the width is put back inside the
+ * same eval — a failed assertion cannot leave the page squeezed for the next case.
+ *
+ * Returns `null` while the row is not rendered, so the test waits instead of measuring a
+ * half-built page.
+ */
+export async function measureHistoryLimitRowNarrow(
+  vault: string,
+  label: string,
+  width = 380,
+): Promise<HistoryLimitRowLayout | null> {
+  return await evalInVault<HistoryLimitRowLayout | null>(
+    vault,
+    `
+    const doc = ${SETTINGS_DOC_EXPR};
+    const content = doc.querySelector('.modal.mod-settings .vertical-tab-content');
+    if (!content) return null;
+    const box = (el) => {
+      const b = el.getBoundingClientRect();
+      return {
+        left: Math.round(b.left),
+        right: Math.round(b.right),
+        top: Math.round(b.top),
+        width: Math.round(b.width),
+        height: Math.round(b.height),
+      };
+    };
+    const before = content.style.width;
+    let layout = null;
+    try {
+      content.style.width = ${jsLiteral(`${width}px`)};
+      for (const row of doc.querySelectorAll('.modal.mod-settings .setting-item')) {
+        const name = row.querySelector('.setting-item-name');
+        if (!name || (name.textContent || '').trim() !== ${jsLiteral(label)}) continue;
+        const value = row.querySelector('.courier-history-limit-value');
+        const button = row.querySelector('.setting-item-control button');
+        if (!value || !button) break;
+        layout = {
+          row: box(row),
+          control: box(row.querySelector('.setting-item-control')),
+          value: box(value),
+          button: box(button),
+        };
+        break;
+      }
+    } finally {
+      content.style.width = before;
+    }
+    return layout;
+    `,
+    60_000,
+  );
+}
+
+/**
  * Change a history-limit row through its **pencil → input → check** interaction.
  *
  * This is the user's path, not a direct call into the plugin: press the icon-only control

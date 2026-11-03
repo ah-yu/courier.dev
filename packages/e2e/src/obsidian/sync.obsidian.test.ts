@@ -108,6 +108,8 @@ import {
   vaultBasePath,
   writeConfigFileInVault,
   editHistoryLimitRow,
+  clickHistoryLimitRowBlank,
+  measureHistoryLimitRowNarrow,
   openHistoryLimitEditor,
   openPluginSettings,
   type PluginHostSetup,
@@ -3690,6 +3692,99 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
     await updateVaultSettings(server, remote.id, {
       historyLimitDocuments: DEFAULT_HISTORY_LIMITS.documents,
     });
+  });
+
+  it("cancels a history-limit edit from anywhere in the row but the field and the check", async () => {
+    // The row is the field and one check, and *nothing else in it* keeps the edit alive. A
+    // narrow pane (a phone's 390 px, or a squeezed window) turns the row into a column with
+    // a full-width control, so its label and the space beside the field are most of what the
+    // user can press; a press there is the user moving on, exactly like a press outside the
+    // row. The attachments row is the one this case edits, so the number stays at its default
+    // and no write has to be undone.
+    const label = t("settings.historyLimit.attachments.label");
+    const freshScope = {
+      resetSyncState: false,
+      settingsGroups: NO_SETTINGS_GROUPS,
+      fileTypes: DEFAULT_FILE_TYPES,
+      excludedFolders: [],
+    };
+    await updateVaultSettings(server, remote.id, {
+      historyLimitDocuments: DEFAULT_HISTORY_LIMITS.documents,
+      historyLimitAttachments: DEFAULT_HISTORY_LIMITS.attachments,
+    });
+    await configurePluginHost(names.a, { ...setup, deviceName: "obsidian-A" }, freshScope);
+    await waitForVaultState(() => openPluginSettings(names.a), "the settings page never opened");
+    await waitForVaultState(
+      async () =>
+        (await readHistoryLimitRow(names.a, label))?.value ===
+        String(DEFAULT_HISTORY_LIMITS.attachments),
+      "the attachments row never showed the vault's limit",
+    );
+
+    await waitForVaultState(
+      () => openHistoryLimitEditor(names.a, label),
+      "the attachments row never entered edit mode",
+    );
+    expect((await readHistoryLimitRow(names.a, label))?.editing).toBe(true);
+
+    // The press lands on the row itself — inside it, on neither the field nor the icon.
+    await waitForVaultState(
+      () => clickHistoryLimitRowBlank(names.a, label),
+      "the settings page had no attachments row to press",
+    );
+    await waitForVaultState(
+      async () => (await readHistoryLimitRow(names.a, label))?.editing === false,
+      "pressing the row's own blank space never cancelled the edit",
+    );
+    const cancelled = (await readHistoryLimitRow(names.a, label))!;
+    expect(cancelled.icon).toBe(true);
+    expect(cancelled.tooltip).toBe(t("settings.historyLimit.edit"));
+    expect(cancelled.desc).toBe(t("settings.historyLimit.attachments.desc"));
+    // Cancel means cancel: the edit never reached the vault.
+    expect((await vaultSettings(server, remote.id)).historyLimitAttachments).toBe(
+      DEFAULT_HISTORY_LIMITS.attachments,
+    );
+  });
+
+  itL("keeps the number and the pencil at a narrow history-limit row's trailing edge", async () => {
+    // The app's narrow-pane rule is a container query on the settings pane (under 400 px):
+    // the row becomes a column and every control moves to the leading edge, because a text
+    // field wants the full width. This row is a number and one icon, so it belongs at the
+    // trailing edge — the same place the switches above and below it sit. The pane is
+    // squeezed for the measurement and restored inside the same eval.
+    const label = t("settings.historyLimit.documents.label");
+    const freshScope = {
+      resetSyncState: false,
+      settingsGroups: NO_SETTINGS_GROUPS,
+      fileTypes: DEFAULT_FILE_TYPES,
+      excludedFolders: [],
+    };
+    await updateVaultSettings(server, remote.id, {
+      historyLimitDocuments: DEFAULT_HISTORY_LIMITS.documents,
+    });
+    await configurePluginHost(names.a, { ...setup, deviceName: "obsidian-A" }, freshScope);
+    await waitForVaultState(() => openPluginSettings(names.a), "the settings page never opened");
+    await waitForVaultState(
+      async () =>
+        (await readHistoryLimitRow(names.a, label))?.value ===
+        String(DEFAULT_HISTORY_LIMITS.documents),
+      "the settings row never showed the vault's limit",
+    );
+
+    const narrow = await measureHistoryLimitRowNarrow(names.a, label);
+    expect(narrow, "the settings row was not rendered").not.toBeNull();
+    const { row, control, value, button } = narrow!;
+    // The column layout really happened: a full-width control under the label.
+    expect(control.width, "the narrow pane did not stack the row").toBeGreaterThan(row.width * 0.8);
+    // The regression this case pins: the number was at the leading edge, under the label's
+    // left end. It stays in the trailing half, next to its icon, and the icon closes the row.
+    expect(value.left, "the number sits at the row's leading edge").toBeGreaterThan(
+      control.left + control.width / 2,
+    );
+    expect(value.right, "the number is not beside its icon").toBeLessThanOrEqual(button.left + 1);
+    expect(button.right, "the icon is not at the row's trailing edge").toBeGreaterThanOrEqual(
+      row.right - 24,
+    );
   });
 
   it("shows a limit changed on the other device without reopening the settings page", async () => {

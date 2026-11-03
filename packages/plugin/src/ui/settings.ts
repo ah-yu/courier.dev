@@ -162,7 +162,7 @@ export class CourierSettingTab extends PluginSettingTab {
   /** Set by a failed sign-in so the re-render can put focus back on the key field. */
   private focusLoginKey = false;
   /**
-   * Removers for the "pressed outside" listeners of history-limit rows in edit mode.
+   * Removers for the dismiss listeners of history-limit rows in edit mode.
    *
    * A row registers one while it is being edited and removes it when the edit ends. A
    * full re-render replaces the row (and the modal can be closed) without going through
@@ -310,7 +310,7 @@ export class CourierSettingTab extends PluginSettingTab {
     for (const paint of this.historyLimitPaints) paint();
   }
 
-  /** Drop every "pressed outside" listener the history rows registered (see the field). */
+  /** Drop every dismiss listener the history rows registered (see the field). */
   private clearHistoryLimitDismissers(): void {
     for (const remove of this.historyLimitDismissers) remove();
     this.historyLimitDismissers.clear();
@@ -1084,8 +1084,9 @@ export class CourierSettingTab extends PluginSettingTab {
    * `plugin.setVaultHistoryLimit` only when the user presses the check — the confirmation
    * is the feedback that it was stored. A value that is not a usable number is refused
    * inline without a request; a failed save stays in the field with the server's message
-   * and the row keeps the number the server still holds. Pressing anywhere outside the row
-   * cancels the edit — only the check icon commits.
+   * and the row keeps the number the server still holds. Pressing anywhere but the field and
+   * the icon cancels the edit — including this row's own label and the blank space beside the
+   * field — and only the check icon commits.
    */
   private buildHistoryLimitRow(setting: Setting, kind: keyof HistoryLimits): void {
     const label = t(HISTORY_LIMIT_LABEL_KEYS[kind]);
@@ -1101,17 +1102,23 @@ export class CourierSettingTab extends PluginSettingTab {
     let draft = this.storedLimitOf(kind);
     let field: TextComponent | null = null;
     let button: ButtonComponent | null = null;
-    /** Removes the edit-mode "pressed outside" listener, while one is registered. */
+    /** Removes the edit-mode dismiss listener, while one is registered. */
     let dismissOutside: (() => void) | null = null;
 
     /**
-     * Watch for a press anywhere but this row while it is being edited.
+     * Watch for a press anywhere but the field and its icon while the row is being edited.
      *
-     * The page has no other way to know the user moved on: pressing blank space (or another
-     * row) cancels the edit — it does not save, because the check icon is the only commit.
-     * Presses inside the row (the field, the check) belong to it. Registered on the
-     * document the row lives in, so the settings page works in a popout window too; a host
-     * without a DOM (the unit-test stub) simply gets no listener.
+     * The page has no other way to know the user moved on: a press that is neither the field
+     * nor the icon cancels the edit — it does not save, because the check icon is the only
+     * commit. Presses on the field belong to the edit and the icon's own press is the
+     * confirmation.
+     *
+     * That exemption is deliberately narrow rather than "the whole row": below a 400 px pane
+     * (a phone, or a narrow settings window) the app lays the row out as a column with a
+     * full-width control, so the label and the space beside the field are most of the row,
+     * and a press there is the user moving on just as much as a press outside it. Registered
+     * on the document the row lives in, so the settings page works in a popout window too; a
+     * host without a DOM (the unit-test stub) simply gets no listener.
      */
     const listenOutside = (): void => {
       if (dismissOutside !== null) return;
@@ -1122,7 +1129,10 @@ export class CourierSettingTab extends PluginSettingTab {
         // A save in flight is not cancellable; it is also over in a moment.
         if (!editing || saving) return;
         const target = event.target as Node | null;
-        if (target !== null && setting.settingEl.contains(target)) return;
+        if (target === null) return;
+        const onField = field !== null && field.inputEl.contains(target);
+        const onIcon = button !== null && button.buttonEl.contains(target);
+        if (onField || onIcon) return;
         stopEditing();
       };
       const remove = (): void => {
