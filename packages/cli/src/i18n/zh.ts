@@ -44,6 +44,9 @@ export const zh = {
     "逗号分隔 images,video,audio,pdf,otherTypes）",
   "cli.option.syncOtherTypes": "同时同步所有其他文件类型（.base、.excalidraw、压缩包等）",
   "cli.option.excludeFolders": "把这些库文件夹排除在同步之外（逗号分隔；--exclude-folders= 清空）",
+  "cli.option.historyLimitDocuments":
+    "远程库为每个 Markdown 笔记和 Canvas 文件保留的历史版本数（默认 200）",
+  "cli.option.historyLimitAttachments": "远程库为其他每个文件保留的历史版本数（默认 10）",
   "cli.option.once": "只执行一次 reconcile 后退出",
   "cli.option.interval": "完整 reconcile 的间隔，单位分钟（默认 30）",
   "cli.option.json": "以 JSON 输出",
@@ -87,6 +90,7 @@ export const zh = {
     "该 Vault 的同步进程仍在运行。请停止它（或结束对应 `courier-cli run --vault` 进程）。",
   "cli.connect.fileTypes": "文件类型：{value}。",
   "cli.connect.excludedFolders": "排除的文件夹：{value}。",
+  "cli.connect.historyLimits": "历史版本数：{value}。",
   "cli.run.stopping": "正在停止…",
   "cli.run.started":
     "无头同步已启动：{vault}，{vaultPath} → {serverUrl}（设备「{deviceName}」）；详细状态见 `courier-cli status --vault {vaultId}`。",
@@ -107,6 +111,7 @@ export const zh = {
   "cli.status.label.obsidian": "Obsidian",
   "cli.status.label.state": "状态",
   "cli.status.label.fileTypes": "文件类型",
+  "cli.status.label.historyLimit": "历史版本",
   "cli.status.label.excluded": "排除的文件夹",
   "cli.status.label.conflicts": "冲突副本",
   "cli.status.label.tooLarge": "超出上限",
@@ -119,6 +124,8 @@ export const zh = {
   "cli.status.fileTypes.valueOnly": "仅 {types}（{cap}）",
   "cli.status.cap.unlimited": "上限不限，由管理员设置",
   "cli.status.cap.limited": "上限 {megabytes} MB，由管理员设置",
+  "cli.status.historyLimit.value": "笔记/Canvas {documents}，附件 {attachments}",
+  "cli.status.historyLimit.unknown": "（无法从服务器读取）",
   "cli.status.conflicts.one": "{count} 个冲突副本：{files}",
   "cli.status.conflicts.other": "{count} 个冲突副本：{files}",
   "cli.status.tooLarge.one": "{count} 个文件超过上限：{files}",
@@ -139,6 +146,7 @@ export const zh = {
   "cli.status.obsidian.pluginOff": "已打开，但插件未配置同步",
 
   "cli.config.error.unknownFileType": "未知文件类型「{name}」。有效类型：{valid}。",
+  "cli.config.error.historyLimit": "历史版本数必须是 1 到 {max} 之间的整数，当前为「{value}」。",
   "cli.options.error.interval":
     "`--interval` 需要非负的分钟数，当前为「{value}」（0 表示关闭周期同步）。",
 

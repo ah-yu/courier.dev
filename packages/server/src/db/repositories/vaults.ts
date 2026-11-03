@@ -5,7 +5,7 @@ import type {
   FindVaultByIdFn,
   InsertVaultFn,
   ListVisibleVaultsFn,
-  UpdateVaultNameFn,
+  UpdateVaultSettingsFn,
   VaultRow,
 } from "../../handlers/vault-handlers";
 
@@ -53,19 +53,49 @@ export const insertVault: InsertVaultFn = async (data) =>
           keyCheck: data.keyCheck,
           ownerUserId: data.ownerUserId,
         })
-        .returning({ createdAt: vaults.createdAt })
+        .returning({
+          createdAt: vaults.createdAt,
+          historyLimitDocuments: vaults.historyLimitDocuments,
+          historyLimitAttachments: vaults.historyLimitAttachments,
+        })
         .all();
-      return { createdAt: new Date(row.createdAt) };
+      return {
+        createdAt: new Date(row.createdAt),
+        historyLimitDocuments: row.historyLimitDocuments,
+        historyLimitAttachments: row.historyLimitAttachments,
+      };
     },
     { behavior: "immediate" },
   );
 
-export const updateVaultName: UpdateVaultNameFn = async (id, name) => {
+/**
+ * Write the name and/or the two history limits.
+ *
+ * The caller (the update handler) has already resolved what the limits become — a
+ * missing field there means "keep it", so this statement writes the values it is given
+ * and stamps `updated_at`. Renaming a vault and changing its retention are one route
+ * because they are one "vault settings" write, and one response describes the result.
+ */
+export const updateVaultSettings: UpdateVaultSettingsFn = async (id, patch) => {
   const [row] = await db
     .update(vaults)
-    .set({ name, updatedAt: new Date().toISOString() })
+    .set({
+      ...(patch.name === undefined ? {} : { name: patch.name }),
+      ...(patch.historyLimitDocuments === undefined
+        ? {}
+        : { historyLimitDocuments: patch.historyLimitDocuments }),
+      ...(patch.historyLimitAttachments === undefined
+        ? {}
+        : { historyLimitAttachments: patch.historyLimitAttachments }),
+      updatedAt: new Date().toISOString(),
+    })
     .where(eq(vaults.id, id))
-    .returning({ id: vaults.id, name: vaults.name });
+    .returning({
+      id: vaults.id,
+      name: vaults.name,
+      historyLimitDocuments: vaults.historyLimitDocuments,
+      historyLimitAttachments: vaults.historyLimitAttachments,
+    });
   return row;
 };
 
@@ -78,11 +108,19 @@ export const deleteVaultById = async (id: string): Promise<void> => {
  *
  * This is `canAccessVault` (`lib/vault-access.ts`) written as SQL. The two have
  * to agree — `vault-access.e2e.test.ts` asserts that the ids a client can list
- * are exactly the ids its sync requests are accepted for.
+ * are exactly the ids its sync requests are accepted for. Each entry carries the
+ * vault's retention limits, so one read answers what the settings page and `status`
+ * display.
  */
 export const listVisibleVaults: ListVisibleVaultsFn = async (userId) => {
   const rows = await db
-    .select({ id: vaults.id, name: vaults.name, createdAt: vaults.createdAt })
+    .select({
+      id: vaults.id,
+      name: vaults.name,
+      createdAt: vaults.createdAt,
+      historyLimitDocuments: vaults.historyLimitDocuments,
+      historyLimitAttachments: vaults.historyLimitAttachments,
+    })
     .from(vaults)
     .where(visibleVaultsWhere(userId))
     .orderBy(vaults.createdAt);

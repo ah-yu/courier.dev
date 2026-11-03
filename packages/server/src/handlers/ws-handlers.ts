@@ -3,7 +3,7 @@ import type { FindVaultByIdFn } from "./vault-handlers";
 import { authenticateUserKey } from "../lib/user-credentials";
 import { canAccessVault } from "../lib/vault-access";
 import { AppError } from "../lib/errors";
-import type { ApiErrorCode } from "@courier/shared";
+import type { ApiErrorCode, HistoryLimits } from "@courier/shared";
 import { trimDeviceName } from "@courier/shared";
 
 /**
@@ -80,6 +80,14 @@ export interface WsHub {
   /** Who is subscribed right now: distinct users, and how many vaults anyone holds. */
   onlineSummary(): { users: number; vaults: number };
   broadcastVaultDeleted(vaultId: string): void;
+  /**
+   * Announce a vault's new retention limits to every session subscribed to it.
+   *
+   * A settings page that is already open has to show the numbers the server now holds —
+   * they are the vault's, so a change made on one device is every device's change. The
+   * event is display data only: the server applies the limits itself when it trims.
+   */
+  broadcastVaultSettings(vaultId: string, historyLimits: HistoryLimits): void;
   /**
    * Announce a new version to every session subscribed to the vault except the
    * sender (identified by sessionId). The origin device label is included so
@@ -203,6 +211,21 @@ export function createWsHub(): WsHub {
     vaultConnections.delete(vaultId);
   }
 
+  function broadcastVaultSettings(vaultId: string, historyLimits: HistoryLimits): void {
+    const set = vaultConnections.get(vaultId);
+    if (!set) return;
+    const message = JSON.stringify({ type: "vault_settings", vaultId, historyLimits });
+    for (const sessionId of set) {
+      const meta = sessionMeta.get(sessionId);
+      if (!meta) continue;
+      try {
+        meta.ws.send(message);
+      } catch {
+        // Connection might be dead — ignore; the close handler removes it.
+      }
+    }
+  }
+
   function broadcastFilePushed(
     vaultId: string,
     fileId: string,
@@ -289,6 +312,7 @@ export function createWsHub(): WsHub {
     revokeUserSessions,
     onlineSummary,
     broadcastVaultDeleted,
+    broadcastVaultSettings,
     broadcastFilePushed,
     subscribe,
   };

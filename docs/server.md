@@ -7,7 +7,7 @@
 
 - **Framework**: `Bun.serve` with its `routes` table — each route module exports a `RouteTable` instance; mounted in `app.ts` via `app.route()`.
 - **Entry point**: `src/main.ts` starts the server; `src/index.ts` creates/exports the `Bun.serve` app (used by `main.ts` and tests).
-- **Database**: Drizzle ORM with **bun:sqlite** (`DatabaseSync`), Drizzle dialect `sqlite`. Tables (`users`, `vaults`, `api_keys`, `file_versions`) in `src/db/schema.ts`. Not Neon/PostgreSQL. `vaults.owner_user_id` scopes vaults to users; `file_versions.device_name` records the pushing client's self-declared label; `users` carry per-user `storage_bytes_limit` / `retention_days` / `expires_at`.
+- **Database**: Drizzle ORM with **bun:sqlite** (`DatabaseSync`), Drizzle dialect `sqlite`. Tables (`users`, `vaults`, `api_keys`, `file_versions`) in `src/db/schema.ts`. Not Neon/PostgreSQL. `vaults.owner_user_id` scopes vaults to users; `file_versions.device_name` records the pushing client's self-declared label; `users` carry per-user `storage_bytes_limit` / `retention_days` / `expires_at`; `vaults` carry the two retention limits (`history_limit_documents` / `history_limit_attachments`), and `file_versions.history_kind` records which of them a version's chain is trimmed by.
 - **Migrations**: `drizzle/*/migration.sql`, applied by `courier migrate` (`bun run --filter @courier/server migrate`). A migration is identified by its directory name — never its content — and recorded in `courier_migrations (name, applied_at)`, one transaction per migration; editing a migration that is already applied has no effect, so a schema change is always a new migration. A database whose ledger holds a name this binary does not carry is refused (`upgrade the binary`). The chain starts from one generated baseline (`drizzle/*_*/migration.sql` plus its `snapshot.json`), so a fresh database gets the current schema in one step; later changes are added as new migrations, hand-written or authored with `bun run --filter @courier/server db:generate`. The chain is generated into `src/db/migrations.generated.ts` (`bun run --filter @courier/server migrations:generate`) so the single-file binary carries it without reading the filesystem; the file is committed, `build`/`build:exe` refuse a stale one (`bun scripts/generate-migrations.ts --check`), `bun run dev` and the dev `migrate` script regenerate it first, and `bun run verify` runs the same check as its `migrations` gate. `db:push`/`db:migrate` are gone because they write drizzle's own ledger and would leave this one empty.
 - **Config**: `src/config.ts` (Zod) validates `SQLITE_PATH` (default `./data/courier.db`), `BLOB_STORE_DIR` (default `./data/blobs`), `PORT` (default 80 prod / 3002 dev; an explicit `PORT` in the dev environment wins, so two worktrees can run side by side), `PRUNE_INTERVAL_MS` (retention-pruning job), the `LOG_*` set (below) and the TLS/ACME set. Those relative defaults are resolved against the **executable's directory** in a build (`COURIER_ENV=production`): inside a `bun build --compile` binary `import.meta.dir` points at Bun's virtual root (`/$bunfs/root`, `B:\~BUN\root`), which the runtime reports as existing while writes into it never reach the disk — so a deployed binary must not derive its data directory from it. `resolveDataDir` rejects that path explicitly and `config.test.ts` pins the three cases (bundled, real module dir, missing module dir).
 
@@ -62,6 +62,24 @@ Content is addressed by its plaintext hash, and the store holds the ciphertext.
   per file and most of a first bind's server time (see
   [first-bind-performance.md](first-bind-performance.md)); a batch that fails to insert answers every
   file in it with `error`, which is what a per-file insert answered for the one file.
+- **The same transaction trims each chain to the vault's history limit.** The two limits are columns on
+  the **vault** (`history_limit_documents` / `history_limit_attachments`, 200 / 10 by default), so
+  every device pushing into that vault is trimmed by the same numbers; a version carries only
+  `history_kind` (`documents` for markdown/canvas, `attachments` otherwise), which the server maps to
+  the vault's value and stores on the row. The transaction deletes that chain's rows past the newest N
+  with one `LIMIT -1 OFFSET <n>` selection ordered `(created_at DESC, rowid DESC)` — the same order
+  every reader calls "newest", and the version just appended is always inside the kept window. The
+  removed rows' content hashes are returned to the handler, which after the commit deletes each blob
+  **only if no remaining `file_versions` row of the vault still names it** (the same bytes may be
+  another file's content) — the `(vault_id, content_hash)` index makes that one look-up rather than a
+  walk of the vault. A failed reclaim is not a failed push: the row is committed, and
+  `sweepOrphanBlobs` is the backstop.
+- **Lowering a limit trims the whole vault, without waiting for a push.** `PATCH /api/vaults/:id`
+  writes the new numbers and then runs `trimVaultHistory` (`lib/history-trim.ts`): one window-function
+  query ranks every chain and picks the rows past the limit its chain's head kind names, deletes them
+  in one transaction, and reclaims the blobs that became unreferenced (the same rule as the push path).
+  It is idempotent, which is what lets a retried `PATCH` finish a job whose first attempt failed. Raising
+  a limit trims nothing. The age-based `retentionDays` pass is separate and unaffected.
 - **A batch's blobs go into one file, and the file is flushed once.** One push carries at most 100
   files; the handler writes their payloads into the batch's file instead of paying one store round
   trip and one `fsync` per file, and checks presence afterwards so a `rename` in the same batch finds

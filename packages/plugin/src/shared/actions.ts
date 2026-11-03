@@ -37,6 +37,7 @@ export function createPluginActions(ctx: PluginActionContext): PluginActions {
     createVault: (name, encryptionSalt, keyCheck) =>
       client.createVault(name, encryptionSalt, keyCheck),
     listVaults: () => client.listVaults(),
+    updateVault: (id, patch) => client.updateVault(id, patch),
     getMe: () => client.getMe(),
     getEncryptionSalt: (id) => client.getEncryptionSalt(id),
     getKeyCheck: (id) => client.getKeyCheck(id),

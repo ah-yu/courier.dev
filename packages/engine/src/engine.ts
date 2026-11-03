@@ -21,6 +21,7 @@ import { chunkBounds, chunkCountForSize, shouldTransferInChunks } from "./chunke
 import type { Platform } from "./platform";
 import { generateFileId, generateVersionId } from "./ids";
 import { isConflictFile, conflictFilePath } from "./conflict-file";
+import { historyKindFor } from "./file-types";
 import {
   isConfigPath,
   isSyncablePath,
@@ -1278,6 +1279,12 @@ export class SyncEngine {
 
     this.rememberPushedVersion(versionId);
 
+    // Which side of the vault's retention split this file falls on. The plaintext path is
+    // the only place the category is visible, so the decision is made here and travels
+    // with the version (see `PushFileFrame.historyKind`); the server reads the **vault's**
+    // limits and trims to them.
+    const historyKind = historyKindFor(plainPath);
+
     return {
       fileId,
       plainPath,
@@ -1303,6 +1310,7 @@ export class SyncEngine {
         mtimeMs,
         baseVersionId,
         content: null,
+        historyKind,
       },
     };
   }

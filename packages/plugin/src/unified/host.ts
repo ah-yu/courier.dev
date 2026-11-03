@@ -20,6 +20,7 @@ import {
 } from "@courier/engine";
 import { ObsidianVaultAdapter } from "./adapter";
 import { watchLeaseDirectory } from "./lease-watch";
+import type { HistoryLimits } from "@courier/shared";
 import type { CourierSettings } from "../shared/settings";
 
 /**
@@ -129,6 +130,13 @@ export interface EngineHostOptions {
   onRateLimited?: (event: { waitMs: number }) => void;
   onStateChange?: (state: WsConnectionState) => void;
   onVaultDeleted?: () => void;
+  /**
+   * The vault's retention limits changed — on another device, or through the API.
+   *
+   * The settings page reads these numbers, so a page that is already open follows a change
+   * made elsewhere; a host that ignores it still syncs the same.
+   */
+  onVaultSettings?: (limits: HistoryLimits) => void;
   /**
    * The credential stopped working: revoked, expired, or disabled.
    *
@@ -376,6 +384,12 @@ export class EngineHost {
       },
       onStateChange: this.opts.onStateChange,
       onVaultDeleted: this.opts.onVaultDeleted,
+      onVaultSettings: (limits) => {
+        // A host that outlived its start (a scope change, a rebind) must not push the old
+        // vault's numbers into a page that is now showing another vault.
+        if (this.generation !== generation) return;
+        this.opts.onVaultSettings?.(limits);
+      },
       onAuthFailure: this.opts.onAuthFailure,
       onBindFailed: this.opts.onBindFailed,
       // The status bar reads this to say how far a first pass has got. Kept here, not in

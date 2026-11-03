@@ -8,9 +8,12 @@ import {
   type WorkspaceLeaf,
 } from "obsidian";
 import {
+  historyLimitsOf,
   normalizeDeviceName,
+  normalizeHistoryLimit,
   sortedCopy,
   type CreateVaultResponse,
+  type HistoryLimits,
   type HttpTransport,
   type UserSummary,
 } from "@courier/shared";
@@ -276,6 +279,25 @@ export default class CourierPlugin extends Plugin {
   private account: UserSummary | null = null;
   /** The key the cached account was read for, so a new sign-in cannot reuse it. */
   private accountKey: string | null = null;
+  /**
+   * The connected vault's retention limits, as the **server** reported them.
+   *
+   * Vault-level state, not a device setting: the settings page reads it before painting
+   * its two fields and writes it back through `PATCH /api/vaults/:id`. Kept in memory only
+   * — `data.json` must not become a second, divergent copy of a server value.
+   */
+  vaultHistoryLimits: HistoryLimits | null = null;
+  /** The in-flight read behind {@link refreshVaultHistoryLimits}, so two rows share one. */
+  private vaultLimitsInFlight: Promise<HistoryLimits | null> | null = null;
+  /**
+   * Bumped whenever a newer limits value arrives (the socket's `vault_settings`).
+   *
+   * A read or a PATCH started before that event resolves with an **older** pair — a GET
+   * can even be served from a WAL snapshot taken before the PATCH committed — and writing
+   * it into the cache would move the page back to the number it just left. Each request
+   * captures this value and drops its answer when it no longer matches.
+   */
+  private vaultLimitsEpoch = 0;
   /**
    * The password dialog this plugin has open, if any.
    *
@@ -862,6 +884,9 @@ export default class CourierPlugin extends Plugin {
     this.settings.connectedVaultId = input.vaultId;
     this.settings.connectedVaultName = input.vaultName;
     this.settings.encryptionSalt = input.encryptionSalt;
+    // The retention limits belong to the vault being left behind: drop the cached pair so
+    // the settings page cannot paint the previous vault's numbers while the new read runs.
+    this.vaultHistoryLimits = null;
     // A connection always starts syncing: pausing belongs to the binding that is being
     // replaced, and a user who just chose a vault is not asking for it to stay paused.
     this.settings.syncPaused = false;
@@ -936,6 +961,7 @@ export default class CourierPlugin extends Plugin {
   async disconnectVault(): Promise<void> {
     await unbindVault(this.app, this);
     clearSyncLog();
+    this.vaultHistoryLimits = null;
     // The page returns to 选择远程库; that transition is the confirmation.
     this.refreshSettings();
   }
@@ -950,6 +976,7 @@ export default class CourierPlugin extends Plugin {
   async logout(): Promise<void> {
     await unbindVault(this.app, this, { forgetAccount: true });
     clearSyncLog();
+    this.vaultHistoryLimits = null;
     this.forgetAccount();
     // The page returns to the sign-in step; that transition is the confirmation.
     this.refreshSettings();
@@ -1108,6 +1135,11 @@ export default class CourierPlugin extends Plugin {
     // The settings write above is another await; the same stale-start rule applies.
     if (!this.bindingStillCurrent(vaultId)) return false;
 
+    // The vault's retention limits are server state, and a device that starts after
+    // another one changed them must see the new values. Not awaited: the host's start does
+    // not depend on it, and the settings row repaints when the answer arrives.
+    void this.refreshVaultHistoryLimits();
+
     // Wait briefly for the old host's drain so the replacement can acquire the lease
     // immediately. A hung adapter must not freeze the settings page: after the bounded
     // wait, build the replacement and let its acquisition wait for the old release. The
@@ -1173,6 +1205,7 @@ export default class CourierPlugin extends Plugin {
         );
       },
       onVaultDeleted: () => void this.handleRemoteVaultDeleted(),
+      onVaultSettings: (limits) => this.handleVaultSettings(limits),
       onAuthFailure: (reason) => void this.handleAuthFailure(reason),
       // One writer per vault. The CLI takes the same lease, so this host does not start
       // its engine while that process owns the vault.
@@ -1310,6 +1343,130 @@ export default class CourierPlugin extends Plugin {
     // The file explorer is not part of the host's scope: re-decorate the rows now instead
     // of waiting for the next layout change or row rebuild.
     this.refreshExcludedFolderRows();
+  }
+
+  /**
+   * Read the connected vault's retention limits from the server, once at a time.
+   *
+   * Vault-level state, so the settings page asks the server rather than reading a local
+   * copy: a limit changed on another device has to show up here, and this device must
+   * never paint a number the server does not hold. Both rows of the page ask on every
+   * render, so concurrent calls share one request (`vaultLimitsInFlight`). A read that fails
+   * leaves the last known value in place (it is not presented as freshly read); only a pair
+   * that has never been read leaves the rows saying it could not be read.
+   */
+  refreshVaultHistoryLimits(): Promise<HistoryLimits | null> {
+    const running = this.vaultLimitsInFlight;
+    if (running) return running;
+    const task = this.readVaultHistoryLimits().finally(() => {
+      if (this.vaultLimitsInFlight === task) this.vaultLimitsInFlight = null;
+    });
+    this.vaultLimitsInFlight = task;
+    return task;
+  }
+
+  private async readVaultHistoryLimits(): Promise<HistoryLimits | null> {
+    const vaultId = this.settings.connectedVaultId;
+    if (!vaultId || !this.settings.userKey) {
+      this.vaultHistoryLimits = null;
+      return null;
+    }
+    const epoch = this.vaultLimitsEpoch;
+    try {
+      const { vaults } = await this.actions.listVaults();
+      // A disconnect or a vault switch can land while the request is in flight.
+      if (this.settings.connectedVaultId !== vaultId) return this.vaultHistoryLimits;
+      // A `vault_settings` arrived while this read was out: its pair is newer than the
+      // answer this request can give, so the cache keeps the event's value.
+      if (this.vaultLimitsEpoch !== epoch) return this.vaultHistoryLimits;
+      const match = vaults.find((vault) => vault.id === vaultId);
+      if (match) this.vaultHistoryLimits = historyLimitsOf(match);
+      return this.vaultHistoryLimits;
+    } catch (err) {
+      console.error("Courier: reading the vault's history limits failed:", err);
+      return this.vaultHistoryLimits;
+    }
+  }
+
+  /**
+   * The vault's retention limits changed somewhere else.
+   *
+   * They are vault-level state, so another device's change is this device's too; the
+   * settings page paints them from the cached pair, which this keeps current. The rows are
+   * repainted in place — rebuilding the page would drop an edit in progress and the scroll
+   * position — and a row the user is editing keeps their field untouched.
+   */
+  private handleVaultSettings(limits: HistoryLimits): void {
+    this.storeVaultLimits(limits);
+    this.settingTab?.applyVaultLimits();
+    // A lower limit also trims the chains already stored: an open history tab would keep
+    // listing versions whose content the server has just reclaimed, and selecting one would
+    // show "cannot fetch or decrypt". Nothing else tells the tab — a trim is not a vault
+    // event — so it is re-read here.
+    this.refreshVersionHistories();
+  }
+
+  /**
+   * Write the cached pair and make every answer already in flight obsolete.
+   *
+   * Both writers go through this — the socket event and an accepted PATCH response — so a
+   * read that started earlier can never land on top of a newer pair. That matters most
+   * with the socket down: without the bump, a GET served from a snapshot taken before the
+   * save can repaint the previous number and a user could re-save it over the server.
+   */
+  private storeVaultLimits(limits: HistoryLimits): void {
+    this.vaultLimitsEpoch += 1;
+    this.vaultHistoryLimits = limits;
+  }
+
+  /** Re-read every open version-history tab of the connected vault (see above). */
+  private refreshVersionHistories(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(VERSION_HISTORY_VIEW_TYPE)) {
+      const view = leaf.view;
+      if (view instanceof VersionHistoryView) view.refreshAfterLimitsChange();
+    }
+  }
+
+  /**
+   * Change one of the connected vault's retention limits.
+   *
+   * A write to the **vault**, not to this device: every device of the vault reads the same
+   * number on its next push, and the server trims the chains already stored when the value
+   * goes down. A value that cannot be a limit (0, a fraction, text) keeps the current one
+   * rather than being sent; a failed request returns the message the settings row shows.
+   */
+  async setVaultHistoryLimit(
+    kind: keyof HistoryLimits,
+    value: number,
+  ): Promise<ActionOutcome<HistoryLimits>> {
+    const vaultId = this.settings.connectedVaultId;
+    if (!vaultId) return { ok: false, error: t("error.vaultNotConnected") };
+    const current = this.vaultHistoryLimits ?? (await this.refreshVaultHistoryLimits());
+    if (!current) return { ok: false, error: t("error.vaultLimitsUnavailable") };
+    const next = normalizeHistoryLimit(value, current[kind]);
+    if (next === current[kind]) return { ok: true, value: current };
+    const epoch = this.vaultLimitsEpoch;
+    try {
+      const updated = await this.actions.updateVault(
+        vaultId,
+        kind === "documents" ? { historyLimitDocuments: next } : { historyLimitAttachments: next },
+      );
+      // A vault switch during the request must not cache the other vault's answer, and a
+      // `vault_settings` that arrived meanwhile is newer than this response (a peer changed
+      // the other half after this PATCH was decided): its pair stays.
+      if (this.settings.connectedVaultId === vaultId) {
+        // An accepted response also bumps the epoch: a render-time read that started before
+        // this save must not paint its older pair over the number just stored.
+        if (this.vaultLimitsEpoch === epoch) this.storeVaultLimits(historyLimitsOf(updated));
+        // The response means the server has already trimmed; re-read the open history tabs
+        // now, without waiting for the broadcast that repeats this for other devices (a
+        // socket that is momentarily down must not leave this device's tab stale).
+        this.refreshVersionHistories();
+      }
+      return { ok: true, value: this.vaultHistoryLimits ?? historyLimitsOf(updated) };
+    } catch (err) {
+      return { ok: false, error: describeActionError(err, t("action.updateVaultLimits")) };
+    }
   }
 
   /**
@@ -1492,6 +1649,7 @@ export default class CourierPlugin extends Plugin {
     );
     await unbindVault(this.app, this);
     clearSyncLog();
+    this.vaultHistoryLimits = null;
     this.refreshSettings();
   }
 
@@ -1513,6 +1671,7 @@ export default class CourierPlugin extends Plugin {
       showNotice(t("notice.userKeyRevoked"));
       await unbindVault(this.app, this, { forgetAccount: true });
       clearSyncLog();
+      this.vaultHistoryLimits = null;
       this.forgetAccount();
       this.refreshSettings();
       return;

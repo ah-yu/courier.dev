@@ -1,6 +1,12 @@
 import { sqliteTable, text, integer, index, primaryKey } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
-import { DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_VAULTS, SYNC_ACTIONS } from "@courier/shared";
+import {
+  DEFAULT_HISTORY_LIMITS,
+  DEFAULT_MAX_FILE_BYTES,
+  DEFAULT_MAX_VAULTS,
+  HISTORY_KINDS,
+  SYNC_ACTIONS,
+} from "@courier/shared";
 
 // SQLite ISO 8601 timestamp default
 const now = sql`(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`;
@@ -61,6 +67,17 @@ export const vaults = sqliteTable("vaults", {
   // Owning user for the shared model. Null = legacy/server-managed vault still
   // visible to any authenticated user (single-user deployments).
   ownerUserId: text("owner_user_id").references(() => users.id, { onDelete: "set null" }),
+  // ── Version-history retention (vault-level, shared by every device of the vault) ──
+  // How many versions of each chain the server keeps. A push states its file's **kind**
+  // (`file_versions.history_kind`) and the server reads the number here, so the policy is
+  // one per vault rather than "whatever the last device to edit the file set". Lowering
+  // either value trims the vault's existing chains when the update commits.
+  historyLimitDocuments: integer("history_limit_documents")
+    .notNull()
+    .default(DEFAULT_HISTORY_LIMITS.documents),
+  historyLimitAttachments: integer("history_limit_attachments")
+    .notNull()
+    .default(DEFAULT_HISTORY_LIMITS.attachments),
   createdAt: text("created_at").notNull().default(now),
   updatedAt: text("updated_at").notNull().default(now),
 });
@@ -98,10 +115,21 @@ export const fileVersions = sqliteTable(
     // registry, nothing is resolved against it, and a client may rename itself at
     // any time — older rows then keep the name they were written with.
     deviceName: text("device_name"),
+    // The kind of file this version belongs to, as the pushing client classified it:
+    // `documents` (markdown/canvas) or `attachments` (everything else). The client states
+    // it because the category is only visible in the plaintext path; the server uses it to
+    // pick the vault's document or attachment limit when it trims, including in a later
+    // pass that trims chains nobody is pushing. Default `attachments` is the conservative
+    // side (the smaller limit) for any row a hand-written insert leaves unset.
+    historyKind: text("history_kind", { enum: HISTORY_KINDS }).notNull().default("attachments"),
     createdAt: text("created_at").notNull().default(now),
   },
   (table) => [
     index("idx_file_versions_vault_file_created").on(table.vaultId, table.fileId, table.createdAt),
+    // "Does any row still name this content hash?" is asked after a chain is trimmed to
+    // its history limit (`tryInsertFileVersions`) and by the orphan sweep. Without this
+    // the check is a scan of every version row in the vault, on the push path.
+    index("idx_file_versions_vault_hash").on(table.vaultId, table.contentHash),
   ],
 );
 

@@ -733,6 +733,29 @@ describe("SyncHost", () => {
     expect(second.events.stopped).toBe(true);
   });
 
+  it("hands a vault-settings change to the host without touching the loop", async () => {
+    // The limits are display state (the server trims by its own copy): the host forwards
+    // them and keeps running, which is what lets an open settings page follow a change
+    // made on another device.
+    const onVaultSettings = vi.fn();
+    const { host, events } = await newHost({ onVaultSettings });
+    track(host);
+    await host.start();
+    const socket = MockWebSocket.instances.at(-1)!;
+    socket.deliver({ type: "subscribe_success", sessionId: "session-1" });
+
+    socket.deliver({
+      type: "vault_settings",
+      vaultId: "vault-1",
+      historyLimits: { documents: 40, attachments: 5 },
+    });
+
+    expect(onVaultSettings).toHaveBeenCalledWith({ documents: 40, attachments: 5 });
+    expect(host.engine).not.toBeNull();
+    expect(host.wsState).toBe("connected");
+    expect(events.stopped).toBe(false);
+  });
+
   /**
    * The refused subscription is the same rule on the socket's own channel: a
    * refusal that names a dead credential, or a vault that no longer exists, is

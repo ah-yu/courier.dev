@@ -52,6 +52,10 @@ export const en: Record<MessageKey, string> = {
   "cli.option.syncOtherTypes": "Also sync every other file type (.base, .excalidraw, archives, …)",
   "cli.option.excludeFolders":
     "Leave these vault folders out of sync (comma list; --exclude-folders= clears)",
+  "cli.option.historyLimitDocuments":
+    "Versions of each markdown note and canvas file the vault keeps on the server (default 200)",
+  "cli.option.historyLimitAttachments":
+    "Versions of every other file the vault keeps on the server (default 10)",
   "cli.option.once": "Run a single reconcile pass and exit",
   "cli.option.interval": "Full-reconcile interval in minutes (default 30)",
   "cli.option.json": "Output as JSON",
@@ -95,6 +99,7 @@ export const en: Record<MessageKey, string> = {
     "That vault's daemon is still running. Stop it (or end its `courier-cli run --vault` process).",
   "cli.connect.fileTypes": "File types: {value}.",
   "cli.connect.excludedFolders": "Excluded folders: {value}.",
+  "cli.connect.historyLimits": "History versions: {value}.",
   "cli.run.stopping": "Stopping...",
   "cli.run.started":
     'Started headless sync: {vault}, {vaultPath} against {serverUrl} (device "{deviceName}"). ' +
@@ -116,6 +121,7 @@ export const en: Record<MessageKey, string> = {
   "cli.status.label.obsidian": "Obsidian",
   "cli.status.label.state": "State",
   "cli.status.label.fileTypes": "File types",
+  "cli.status.label.historyLimit": "History",
   "cli.status.label.excluded": "Excluded",
   "cli.status.label.conflicts": "Conflicts",
   "cli.status.label.tooLarge": "Too large",
@@ -128,6 +134,8 @@ export const en: Record<MessageKey, string> = {
   "cli.status.fileTypes.valueOnly": "{types} only ({cap})",
   "cli.status.cap.unlimited": "max unlimited, admin-set",
   "cli.status.cap.limited": "max {megabytes} MB, admin-set",
+  "cli.status.historyLimit.value": "notes/canvas {documents}, attachments {attachments}",
+  "cli.status.historyLimit.unknown": "(not readable from the server)",
   "cli.status.conflicts.one": "1 parked file: {files}",
   "cli.status.conflicts.other": "{count} parked files: {files}",
   "cli.status.tooLarge.one": "1 file over the cap: {files}",
@@ -149,6 +157,8 @@ export const en: Record<MessageKey, string> = {
   "cli.status.obsidian.pluginOff": "open, but the plugin is not set up to sync",
 
   "cli.config.error.unknownFileType": 'Unknown file type "{name}". Valid types: {valid}.',
+  "cli.config.error.historyLimit":
+    'A history limit is a whole number of versions between 1 and {max}, got "{value}".',
   "cli.options.error.interval":
     '--interval takes a non-negative number of minutes, got "{value}" ' +
     "(0 disables the periodic reconcile).",

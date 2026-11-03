@@ -3,9 +3,11 @@ import {
   PluginSettingTab,
   Setting,
   setIcon,
+  type ButtonComponent,
   type SettingDefinition,
   type SettingDefinitionItem,
   type SettingGroupItem,
+  type TextComponent,
 } from "obsidian";
 import {
   FILE_TYPE_GROUPS,
@@ -13,7 +15,12 @@ import {
   type FileTypeGroup,
   type SettingsGroup,
 } from "@courier/engine";
-import { MAX_DEVICE_NAME_LENGTH, type UserSummary } from "@courier/shared";
+import {
+  MAX_DEVICE_NAME_LENGTH,
+  MAX_HISTORY_LIMIT,
+  type HistoryLimits,
+  type UserSummary,
+} from "@courier/shared";
 import { plural, t, type PluginMessageKey } from "../i18n";
 import type CourierPlugin from "../main";
 import { VaultPickerModal } from "./dialogs/vault-picker-modal";
@@ -54,6 +61,20 @@ const FILE_TYPE_DESCRIPTION_KEYS: Record<FileTypeGroup, PluginMessageKey> = {
   pdf: "settings.fileType.pdf.desc",
   otherTypes: "settings.fileType.otherTypes.desc",
 };
+
+/** The catalog key of each history-limit row's label and description. */
+const HISTORY_LIMIT_LABEL_KEYS: Record<keyof HistoryLimits, PluginMessageKey> = {
+  documents: "settings.historyLimit.documents.label",
+  attachments: "settings.historyLimit.attachments.label",
+};
+
+const HISTORY_LIMIT_DESCRIPTION_KEYS: Record<keyof HistoryLimits, PluginMessageKey> = {
+  documents: "settings.historyLimit.documents.desc",
+  attachments: "settings.historyLimit.attachments.desc",
+};
+
+/** The two history-limit rows, in the order the section shows them. */
+const HISTORY_LIMIT_KINDS: readonly (keyof HistoryLimits)[] = ["documents", "attachments"];
 
 /** The catalog key of each config-folder group's label and description. */
 const SETTINGS_GROUP_LABEL_KEYS: Record<SettingsGroup, PluginMessageKey> = {
@@ -140,6 +161,24 @@ export class CourierSettingTab extends PluginSettingTab {
   private loginResizeObserver: ResizeObserver | null = null;
   /** Set by a failed sign-in so the re-render can put focus back on the key field. */
   private focusLoginKey = false;
+  /**
+   * Removers for the "pressed outside" listeners of history-limit rows in edit mode.
+   *
+   * A row registers one while it is being edited and removes it when the edit ends. A
+   * full re-render replaces the row (and the modal can be closed) without going through
+   * `stopEditing`, so the page clears whatever is left before drawing again — otherwise a
+   * listener would outlive the row it belongs to.
+   */
+  private historyLimitDismissers = new Set<() => void>();
+  /**
+   * Repainters for the history-limit rows, one per rendered row.
+   *
+   * A change made on another device arrives over the WebSocket; the plugin updates the
+   * cached pair and calls {@link applyVaultLimits}, which repaints the rows in place —
+   * rebuilding the page would drop an edit in progress and the scroll position. Cleared
+   * with the dismissers when the page renders again.
+   */
+  private historyLimitPaints = new Set<() => void>();
 
   constructor(app: App, plugin: CourierPlugin) {
     super(app, plugin);
@@ -185,6 +224,10 @@ export class CourierSettingTab extends PluginSettingTab {
     // A full render replaces every row; the old connection row must not stay reachable by a
     // state change that arrives before the new one exists.
     this.connectionRow = null;
+    // The same for a history row that was in edit mode: its outside listener belongs to
+    // the row the render is about to replace.
+    this.clearHistoryLimitDismissers();
+    this.historyLimitPaints.clear();
     const stage = this.stage();
     // The login step owns the classes that flatten and centre it. Only another step (or a
     // re-render of this one, which cleans up at its own start) gets the app's chrome back;
@@ -247,8 +290,30 @@ export class CourierSettingTab extends PluginSettingTab {
   }
 
   override hide(): void {
-    // A pending device-name save must not be lost when the tab closes.
+    // A pending device-name save must not be lost when the tab closes. A history-limit
+    // edit is deliberately not flushed: it is saved only by the row's own check icon,
+    // which is what tells the user whether the vault was changed.
     this.flushDeviceName();
+    this.clearHistoryLimitDismissers();
+    this.historyLimitPaints.clear();
+  }
+
+  /**
+   * Repaint the history-limit rows from the cached server pair.
+   *
+   * Called when the vault's limits change on another device: the open page follows without
+   * being reopened. A row the user is editing is repainted underneath them (its value
+   * display and icon state) but their field keeps what they typed, so the edit is not
+   * destroyed.
+   */
+  applyVaultLimits(): void {
+    for (const paint of this.historyLimitPaints) paint();
+  }
+
+  /** Drop every "pressed outside" listener the history rows registered (see the field). */
+  private clearHistoryLimitDismissers(): void {
+    for (const remove of this.historyLimitDismissers) remove();
+    this.historyLimitDismissers.clear();
   }
 
   // ── Stage ──
@@ -514,6 +579,21 @@ export class CourierSettingTab extends PluginSettingTab {
           desc: t(FILE_TYPE_DESCRIPTION_KEYS[group]),
           visible,
           control: { type: "toggle", key: `fileTypes.${group}` },
+        })),
+      ),
+
+      this.group(
+        t("settings.section.historyLimit"),
+        t("settings.section.historyLimit.tooltip"),
+        visible,
+        HISTORY_LIMIT_KINDS.map((kind): SettingDefinition => ({
+          name: t(HISTORY_LIMIT_LABEL_KEYS[kind]),
+          desc: t(HISTORY_LIMIT_DESCRIPTION_KEYS[kind]),
+          visible,
+          // A `render` item rather than a `control`: the row owns a small state machine
+          // (text + pencil → input + check → back), and the number it shows afterwards is
+          // what the server really holds (a nonsense entry is refused inline, never stored).
+          render: (setting) => this.buildHistoryLimitRow(setting, kind),
         })),
       ),
 
@@ -992,6 +1072,205 @@ export class CourierSettingTab extends PluginSettingTab {
         text.onChange((value) => this.queueDeviceName(value));
         text.inputEl.addEventListener("blur", () => this.flushDeviceName());
       });
+  }
+
+  /**
+   * One history-limit row: the value as **text**, a pencil icon beside it, and an
+   * explicit check-icon `Save` step.
+   *
+   * The value is vault-level state shared by every device, so the row is a view of what
+   * the server holds: it paints the cached number, asks once per render whether the server
+   * agrees (`plugin.refreshVaultHistoryLimits`), and a change goes through
+   * `plugin.setVaultHistoryLimit` only when the user presses the check — the confirmation
+   * is the feedback that it was stored. A value that is not a usable number is refused
+   * inline without a request; a failed save stays in the field with the server's message
+   * and the row keeps the number the server still holds. Pressing anywhere outside the row
+   * cancels the edit — only the check icon commits.
+   */
+  private buildHistoryLimitRow(setting: Setting, kind: keyof HistoryLimits): void {
+    const label = t(HISTORY_LIMIT_LABEL_KEYS[kind]);
+    const baseDescription = t(HISTORY_LIMIT_DESCRIPTION_KEYS[kind]);
+    setting.setName(label).setDesc(baseDescription).setClass("courier-history-limit-row");
+
+    // The number, next to the button; the input only exists while the row is being edited.
+    const valueEl = setting.controlEl.createSpan({ cls: "courier-history-limit-value" });
+    valueEl.setCssStyles({ minWidth: "3ch", textAlign: "right" });
+
+    let editing = false;
+    let saving = false;
+    let draft = this.storedLimitOf(kind);
+    let field: TextComponent | null = null;
+    let button: ButtonComponent | null = null;
+    /** Removes the edit-mode "pressed outside" listener, while one is registered. */
+    let dismissOutside: (() => void) | null = null;
+
+    /**
+     * Watch for a press anywhere but this row while it is being edited.
+     *
+     * The page has no other way to know the user moved on: pressing blank space (or another
+     * row) cancels the edit — it does not save, because the check icon is the only commit.
+     * Presses inside the row (the field, the check) belong to it. Registered on the
+     * document the row lives in, so the settings page works in a popout window too; a host
+     * without a DOM (the unit-test stub) simply gets no listener.
+     */
+    const listenOutside = (): void => {
+      if (dismissOutside !== null) return;
+      const doc =
+        setting.settingEl.ownerDocument ?? (typeof document === "undefined" ? null : document);
+      if (doc === null) return;
+      const onPointerDown = (event: PointerEvent): void => {
+        // A save in flight is not cancellable; it is also over in a moment.
+        if (!editing || saving) return;
+        const target = event.target as Node | null;
+        if (target !== null && setting.settingEl.contains(target)) return;
+        stopEditing();
+      };
+      const remove = (): void => {
+        doc.removeEventListener("pointerdown", onPointerDown, true);
+        this.historyLimitDismissers.delete(remove);
+        if (dismissOutside === remove) dismissOutside = null;
+      };
+      doc.addEventListener("pointerdown", onPointerDown, true);
+      dismissOutside = remove;
+      this.historyLimitDismissers.add(remove);
+    };
+
+    const stopListening = (): void => {
+      dismissOutside?.();
+      dismissOutside = null;
+    };
+
+    /** Paint the row for its current mode: text + pencil, or input + `Save`. */
+    const paint = (): void => {
+      const limits = this.plugin.vaultHistoryLimits;
+      valueEl.setText(limits === null ? t("settings.historyLimit.unknown") : String(limits[kind]));
+      if (editing) {
+        valueEl.hide();
+        valueEl.addClass("is-editing");
+        field?.inputEl.show();
+        field?.inputEl.addClass("is-editing");
+      } else {
+        valueEl.show();
+        valueEl.removeClass("is-editing");
+        field?.inputEl.hide();
+        field?.inputEl.removeClass("is-editing");
+      }
+      field?.setDisabled(saving);
+      button?.setDisabled(saving);
+      // The control is an icon in every mode: a pencil to open the field, a check to
+      // commit it. `clickable-icon` is what gives it the app's borderless icon chrome
+      // instead of a button's, and the tooltip carries the label a word would.
+      button?.buttonEl.addClass("clickable-icon");
+      if (saving) {
+        button?.setIcon("check");
+        button?.setTooltip(t("settings.historyLimit.saving"));
+        return;
+      }
+      if (editing) {
+        button?.setIcon("check");
+        button?.setTooltip(t("settings.historyLimit.confirm"));
+        return;
+      }
+      button?.setIcon("pencil");
+      button?.setTooltip(t("settings.historyLimit.edit"));
+    };
+
+    const startEditing = (): void => {
+      draft = this.storedLimitOf(kind);
+      field?.setValue(draft);
+      editing = true;
+      setting.setDesc(baseDescription);
+      paint();
+      field?.inputEl.focus?.();
+      listenOutside();
+    };
+
+    const stopEditing = (): void => {
+      stopListening();
+      editing = false;
+      draft = this.storedLimitOf(kind);
+      field?.setValue(draft);
+      setting.setDesc(baseDescription);
+      paint();
+    };
+
+    const save = async (): Promise<void> => {
+      if (saving) return;
+      const value = Number(draft);
+      if (!Number.isSafeInteger(value) || value < 1 || value > MAX_HISTORY_LIMIT) {
+        setting.setDesc(t("settings.historyLimit.invalid", { max: MAX_HISTORY_LIMIT }));
+        return;
+      }
+      saving = true;
+      paint();
+      const outcome = await this.plugin.setVaultHistoryLimit(kind, value);
+      saving = false;
+      if (!outcome.ok) {
+        // Stay in the field: the number the server still holds stays on screen, and the
+        // message sits where the user clicked.
+        setting.setDesc(outcome.error);
+        paint();
+        return;
+      }
+      // The check press is the confirmation: the row goes back to the number the server
+      // now holds, and no "saved" line is added — a success the user caused needs no toast.
+      stopEditing();
+    };
+
+    setting.addText((text) => {
+      field = text;
+      text.inputEl.type = "number";
+      text.inputEl.min = "1";
+      text.inputEl.addClass("courier-history-limit-input");
+      text.setValue(draft);
+      text.onChange((value) => {
+        draft = value;
+      });
+      text.inputEl.addEventListener("keydown", (event) => {
+        if (!editing) return;
+        if (event.key === "Enter") {
+          event.preventDefault?.();
+          void save();
+        } else if (event.key === "Escape") {
+          event.preventDefault?.();
+          stopEditing();
+        }
+      });
+    });
+    setting.addButton((component) => {
+      button = component;
+      component.onClick(() => {
+        if (editing) void save();
+        else startEditing();
+      });
+    });
+    paint();
+    // Registered for the live update: another device's change reaches `applyVaultLimits`,
+    // which repaints this row from the cache (and leaves an edit in progress alone).
+    this.historyLimitPaints.add(() => {
+      paint();
+      if (!editing) setting.setDesc(baseDescription);
+    });
+
+    // What the server holds right now — the same read both rows share (single-flight in
+    // the plugin). It lands after the row is painted; a row the user is editing is left
+    // alone, because the change they typed must not be overwritten by a read that started
+    // before it.
+    void this.plugin.refreshVaultHistoryLimits().then((limits) => {
+      if (limits === null) {
+        if (!editing) setting.setDesc(t("settings.historyLimit.unavailable"));
+        paint();
+        return;
+      }
+      if (!editing) setting.setDesc(baseDescription);
+      paint();
+    });
+  }
+
+  /** The cached server value for one limit, or "" while it has never been read. */
+  private storedLimitOf(kind: keyof HistoryLimits): string {
+    const limits = this.plugin.vaultHistoryLimits;
+    return limits === null ? "" : String(limits[kind]);
   }
 
   /** The bound vault, its live state, and the way out of it. */

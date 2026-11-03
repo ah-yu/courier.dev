@@ -844,6 +844,26 @@ describe("SyncEngine", () => {
     expect(new TextDecoder().decode(adapter2.files.get("notes/a.md"))).toBe("# A");
   });
 
+  it("states each pushed version's history kind, from the plaintext path", async () => {
+    // The server never sees a path, so the device classifies the file: markdown and
+    // canvas are documents (the vault's deep limit), every other synced path an
+    // attachment (its shallow one). The numbers stay on the vault.
+    const { engine, adapter, api, key } = await makeEngine();
+    adapter.files.set("note.md", encoder.encode("# note"));
+    adapter.files.set("board.canvas", encoder.encode("{}"));
+    adapter.files.set("photo.png", encoder.encode("png"));
+
+    await engine.initialSync();
+
+    const kinds = new Map<string, string>();
+    for (const pushed of api.pushed) {
+      kinds.set(await decryptString(key, pushed.encryptedPath), pushed.historyKind);
+    }
+    expect(kinds.get("note.md")).toBe("documents");
+    expect(kinds.get("board.canvas")).toBe("documents");
+    expect(kinds.get("photo.png")).toBe("attachments");
+  });
+
   it("pulls a remote edit when local is unchanged", async () => {
     const { engine, adapter, api } = await makeEngine();
     adapter.files.set("n.md", encoder.encode("v1"));

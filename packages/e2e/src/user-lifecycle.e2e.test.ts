@@ -72,6 +72,7 @@ function pushBody(fileId: string, contentLabel: string, size = 64): Uint8Array {
       sizeBytes: plain.byteLength,
       mtimeMs: 0,
       baseVersionId: null,
+      historyKind: "documents",
     },
   ]);
 }

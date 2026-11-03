@@ -1,7 +1,7 @@
 import { NotFoundError } from "../lib/errors";
 import { authenticateUserHeader } from "../lib/user-credentials";
 import { canAccessVault } from "../lib/vault-access";
-import type { FindVaultByIdFn } from "../handlers/vault-handlers";
+import type { FindVaultByIdFn, VaultRow } from "../handlers/vault-handlers";
 import type { FindUserByKeyFn, UserRow } from "../handlers/users-handlers";
 import type { RateLimiter } from "../middleware/rate-limit";
 import type { RouteHandler } from "./router";
@@ -30,9 +30,11 @@ export function withRateLimiter(limiter: RateLimiter, handler: RouteHandler): Ro
   };
 }
 
-/** What the sync handlers need from auth: the vault id, and the account for quota. */
+/** What the sync handlers need from auth: the vault (with its retention limits), and the account for quota. */
 export interface SyncRequestContext {
   vaultId: string;
+  /** The vault row the request was authorized against — its history limits are policy. */
+  vault: VaultRow;
   user: UserRow;
 }
 
@@ -57,6 +59,6 @@ export function withSyncAuth(
     const vault = await deps.findVaultById(vaultId);
     if (!vault) throw new NotFoundError("Vault");
     if (!canAccessVault(vault, user.id)) throw new NotFoundError("Vault");
-    return await handler(request, { vaultId, user });
+    return await handler(request, { vaultId, vault, user });
   };
 }

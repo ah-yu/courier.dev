@@ -32,6 +32,72 @@ export const CONTENT_HASH_PATTERN = /^[a-f0-9]{64}$/;
 export const DEFAULT_MAX_FILE_BYTES = 50 * 1024 * 1024;
 
 /**
+ * How many versions of one file's chain the server keeps — the **vault-level** setting
+ * that stops an edited note from accumulating history (and storage) for ever.
+ *
+ * Split in two because the two kinds of file age differently: a note or a canvas is the
+ * vault's own content, edited daily and worth a deep history, while an attachment is a
+ * large immutable object whose old versions are mostly wasted bytes. The split is the
+ * engine's file-type table (`fileTypeOf`: markdown and canvas are `"always"`, every other
+ * path is an attachment), so a device classifies each file at push time and states only
+ * the **kind** — the server never sees a plaintext path and cannot classify anything, but
+ * it owns the numbers (see `wire.ts` and `vault.ts`).
+ *
+ * The values live on the **vault** row, not on a device and not under the account: every
+ * device of that vault reads and writes the same two numbers, so the retention policy is
+ * one policy rather than "whatever the last device that edited the file happened to set".
+ */
+export interface HistoryLimits {
+  /** Markdown notes and `.canvas` files. */
+  documents: number;
+  /** Everything else: images, audio, video, PDFs, and the config-folder files. */
+  attachments: number;
+}
+
+/**
+ * The two kinds of file, for the limit split.
+ *
+ * Stated per pushed version (`files[].historyKind`): the server maps it to its own
+ * `HistoryLimits` and stores it on the row, so a later trim pass — for example after the
+ * vault's limit was lowered — can apply the right bound to chains nobody is pushing.
+ */
+export const HISTORY_KINDS = ["documents", "attachments"] as const;
+
+export type HistoryKind = (typeof HISTORY_KINDS)[number];
+
+/**
+ * The defaults: 200 versions of a note or canvas, 10 of an attachment.
+ *
+ * 200 edits of a note is weeks of ordinary writing and still a history a person can
+ * scroll; 10 revisions of a 20 MiB attachment is a bound on the store rather than on a
+ * workflow, because an attachment is normally written once and replaced at most a few
+ * times. Both are the defaults of the vault's columns and what "reset" returns to.
+ */
+export const DEFAULT_HISTORY_LIMITS: HistoryLimits = { documents: 200, attachments: 10 };
+
+/**
+ * The largest history limit a vault may hold.
+ *
+ * A bound rather than a product setting: the server deletes the rows beyond the limit,
+ * so a huge value is merely "keep everything", and a bound keeps the number meaningful
+ * in the API schema and the settings fields. A vault that wants no pruning sets this.
+ */
+export const MAX_HISTORY_LIMIT = 10_000;
+
+/**
+ * One limit from a stored or typed value: a positive integer, clamped to
+ * {@link MAX_HISTORY_LIMIT}, or `fallback` for anything else.
+ *
+ * Every producer runs through it — a vault row written by an older build, a settings
+ * field, an admin payload — so a missing or nonsense value can never reach the trim and
+ * never reads as "delete every version" (`0` or a negative).
+ */
+export function normalizeHistoryLimit(value: unknown, fallback: number): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) return fallback;
+  return Math.min(value, MAX_HISTORY_LIMIT);
+}
+
+/**
  * Longest device label a client may stamp on a version.
  *
  * The name is free-form user-facing text (a Chinese name is normal), so it travels

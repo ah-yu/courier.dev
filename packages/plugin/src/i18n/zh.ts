@@ -27,6 +27,7 @@ export const zh = {
   "action.loadVaults": "无法加载远程库列表",
   "action.loadHistory": "无法加载同步历史",
   "action.loadRecycleBin": "无法加载回收站",
+  "action.updateVaultLimits": "无法保存历史版本数量",
 
   // ── Validation / API errors ──
   "error.serverUrlRequired": "请填写服务器地址，例如 http://localhost:3002。",
@@ -48,6 +49,8 @@ export const zh = {
   "error.passwordIncorrect": "库密码不正确。",
   "error.noFileId": "无法定位这个文件的同步记录。",
   "error.conflictOriginalUnknown": "无法识别这个冲突副本对应的原文件。",
+  "error.vaultNotConnected": "当前没有连接远程库。",
+  "error.vaultLimitsUnavailable": "无法从服务器读取这个远程库的历史版本数量。",
 
   // ── Notices ──
   //
@@ -114,6 +117,20 @@ export const zh = {
   "settings.section.fileTypes": "同步的文件类型",
   "settings.section.fileTypes.tooltip":
     "Markdown 与 Canvas 始终同步。关闭的类型在这台设备上既不推送也不拉取，也不会删除任何一端的内容。",
+  "settings.section.historyLimit": "历史版本数量",
+  "settings.section.historyLimit.tooltip":
+    "服务器为每个文件保留的历史版本数量。这是远程库的设置，对所有同步该库的设备生效：在这里改，其他设备也随之生效。超过上限时会自动删除最早的版本，并清理它们占用的存储；超出上限的旧版本无法再恢复。",
+  "settings.historyLimit.documents.label": "笔记与 Canvas",
+  "settings.historyLimit.documents.desc": "远程库为每个 Markdown 笔记和 Canvas 文件保留的版本数。",
+  "settings.historyLimit.attachments.label": "附件",
+  "settings.historyLimit.attachments.desc":
+    "远程库为其他文件（图片、音频、视频、PDF 等）保留的版本数。",
+  "settings.historyLimit.edit": "修改",
+  "settings.historyLimit.confirm": "保存",
+  "settings.historyLimit.saving": "保存中…",
+  "settings.historyLimit.invalid": "请输入 1 到 {max} 之间的整数。",
+  "settings.historyLimit.unknown": "—",
+  "settings.historyLimit.unavailable": "无法读取服务器上的值。重新连接后打开此页面即可看到。",
   "settings.section.excludedFolders": "排除的文件夹",
   "settings.section.excludedFolders.tooltip":
     "被排除的文件夹及其内容在这台设备上既不推送也不拉取，也不会生成冲突副本。排除不会删除已有文件，取消排除后继续同步。列表只对当前连接的远程库生效；一个都不选也算完成配置。配置文件夹（.obsidian）由下方的设置同步控制。",

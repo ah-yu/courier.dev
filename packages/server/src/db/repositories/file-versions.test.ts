@@ -301,6 +301,10 @@ describe("listDeletedChains — the recycle bin's order", () => {
         action: "create",
         deviceName: "test-device",
         baseVersionId,
+        // The batch cases are about the conditional insert, not the trim; the default
+        // documents limit keeps every chain here (two or three rows) under its bound.
+        historyKind: "documents",
+        historyLimit: 200,
       };
     }
 
@@ -379,6 +383,151 @@ describe("listDeletedChains — the recycle bin's order", () => {
       } finally {
         transaction.mockRestore();
       }
+    });
+  });
+
+  /**
+   * The history limit: the chain keeps its newest N rows and the rows it drops are named
+   * back to the caller, so the push handler can reclaim the blobs they were the last
+   * reference to.
+   *
+   * The bound is the vault's (200 for a note, 10 for an attachment by default), so what
+   * these cases pin is the trim itself — the same `(created_at, rowid)` order every other
+   * reader calls "newest", the head surviving, one chain trimmed without touching its
+   * neighbours, and a lowered limit applying on the next push rather than at some later
+   * sweep.
+   */
+  describe("tryInsertFileVersions — the history limit", () => {
+    let tryInsertFileVersions: typeof import("./file-versions").tryInsertFileVersions;
+    let deletedChains: typeof import("./file-versions").listDeletedChains;
+    const vaultId = "vault-trim";
+
+    beforeAll(async () => {
+      sqlite.prepare("INSERT OR IGNORE INTO vaults (id, name) VALUES (?, ?)").run(vaultId, "trim");
+      ({ tryInsertFileVersions, listDeletedChains: deletedChains } =
+        await import("./file-versions"));
+    });
+
+    /** A row as the push handler builds it, with the limit this push resolved. */
+    function row(
+      fileId: string,
+      versionId: string,
+      baseVersionId: string | null,
+      historyLimit: number,
+      historyKind: "documents" | "attachments" = "documents",
+      action: "create" | "modify" | "delete" = "create",
+    ): Parameters<typeof tryInsertFileVersions>[0][number] {
+      return {
+        id: `trim-id-${fileId}-${versionId}`,
+        vaultId,
+        fileId,
+        encryptedPath: `enc-${fileId}`,
+        versionId,
+        contentHash: `hash-${versionId}`,
+        sizeBytes: 0,
+        mtimeMs: 1_760_000_000_000,
+        action,
+        deviceName: "test-device",
+        baseVersionId,
+        historyKind,
+        historyLimit,
+      };
+    }
+
+    /** The chain's version ids, oldest → newest. */
+    function versionsOf(fileId: string): string[] {
+      return (
+        sqlite
+          .prepare(
+            "SELECT version_id FROM file_versions WHERE vault_id = ? AND file_id = ? ORDER BY created_at, rowid",
+          )
+          .all(vaultId, fileId) as Array<{ version_id: string }>
+      ).map((entry) => entry.version_id);
+    }
+
+    it("keeps the newest N rows and answers the content hashes it removed", async () => {
+      const results = await tryInsertFileVersions([
+        row("trim-a", "t-1", null, 2),
+        row("trim-a", "t-2", "t-1", 2),
+        // The third row takes the chain one past its limit: the oldest row goes.
+        row("trim-a", "t-3", "t-2", 2),
+      ]);
+
+      expect(results).toEqual([
+        { status: "ok" },
+        { status: "ok" },
+        { status: "ok", prunedContentHashes: ["hash-t-1"] },
+      ]);
+      expect(versionsOf("trim-a")).toEqual(["t-2", "t-3"]);
+    });
+
+    it("leaves a chain at or under its limit alone, and reports nothing to reclaim", async () => {
+      const results = await tryInsertFileVersions([
+        row("trim-exact", "e-1", null, 2),
+        row("trim-exact", "e-2", "e-1", 2),
+      ]);
+
+      expect(results).toEqual([{ status: "ok" }, { status: "ok" }]);
+      expect(versionsOf("trim-exact")).toEqual(["e-1", "e-2"]);
+    });
+
+    it("trims only the chain the pushed row belongs to", async () => {
+      await tryInsertFileVersions([row("trim-other", "o-1", null, 1)]);
+
+      const results = await tryInsertFileVersions([
+        row("trim-only", "x-1", null, 1),
+        row("trim-only", "x-2", "x-1", 1),
+      ]);
+
+      expect(results).toEqual([
+        { status: "ok" },
+        { status: "ok", prunedContentHashes: ["hash-x-1"] },
+      ]);
+      expect(versionsOf("trim-only")).toEqual(["x-2"]);
+      expect(versionsOf("trim-other")).toEqual(["o-1"]);
+    });
+
+    it("applies the limit the newest push states, so lowering it trims the chain", async () => {
+      await tryInsertFileVersions([row("trim-lowered", "l-1", null, 5)]);
+      await tryInsertFileVersions([row("trim-lowered", "l-2", "l-1", 5)]);
+
+      // The vault's limit is now 1: everything but the version it just pushed goes.
+      const results = await tryInsertFileVersions([row("trim-lowered", "l-3", "l-2", 1)]);
+
+      expect(results).toEqual([{ status: "ok", prunedContentHashes: ["hash-l-2", "hash-l-1"] }]);
+      expect(versionsOf("trim-lowered")).toEqual(["l-3"]);
+    });
+
+    it("keeps the version it just appended, so the next push decided from it is accepted", async () => {
+      await tryInsertFileVersions([
+        row("trim-head", "h-1", null, 1),
+        row("trim-head", "h-2", "h-1", 1),
+      ]);
+
+      const results = await tryInsertFileVersions([row("trim-head", "h-3", "h-2", 1)]);
+
+      expect(results).toEqual([{ status: "ok", prunedContentHashes: ["hash-h-2"] }]);
+      expect(versionsOf("trim-head")).toEqual(["h-3"]);
+    });
+
+    it("keeps a delete head when the limit is one, so the chain stays a tombstone", async () => {
+      // create → delete with limit 1: the trim removes the live version and the tombstone
+      // is the head. The chain must not lose it (the deletion would come back on the next
+      // pull), and it must report nothing restorable — that null is what disables the
+      // recycle bin's Restore.
+      const results = await tryInsertFileVersions([
+        row("trim-delete", "del-1", null, 1),
+        row("trim-delete", "del-2", "del-1", 1, "documents", "delete"),
+      ]);
+
+      expect(results).toEqual([
+        { status: "ok" },
+        { status: "ok", prunedContentHashes: ["hash-del-1"] },
+      ]);
+      expect(versionsOf("trim-delete")).toEqual(["del-2"]);
+      const chain = (await deletedChains(vaultId)).find((entry) => entry.fileId === "trim-delete");
+      expect(chain?.last.versionId).toBe("del-2");
+      expect(chain?.previous).toBeNull();
     });
   });
 });

@@ -1,9 +1,12 @@
 import type {
   CreateVaultResponse,
   ListVaultsResponse,
+  UpdateVaultRequest,
   VaultEncryptionSaltResponse,
   VaultKeyCheckResponse,
+  VaultSettingsResponse,
 } from "@courier/shared";
+import { normalizeHistoryLimit, type HistoryLimits } from "@courier/shared";
 import { generateVaultId } from "../lib/token";
 import { NotFoundError, VaultLimitReachedError } from "../lib/errors";
 import { canAccessVault } from "../lib/vault-access";
@@ -17,6 +20,10 @@ export interface VaultRow {
   ownerUserId: string | null;
   encryptionSalt: string | null;
   keyCheck: string | null;
+  /** Versions kept for each markdown note and canvas file. */
+  historyLimitDocuments: number;
+  /** Versions kept for every other file. */
+  historyLimitAttachments: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -29,18 +36,45 @@ export type InsertVaultFn = (data: {
   ownerUserId: string | null;
   /** The owner's allowance (`0` = unlimited); the insert enforces it atomically. */
   maxVaults: number;
-}) => Promise<{ createdAt: Date } | undefined>;
+}) => Promise<
+  | {
+      createdAt: Date;
+      historyLimitDocuments: number;
+      historyLimitAttachments: number;
+    }
+  | undefined
+>;
 
 export type FindVaultByIdFn = (id: string) => Promise<VaultRow | undefined>;
 
 export type DeleteVaultByIdFn = (id: string) => Promise<void>;
 
 /** List vaults a user may access: their own or legacy (owner-less) ones. */
-export type ListVisibleVaultsFn = (
-  userId: string,
-) => Promise<Array<{ id: string; name: string; createdAt: Date }>>;
+export type ListVisibleVaultsFn = (userId: string) => Promise<
+  Array<{
+    id: string;
+    name: string;
+    createdAt: Date;
+    historyLimitDocuments: number;
+    historyLimitAttachments: number;
+  }>
+>;
 
-export type UpdateVaultNameFn = (id: string, name: string) => Promise<{ id: string; name: string }>;
+export type UpdateVaultSettingsFn = (
+  id: string,
+  patch: UpdateVaultRequest,
+) => Promise<VaultSettingsResponse | undefined>;
+
+/**
+ * Trim every chain of a vault to the limits now in force, answering what it removed.
+ *
+ * Injected because a lowered limit has to reach chains no device may push again; the
+ * handler owns "when", `lib/history-trim.ts` owns "how" (rows, then blobs).
+ */
+export type TrimVaultHistoryFn = (
+  vaultId: string,
+  limits: HistoryLimits,
+) => Promise<{ rows: number; blobs: number }>;
 
 // ── Create Vault ──
 
@@ -85,6 +119,8 @@ export async function createVault(
     id,
     name: input.name,
     createdAt: created.createdAt.toISOString(),
+    historyLimitDocuments: created.historyLimitDocuments,
+    historyLimitAttachments: created.historyLimitAttachments,
   };
 }
 
@@ -133,6 +169,8 @@ export async function listVisibleVaults(
       id: v.id,
       name: v.name,
       createdAt: v.createdAt.toISOString(),
+      historyLimitDocuments: v.historyLimitDocuments,
+      historyLimitAttachments: v.historyLimitAttachments,
     })),
   };
 }
@@ -155,17 +193,72 @@ async function requireManageableVault(
   return vault;
 }
 
-// ── Rename Vault ──
+// ── Rename / retention update ──
 
-export async function renameVaultOwned(
+/**
+ * Update a vault's name and/or its history limits, then trim what a lowered limit
+ * orphaned.
+ *
+ * The limits are **vault-level**, so this is the one write path every device of the vault
+ * uses (the plugin's settings page and the CLI's `vault update`); the server applies the
+ * new numbers to the next push from any device, and the trim below applies them to the
+ * chains already stored.
+ *
+ * **Only the fields the request states are written.** The row is read here for access
+ * control and for the fallback a nonsense value needs, but writing both limits back would
+ * make two PATCHes that touch different halves race: each read the other's old value at
+ * `requireManageableVault` and would write it back over the newer one (the same for a
+ * rename racing a limit change). The repository's `returning` is what tells the caller
+ * what the row now holds, and the trim uses that, not the pre-update row.
+ *
+ * The trim runs whenever the request states a limit — not only when the value went down.
+ * It is idempotent and cheap when nothing is over the bound, and this way a PATCH retried
+ * after a failed trim (the update itself had already committed) still finishes the job;
+ * keying it on "the value decreased" would make that retry a silent no-op.
+ */
+export async function updateVaultSettings(
   id: string,
   userId: string,
-  name: string,
+  patch: UpdateVaultRequest,
   findFn: FindVaultByIdFn,
-  updateFn: UpdateVaultNameFn,
-): Promise<{ id: string; name: string }> {
-  await requireManageableVault(id, userId, findFn);
-  return updateFn(id, name);
+  updateFn: UpdateVaultSettingsFn,
+  trimFn: TrimVaultHistoryFn,
+): Promise<VaultSettingsResponse> {
+  const vault = await requireManageableVault(id, userId, findFn);
+  const updated = await updateFn(id, {
+    ...(patch.name === undefined ? {} : { name: patch.name }),
+    ...(patch.historyLimitDocuments === undefined
+      ? {}
+      : {
+          historyLimitDocuments: normalizeHistoryLimit(
+            patch.historyLimitDocuments,
+            vault.historyLimitDocuments,
+          ),
+        }),
+    ...(patch.historyLimitAttachments === undefined
+      ? {}
+      : {
+          historyLimitAttachments: normalizeHistoryLimit(
+            patch.historyLimitAttachments,
+            vault.historyLimitAttachments,
+          ),
+        }),
+  });
+
+  const statesLimit =
+    patch.historyLimitDocuments !== undefined || patch.historyLimitAttachments !== undefined;
+  if (!updated) {
+    // Deleted between the access-control read and the update: answer like any other
+    // missing vault instead of dereferencing undefined (which would be a 500).
+    throw new NotFoundError("Vault");
+  }
+  if (statesLimit) {
+    await trimFn(id, {
+      documents: updated.historyLimitDocuments,
+      attachments: updated.historyLimitAttachments,
+    });
+  }
+  return updated;
 }
 
 // ── Delete Vault ──

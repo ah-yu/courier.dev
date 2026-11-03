@@ -11,6 +11,8 @@ import type {
   DeletedFileInfo,
   SyncAction,
   SyncPushResult,
+  HistoryKind,
+  HistoryLimits,
 } from "@courier/shared";
 import { NotFoundError } from "../lib/errors";
 
@@ -45,10 +47,30 @@ export interface InsertFileVersionData {
   deviceName?: string | null;
   /** The chain head this push was decided from (`null` = the client expects none). */
   baseVersionId: string | null;
+  /**
+   * What kind of file the version belongs to (`documents` = markdown/canvas). Stored on
+   * the row: the vault-wide trim maps it to the vault's limit, including for chains no
+   * device pushes again.
+   */
+  historyKind: HistoryKind;
+  /**
+   * How many versions of this chain the server keeps after appending this one (the newest
+   * N, this version included). Resolved by the handler from the **vault's** limits and the
+   * version's kind; this is what the insert transaction trims against.
+   */
+  historyLimit: number;
 }
 
 export type TryInsertFileVersionResult =
-  | { status: "ok" }
+  | {
+      status: "ok";
+      /**
+       * Content hashes of the rows a history trim removed, if any: the store may have
+       * to reclaim those blobs once the transaction committed (see
+       * {@link SyncPushDeps.isContentHashReferenced}).
+       */
+      prunedContentHashes?: string[];
+    }
   | { status: "stale_base"; currentVersionId: string };
 
 /**
@@ -184,6 +206,15 @@ export type DeleteFileVersionsByFileIdsFn = (vaultId: string, fileIds: string[])
 
 export type GetReferencedContentHashesFn = (vaultId: string) => Promise<Set<string>>;
 
+/**
+ * Whether any remaining version row of this vault still names `contentHash`.
+ *
+ * The one question a history trim has to ask before reclaiming a blob: the same bytes
+ * may also be another file's content, and the blob must stay for as long as one row
+ * points at it.
+ */
+export type IsContentHashReferencedFn = (vaultId: string, contentHash: string) => Promise<boolean>;
+
 /** Where a version this push appended is announced (the WebSocket hub). */
 export type BroadcastFilePushedFn = (
   vaultId: string,
@@ -209,6 +240,14 @@ function errorMessage(err: unknown): string {
 
 export interface SyncPushInput {
   vaultId: string;
+  /**
+   * The **vault's** retention limits, read from its row when the request was authorized.
+   *
+   * They are the policy the trim applies, not something the pusher states: a device only
+   * classifies its file (`historyKind`), so every device of the vault is trimmed by the
+   * same numbers and changing them on one device changes them for all.
+   */
+  historyLimits: HistoryLimits;
   excludeSessionId?: string;
   /**
    * The label the pushing client stated for itself (`null` when it stated none).
@@ -231,6 +270,12 @@ export interface SyncPushInput {
     mtimeMs: number;
     /** The head this push was decided from (`null` = the client expects no chain). */
     baseVersionId: string | null;
+    /**
+     * What kind of file this version belongs to (`documents` = markdown/canvas). The
+     * client states it because only the plaintext path can say; the server maps it to the
+     * vault's own limit. See `@courier/shared`'s `wire.ts`.
+     */
+    historyKind: HistoryKind;
     /**
      * The encrypted payload (`iv ‖ ciphertext ‖ tag`), or `null` when the version
      * carries none: a `delete`, a `rename` whose content the store already holds, or a
@@ -259,6 +304,51 @@ export interface SyncPushDeps {
   flushBlobs: (vaultId: string) => Promise<void>;
   /** The WebSocket hub. A push with nowhere to announce itself still writes. */
   broadcast: BroadcastFilePushedFn;
+  /**
+   * Whether a version row (of any chain) still names a content hash — what the blob
+   * reclaim after a history trim asks before it deletes anything.
+   */
+  isContentHashReferenced: IsContentHashReferencedFn;
+  /** Remove one blob (its row, and its batch file with the last row). */
+  deleteBlob: DeleteBlobFn;
+  /**
+   * Drop the cached per-user storage measurement because a trim reclaimed bytes.
+   *
+   * A route caches usage for a window so a push does not re-walk the store for every
+   * request; adding the incoming bytes keeps that cache honest, but a trim removes bytes,
+   * and a cache that still counts them can refuse a push the account now has room for.
+   * Optional: a host that does not cache usages omits it.
+   */
+  invalidateStorageUsage?: () => void;
+}
+
+/**
+ * Delete the blobs a history trim left without a version row.
+ *
+ * The trim runs inside the insert transaction, so this happens after the commit: the
+ * rows a chain no longer holds are gone, and a hash none of the remaining rows names is
+ * unreachable content. The reference is re-checked here rather than trusted from the
+ * commit — the same bytes may be another file's content (a copy of one image), and that
+ * chain must keep its blob.
+ *
+ * Best-effort on purpose: the push itself has already landed, and a blob this cannot
+ * delete is reclaimed by the orphan sweep (which looks for exactly this: a blob no
+ * version row names). Turning a reclaim failure into a failed push would report a
+ * version as lost after it was stored.
+ */
+async function reclaimUnreferencedBlobs(
+  vaultId: string,
+  contentHashes: ReadonlySet<string>,
+  deps: Pick<SyncPushDeps, "isContentHashReferenced" | "deleteBlob">,
+): Promise<void> {
+  for (const contentHash of contentHashes) {
+    try {
+      if (await deps.isContentHashReferenced(vaultId, contentHash)) continue;
+      await deps.deleteBlob(vaultId, contentHash);
+    } catch {
+      // See the doc comment: the orphan sweep is the backstop, not a second bug.
+    }
+  }
 }
 
 /**
@@ -278,6 +368,9 @@ export interface SyncPushDeps {
  *    that reached the insert is reported failed — not the per-file answer a per-file
  *    insert gave, where only the file being written could fail. A row refused in phase 1
  *    is unaffected either way: it was decided before the transaction and wrote nothing.
+ *    The same transaction **trims each chain** to the limit resolved from the vault's own
+ *    values and the version's kind, and the blobs whose last row that trim removed are
+ *    reclaimed right after the commit ({@link reclaimUnreferencedBlobs}).
  * 3. **Announce what landed, after the commit.** Broadcasting inside the transaction
  *    would tell a peer about a version a later rollback erased.
  *
@@ -371,6 +464,9 @@ export async function handleSyncPush(
           action: file.action,
           deviceName: input.deviceName ?? null,
           baseVersionId: file.baseVersionId,
+          historyKind: file.historyKind,
+          // The vault's policy, not the pusher's: the file's kind picks the number.
+          historyLimit: input.historyLimits[file.historyKind],
         },
       });
     } catch (err) {
@@ -471,6 +567,11 @@ export async function handleSyncPush(
   }
 
   // Phase 2 — the authoritative, conditional insert, one transaction for the batch.
+  //
+  // The same transaction trims every chain to the vault's limits (chosen by each version's
+  // kind), and answers the content hashes of the rows it removed (see
+  // `tryInsertFileVersions`).
+  const prunedContentHashes = new Set<string>();
   if (pending.length > 0) {
     let inserted: TryInsertFileVersionResult[];
     try {
@@ -486,21 +587,34 @@ export async function handleSyncPush(
       const entry = pending[slot];
       if (!entry) continue;
       const file = input.files[entry.index]!;
-      results[entry.index] =
-        verdict.status === "stale_base"
-          ? {
-              fileId: file.fileId,
-              status: "stale_base",
-              currentVersionId: verdict.currentVersionId,
-            }
-          : {
-              fileId: file.fileId,
-              status: "ok",
-              versionId: file.versionId,
-              contentHash: file.contentHash,
-            };
+      if (verdict.status === "stale_base") {
+        results[entry.index] = {
+          fileId: file.fileId,
+          status: "stale_base",
+          currentVersionId: verdict.currentVersionId,
+        };
+        continue;
+      }
+      for (const contentHash of verdict.prunedContentHashes ?? []) {
+        prunedContentHashes.add(contentHash);
+      }
+      results[entry.index] = {
+        fileId: file.fileId,
+        status: "ok",
+        versionId: file.versionId,
+        contentHash: file.contentHash,
+      };
     }
   }
+
+  // Phase 2b — reclaim what the trim orphaned, after the commit. A blob whose hash no
+  // remaining version row names is dead bytes: the chain that named it was just cut
+  // back, and the store keeps content addressed blobs, so the row (and its batch file,
+  // when it was the last one in it) has to go too.
+  await reclaimUnreferencedBlobs(input.vaultId, prunedContentHashes, deps);
+  // The trim removed rows, so whatever the route had cached about this user's storage is
+  // now an overcount: drop it and let the next check measure again.
+  if (prunedContentHashes.size > 0) deps.invalidateStorageUsage?.();
 
   // Phase 3 — announce the versions that committed, and nothing else.
   for (const [index, result] of results.entries()) {

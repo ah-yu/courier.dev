@@ -1,6 +1,12 @@
 import { decryptString, encryptString, sha256Text } from "../../../engine/src/index";
 import { buildPushBody } from "../../../shared/src/index";
-import type { SyncPushResult } from "../../../shared/src/index";
+import type {
+  HistoryKind,
+  SyncPushResult,
+  UpdateVaultRequest,
+  VaultSettingsResponse,
+  VaultSummary,
+} from "../../../shared/src/index";
 import type { TestServer } from "./server";
 
 /**
@@ -64,6 +70,68 @@ export async function fileVersions(
   return body.versions;
 }
 
+/**
+ * The HTTP status of a version content read.
+ *
+ * `404` is how "the store no longer holds these bytes" reads — what a history trim that
+ * reclaimed the blobs its removed rows named should leave behind.
+ */
+export async function versionContentStatus(
+  server: Pick<TestServer, "serverUrl" | "userKey">,
+  vaultId: string,
+  contentHash: string,
+): Promise<number> {
+  const response = await fetch(
+    `${server.serverUrl}/api/vaults/${vaultId}/sync/versions/${contentHash}/content`,
+    { headers: { Authorization: `Bearer ${server.userKey}` } },
+  );
+  return response.status;
+}
+
+/**
+ * A vault's retention limits as the server lists them (`GET /api/vaults`).
+ *
+ * This is the read every client does before painting or printing the limits, so a test
+ * asserting "the server really holds this" goes through the same route instead of the
+ * PATCH response it just received.
+ */
+export async function vaultSettings(
+  server: Pick<TestServer, "serverUrl" | "userKey">,
+  vaultId: string,
+): Promise<VaultSummary> {
+  const body = await getJson<{ vaults: VaultSummary[] }>(server, "/api/vaults");
+  const vault = body.vaults.find((entry) => entry.id === vaultId);
+  if (!vault) throw new Error(`vault ${vaultId} is not listed`);
+  return vault;
+}
+
+/**
+ * Change a vault's retention limits (or its name) through the API the clients use.
+ *
+ * The limits are **vault-level server state**: a test that wants a small bound sets it
+ * here, once, and every device pushing into the vault is trimmed by it — there is no
+ * per-client setting to pass. The answer is the vault as it now stands (limits included);
+ * a lowering also trims the chains already stored, before it returns.
+ */
+export async function updateVaultSettings(
+  server: Pick<TestServer, "serverUrl" | "userKey">,
+  vaultId: string,
+  patch: UpdateVaultRequest,
+): Promise<VaultSettingsResponse> {
+  const response = await fetch(`${server.serverUrl}/api/vaults/${vaultId}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${server.userKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(patch),
+  });
+  if (!response.ok) {
+    throw new Error(`vault update failed: ${response.status} ${await response.text()}`);
+  }
+  return (await response.json()) as VaultSettingsResponse;
+}
+
 export interface ServerDeletedFile {
   fileId: string;
   lastEncryptedPath: string | null;
@@ -105,6 +173,12 @@ export interface PushVersionInput {
    */
   mtimeMs?: number;
   baseVersionId?: string | null;
+  /**
+   * Which side of the vault's retention split the file name suggests. Defaults to
+   * `"documents"`; a retention test that needs the attachment limit states it explicitly.
+   * The **numbers** are the vault's, set through its `PATCH` route.
+   */
+  historyKind?: HistoryKind;
 }
 
 /**
@@ -132,6 +206,7 @@ export async function pushVersion(
       sizeBytes: input.sizeBytes ?? 0,
       mtimeMs: input.mtimeMs ?? 0,
       baseVersionId: input.baseVersionId ?? null,
+      historyKind: input.historyKind ?? "documents",
     },
   ]);
   const result = results[0];
@@ -153,6 +228,8 @@ export interface RawPushFile {
   /** Modification time of the file on the pushing device; defaults to `0`. */
   mtimeMs?: number;
   baseVersionId: string | null;
+  /** Which side of the vault's retention split the file name suggests; defaults to notes. */
+  historyKind?: HistoryKind;
 }
 
 /**
@@ -179,6 +256,7 @@ export async function pushFilesRaw(
       sizeBytes: file.sizeBytes ?? 0,
       mtimeMs: file.mtimeMs ?? 0,
       baseVersionId: file.baseVersionId,
+      historyKind: file.historyKind ?? "documents",
       content: file.content ?? null,
     })),
   );

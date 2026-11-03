@@ -7,18 +7,20 @@ import {
   findVaultById,
   insertVault,
   listVisibleVaults,
-  updateVaultName,
+  updateVaultSettings as updateVaultSettingsRow,
 } from "../db/repositories/vaults";
 import type { WsHub } from "../handlers/ws-handlers";
 import { findUserByKey } from "../lib/users-db";
 import { invalidateStorageUsage, invalidateUserStorageUsage } from "../lib/storage-usage";
 import { deleteVaultBlobs } from "../lib/blob-store";
+import { trimVaultHistory } from "../lib/history-trim";
+import { MAX_HISTORY_LIMIT } from "@courier/shared";
 import {
   createVault,
   getEncryptionSalt,
   getKeyCheck,
   listVisibleVaults as listVisibleVaultsHandler,
-  renameVaultOwned,
+  updateVaultSettings,
   deleteVaultOwned,
 } from "../handlers/vault-handlers";
 import { config } from "../config";
@@ -43,9 +45,27 @@ const createVaultSchema = z.object({
   keyCheck: z.string().min(1).max(256),
 });
 
-const renameVaultSchema = z.object({
-  name: z.string().min(1).max(255),
-});
+/**
+ * `PATCH /api/vaults/:id`: rename and/or change the vault's retention limits.
+ *
+ * Every field is optional, but an empty body is refused — a caller that built its request
+ * wrong should hear about it rather than receive a no-op `200`. The limits are the
+ * **vault's** (shared by every device), which is why this is the edit path both the
+ * plugin's settings page and the CLI use.
+ */
+const updateVaultSchema = z
+  .object({
+    name: z.string().min(1).max(255).optional(),
+    historyLimitDocuments: z.number().int().min(1).max(MAX_HISTORY_LIMIT).optional(),
+    historyLimitAttachments: z.number().int().min(1).max(MAX_HISTORY_LIMIT).optional(),
+  })
+  .refine(
+    (body) =>
+      body.name !== undefined ||
+      body.historyLimitDocuments !== undefined ||
+      body.historyLimitAttachments !== undefined,
+    { message: "at least one of name, historyLimitDocuments, historyLimitAttachments is required" },
+  );
 
 export function vaultRoutes(hub: WsHub, logger: Logger = processLogger): RouteTable {
   /** Access log → error mapping, the pair every endpoint carries. */
@@ -73,16 +93,34 @@ export function vaultRoutes(hub: WsHub, logger: Logger = processLogger): RouteTa
       }),
     },
     "/api/vaults/:id": {
-      // PATCH — rename a vault the user owns.
+      // PATCH — rename the vault and/or change its retention limits (owner only).
       PATCH: authed(async (request, user) => {
-        const body = await parseJson(request, renameVaultSchema);
-        const response = await renameVaultOwned(
+        const body = await parseJson(request, updateVaultSchema);
+        const response = await updateVaultSettings(
           request.params.id!,
           user.id,
-          body.name,
+          body,
           findVaultById,
-          updateVaultName,
+          updateVaultSettingsRow,
+          // A lowered limit has to reach chains no device pushes again; the handler
+          // decides when, this is how (rows, then the blobs only they referenced).
+          trimVaultHistory,
         );
+        // The limits are the vault's: every device subscribed to it has to see the new
+        // numbers without reopening its settings page. A rename alone changes nothing a
+        // page shows live, so it does not broadcast — and it trims nothing either, so the
+        // cached usage only has to be dropped when a limit was stated.
+        if (
+          body.historyLimitDocuments !== undefined ||
+          body.historyLimitAttachments !== undefined
+        ) {
+          // The trim freed blob bytes, so the cached per-user usage is stale.
+          invalidateUserStorageUsage(user.id);
+          hub.broadcastVaultSettings(request.params.id!, {
+            documents: response.historyLimitDocuments,
+            attachments: response.historyLimitAttachments,
+          });
+        }
         return json(response);
       }),
       // DELETE — delete a vault the user owns.

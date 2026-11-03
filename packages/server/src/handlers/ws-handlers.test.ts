@@ -70,6 +70,8 @@ function mockVault(overrides: Partial<VaultRow> = {}): VaultRow {
     ownerUserId: "u-1",
     encryptionSalt: "salt",
     keyCheck: "canary",
+    historyLimitDocuments: 200,
+    historyLimitAttachments: 10,
     createdAt: new Date("2026-06-10T00:00:00.000Z"),
     updatedAt: new Date("2026-06-10T00:00:00.000Z"),
     ...overrides,
@@ -179,6 +181,37 @@ describe("broadcastVaultDeleted", () => {
 
   it("is a no-op when no connections exist for the vault", () => {
     broadcastVaultDeleted("nonexistent");
+  });
+});
+
+describe("broadcastVaultSettings", () => {
+  it("sends the vault's new limits to every session subscribed to it", () => {
+    const { ws: ws1 } = mockWs();
+    const { ws: ws2 } = mockWs();
+    const { ws: other } = mockWs();
+
+    addUserConnection("v1", ws1, "sid1", { userId: "u-1", deviceName: "A" });
+    addUserConnection("v1", ws2, "sid2", { userId: "u-1", deviceName: "B" });
+    addUserConnection("v2", other, "sid3", { userId: "u-1", deviceName: "A" });
+
+    hub.broadcastVaultSettings("v1", { documents: 40, attachments: 5 });
+
+    // Both devices of the vault hear it — the limits are the vault's, not the sender's —
+    // and a device subscribed to another vault does not.
+    const expected = JSON.stringify({
+      type: "vault_settings",
+      vaultId: "v1",
+      historyLimits: { documents: 40, attachments: 5 },
+    });
+    expect(ws1.send).toHaveBeenCalledWith(expected);
+    expect(ws2.send).toHaveBeenCalledWith(expected);
+    expect(other.send).not.toHaveBeenCalled();
+  });
+
+  it("is a no-op when no connections exist for the vault", () => {
+    expect(() =>
+      hub.broadcastVaultSettings("nonexistent", { documents: 1, attachments: 1 }),
+    ).not.toThrow();
   });
 });
 

@@ -356,6 +356,10 @@ export class TextComponent extends ChainableComponent {
 
 export class ButtonComponent extends ChainableComponent {
   text = "";
+  /** The icon the button renders instead of a label, if any (as {@link setIcon} set it). */
+  icon = "";
+  /** The hover/`aria-label` tooltip, as {@link setTooltip} set it. */
+  tooltip = "";
   isCta = false;
   /** `mod-warning` — Obsidian's red/destructive button style. */
   isWarning = false;
@@ -382,16 +386,27 @@ export class ButtonComponent extends ChainableComponent {
 
   setButtonText(text: string): this {
     this.text = text;
+    // The label replaces the element's content, so an icon painted earlier is gone — the
+    // same thing the app does (its `setButtonText` writes the element's text).
+    this.icon = "";
     // The label is the `<button>`'s own text in the app, which is what a DOM query reads.
     this.buttonEl.setText(text);
     return this;
   }
 
-  setIcon(_icon: string): this {
+  setIcon(icon: string): this {
+    // `setIcon` empties the element before painting the SVG, so a label written earlier is
+    // gone; a test that asserted the old label would otherwise see both.
+    this.icon = icon;
+    this.text = "";
+    this.buttonEl.setText("");
     return this;
   }
 
-  setTooltip(_tooltip: string): this {
+  setTooltip(tooltip: string): this {
+    this.tooltip = tooltip;
+    // Obsidian's tooltip helper also writes the label assistive tech reads.
+    this.buttonEl.setAttribute("aria-label", tooltip);
     return this;
   }
 

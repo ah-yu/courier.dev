@@ -25,6 +25,7 @@ export const en: Record<PluginMessageKey, string> = {
   "action.loadVaults": "Could not load the remote vaults",
   "action.loadHistory": "Could not load the sync history",
   "action.loadRecycleBin": "Could not load the recycle bin",
+  "action.updateVaultLimits": "Could not save the version-history limits",
 
   // ── Validation / API errors ──
   "error.serverUrlRequired": "Enter the server address, for example http://localhost:3002.",
@@ -49,6 +50,9 @@ export const en: Record<PluginMessageKey, string> = {
   "error.noFileId": "Could not find this file's sync record.",
   "error.conflictOriginalUnknown":
     "Could not tell which original file this conflict copy belongs to.",
+  "error.vaultNotConnected": "Not connected to a remote vault.",
+  "error.vaultLimitsUnavailable":
+    "Could not read this remote vault's version-history limits from the server.",
 
   // ── Notices ──
   //
@@ -119,6 +123,22 @@ export const en: Record<PluginMessageKey, string> = {
   "settings.section.fileTypes": "File types",
   "settings.section.fileTypes.tooltip":
     "Markdown and Canvas always sync. A type you switch off is neither pushed nor pulled on this device, and nothing is deleted on either side.",
+  "settings.section.historyLimit": "Version history",
+  "settings.section.historyLimit.tooltip":
+    "How many versions of each file the server keeps. This is a property of the remote vault, so it applies to every device that syncs it: changing it here changes it everywhere. When a file gains more versions than the limit, the oldest are deleted and their storage is reclaimed; versions beyond the limit are not recoverable.",
+  "settings.historyLimit.documents.label": "Notes and Canvas",
+  "settings.historyLimit.documents.desc":
+    "Versions the vault keeps for each markdown note and canvas file.",
+  "settings.historyLimit.attachments.label": "Attachments",
+  "settings.historyLimit.attachments.desc":
+    "Versions the vault keeps for every other file: images, audio, video, PDFs and the rest.",
+  "settings.historyLimit.edit": "Modify",
+  "settings.historyLimit.confirm": "Save",
+  "settings.historyLimit.saving": "Saving…",
+  "settings.historyLimit.invalid": "Enter a whole number of versions from 1 to {max}.",
+  "settings.historyLimit.unknown": "—",
+  "settings.historyLimit.unavailable":
+    "The server's value could not be read. Reconnect and reopen this page to see it.",
   "settings.section.excludedFolders": "Excluded folders",
   "settings.section.excludedFolders.tooltip":
     "Excluded folders and their contents are neither pushed nor pulled on this device, and no conflict copies are parked for them. Excluding deletes nothing; removing an exclusion resumes syncing. The list applies to the connected remote vault only; excluding nothing still counts as configured. The config folder (.obsidian) is controlled by the settings sync below.",

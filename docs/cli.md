@@ -229,6 +229,11 @@ courier-cli vault connect --id <vaultId> --path /mnt/vault \
 # Exclude two folders (comma-separated; --exclude-folders= clears the saved list)
 courier-cli vault connect --id <vaultId> --path /mnt/vault \
   --exclude-folders private,drafts
+
+# Keep 500 versions of notes and canvas, 5 of every other file, for the vault
+# (defaults: 200 / 10; the value is the vault's, shared with its other devices)
+courier-cli vault connect --id <vaultId> --path /mnt/vault \
+  --history-limit-documents 500 --history-limit-attachments 5
 ```
 
 `--device-name` is the label **this binding** stamps on the versions it pushes — it is per
@@ -283,6 +288,7 @@ failed run leaves nothing behind.
 ```bash
 courier-cli vault update --id <vaultId> --device-name "家里的电脑"
 courier-cli vault update --id <vaultId> --sync-file-types images,pdf --exclude-folders private
+courier-cli vault update --id <vaultId> --history-limit-documents 500 --history-limit-attachments 5
 ```
 
 Edits the stored binding in place: no vault password (the key is already on this machine), no
@@ -371,6 +377,31 @@ Rules:
   Therefore, renaming and then moving (so the same-name condition no longer holds) is still treated
   as a deletion; configuring the exclusion first and then moving files is safest. Moves that occur
   while the daemon is stopped go through the same determination during the full scan at startup.
+
+### Version history kept on the server
+
+How many versions of each file the **vault** keeps is server-side state, shared by every device of that
+vault. The CLI edits it through `vault connect`, `vault create` and `vault update`; the flags become a
+`PATCH /api/vaults/:id`, so the value applies to every device (including one that never ran the
+command) and a lowered value also trims the histories already stored.
+
+| Kind                                | Default | Flag                              |
+| ----------------------------------- | ------- | --------------------------------- |
+| Markdown notes and Canvas files     | 200     | `--history-limit-documents <n>`   |
+| Every other file (images, audio, …) | 10      | `--history-limit-attachments <n>` |
+
+- A limit is a whole number of versions from 1 to 10000; anything else is refused rather than
+  clamped, because `0` would read as "keep only the current version".
+- Each flag states only its own half of the vault's record; omitting both keeps what the vault has.
+  `status` prints both values (or says they could not be read), and `vault connect` / `vault update`
+  print them after a write.
+- Nothing about the limits is stored in this machine's config: a binding does not carry them, so two
+  machines bound to the same vault cannot disagree, and a hand-edited `config.json` cannot override
+  the server.
+- Trimming is separate from an account's `retentionDays` age window (an administrator's setting), and
+  the versions a vault prunes are not recoverable afterwards.
+- The blob of a pruned version is reclaimed only when no remaining version row references it, so
+  two files holding the same bytes do not lose them from one file's trim.
 
 ### Obsidian settings (the config folder) — the plugin's job
 
@@ -522,11 +553,14 @@ that binding stamps on its pushes — its own `--device-name` when it has one. T
 never set its own.
 
 The `File types` line (`fileTypes` + `maxFileBytes` fields) reports the enabled file types and the
-administrator-configured size cap, and the `Excluded` line (`excludedFolders` field) reports the
-folders excluded on this machine, for example (English output):
+administrator-configured size cap, the `History` line (`historyLimits` field) reports how many versions
+of each file the **vault** keeps on the server (`null` when the server could not be read, and the line
+says so), and the `Excluded` line (`excludedFolders` field) reports the folders excluded on this
+machine, for example (English output):
 
 ```
 File types:  md, canvas, images, video, audio, pdf, otherTypes (max 50 MB, admin-set)
+History:     notes/canvas 200, attachments 10
 Excluded:    private, drafts
 Conflicts:   (none)
 ```
@@ -549,6 +583,7 @@ process. It is stable machine data, and a supervisor reads it verbatim:
       "hasState": true,
       "fileTypes": ["images", "video", "audio", "pdf"],
       "maxFileBytes": 52428800,
+      "historyLimits": { "documents": 200, "attachments": 10 },
       "excludedFolders": ["private"],
       "oversizeFiles": [],
       "conflictFiles": [],

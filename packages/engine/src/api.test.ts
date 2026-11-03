@@ -21,6 +21,7 @@ function fakeClient(): {
     setSessionId: vi.fn(),
     createVault: vi.fn(),
     listVaults: vi.fn(),
+    updateVault: vi.fn(),
     getMe: vi.fn(),
     getEncryptionSalt: vi.fn(),
     getKeyCheck: vi.fn(),
@@ -54,6 +55,7 @@ function pushFile(): PushFileFrame {
     mtimeMs: 1_760_000_000_000,
     baseVersionId: null,
     content: new Uint8Array([1, 2, 3]),
+    historyKind: "documents",
   };
 }
 

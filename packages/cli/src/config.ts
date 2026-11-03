@@ -1,7 +1,12 @@
 import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import path from "path";
-import { normalizeDeviceName } from "@courier/shared";
+import {
+  MAX_HISTORY_LIMIT,
+  normalizeDeviceName,
+  type HistoryLimits,
+  type UpdateVaultRequest,
+} from "@courier/shared";
 import { t } from "./i18n";
 import {
   DEFAULT_FILE_TYPES,
@@ -135,6 +140,14 @@ export function describeExcludedFolders(vault: CliVault): string {
   return describeExcludedFolderList(syncScopeOf(vault).excludedFolders);
 }
 
+/** How the two history limits read: `notes/canvas 200, attachments 10`. */
+export function describeHistoryLimits(limits: HistoryLimits): string {
+  return t("cli.status.historyLimit.value", {
+    documents: limits.documents,
+    attachments: limits.attachments,
+  });
+}
+
 /** A byte count as whole megabytes, rounded up so a cap never reads as 0 MB. */
 export function formatMegabytes(bytes: number): number {
   return Math.ceil(bytes / (1024 * 1024));
@@ -209,6 +222,45 @@ export function excludedFoldersFromFlags(
 ): string[] {
   if (flags.excludeFolders === undefined) return normalizeExcludedFolders(stored);
   return normalizeExcludedFolders(flags.excludeFolders.split(","));
+}
+
+/**
+ * Parse `--history-limit-documents` / `--history-limit-attachments`: a whole number of
+ * versions between 1 and {@link MAX_HISTORY_LIMIT}.
+ *
+ * Refused rather than clamped: a typo would otherwise silently change how much history a
+ * vault keeps, which is the one outcome a user cannot notice — and `0` would read as
+ * "keep only the newest version", deleting history nobody asked to delete.
+ */
+export function parseHistoryLimit(value: string): number {
+  const trimmed = value.trim();
+  const limit = Number(trimmed);
+  if (trimmed === "" || !Number.isSafeInteger(limit) || limit < 1 || limit > MAX_HISTORY_LIMIT) {
+    throw new Error(t("cli.config.error.historyLimit", { value, max: MAX_HISTORY_LIMIT }));
+  }
+  return limit;
+}
+
+/**
+ * The `PATCH /api/vaults/:id` body for a command's history-limit flags, or null when
+ * neither flag was given.
+ *
+ * The limits are **vault-level server state** (shared by every device of the vault), so
+ * the flags become a request rather than a local record. Each flag states only its own
+ * field: a user who raises the attachment limit must not resend the notes one.
+ */
+export function historyLimitPatchFromFlags(flags: {
+  historyLimitDocuments?: string;
+  historyLimitAttachments?: string;
+}): UpdateVaultRequest | null {
+  const patch: UpdateVaultRequest = {};
+  if (flags.historyLimitDocuments !== undefined) {
+    patch.historyLimitDocuments = parseHistoryLimit(flags.historyLimitDocuments);
+  }
+  if (flags.historyLimitAttachments !== undefined) {
+    patch.historyLimitAttachments = parseHistoryLimit(flags.historyLimitAttachments);
+  }
+  return Object.keys(patch).length === 0 ? null : patch;
 }
 
 export function configPath(): string {

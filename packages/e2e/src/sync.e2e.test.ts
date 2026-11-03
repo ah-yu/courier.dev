@@ -976,6 +976,7 @@ describe("sync e2e — two clients through a real server", () => {
           sizeBytes: 14,
           mtimeMs: 0,
           baseVersionId: null,
+          historyKind: "documents",
         },
       ]);
       const response = await fetch(`${server.serverUrl}/api/vaults/${vault.id}/sync/push`, {
