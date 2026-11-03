@@ -42,9 +42,6 @@ export const CONFLICT_ACTION_CLASS = "courier-conflict-action";
 /** The class the version-history chip carries, with the same role. */
 export const VERSION_HISTORY_ACTION_CLASS = "courier-version-history-action";
 
-/** The class a decorated row carries, which makes it the chip's containing block. */
-const VERSION_HISTORY_ROW_CLASS = "courier-has-version-action";
-
 /** What the chips do, by action kind. */
 export interface FileExplorerActionHandlers {
   openDiff(conflictPath: string): void;
@@ -235,7 +232,11 @@ export function decorateConflictTitle(
     titleEl.querySelector<HTMLElement>(`.${CONFLICT_ACTION_CLASS}`)?.detach();
     return null;
   }
-  if (!recyclableChip(titleEl, CONFLICT_ACTION_CLASS, path)) return null;
+  const existing = existingChip(titleEl, CONFLICT_ACTION_CLASS, path);
+  if (existing !== null) {
+    ensureBeforeTag(titleEl, existing);
+    return null;
+  }
 
   const kind = conflictActionFor(path);
   const button = chip(titleEl, CONFLICT_ACTION_CLASS, path, conflictActionLabel(kind));
@@ -262,6 +263,10 @@ export function decorateConflictTitle(
  * missing chip until the explorer happened to rebuild. A path this device excludes is
  * different: it is outside the scope, so it is not offered an action at all — even when a
  * chain from before the exclusion (or a copy parked before it) still exists on disk.
+ *
+ * An attachment row carries the app's extension tag (`PNG`) at the row's right end; the chip
+ * is inserted before it, in the row's flow, so while it is shown the file name truncates with
+ * an ellipsis in front of it instead of running underneath — see `chip` and `styles.css`.
  */
 export function decorateVersionHistoryTitle(
   titleEl: HTMLElement,
@@ -271,16 +276,15 @@ export function decorateVersionHistoryTitle(
 ): HTMLElement | null {
   if (fileActionFor(path, excludedFolders) !== "history") {
     titleEl.querySelector<HTMLElement>(`.${VERSION_HISTORY_ACTION_CLASS}`)?.detach();
-    titleEl.removeClass(VERSION_HISTORY_ROW_CLASS);
     return null;
   }
-  if (!recyclableChip(titleEl, VERSION_HISTORY_ACTION_CLASS, path)) return null;
+  const existing = existingChip(titleEl, VERSION_HISTORY_ACTION_CLASS, path);
+  if (existing !== null) {
+    ensureBeforeTag(titleEl, existing);
+    return null;
+  }
 
   const button = chip(titleEl, VERSION_HISTORY_ACTION_CLASS, path, t("explorer.versionHistory"));
-  // The chip is absolutely positioned over the row's right end (see `styles.css`), so the row
-  // has to be its containing block. A class rather than a rule on every `.nav-file-title`:
-  // other rows keep whatever positioning their theme gives them.
-  titleEl.addClass(VERSION_HISTORY_ROW_CLASS);
   button.setAttribute("aria-label", t("explorer.versionHistory"));
   attachActivation(button, () => {
     const current = titleEl.getAttribute("data-path") ?? path;
@@ -290,42 +294,58 @@ export function decorateVersionHistoryTitle(
 }
 
 /**
- * Whether this row needs a chip of `className`, given what it already has.
+ * The chip this row already has for `path`, or `null` when one has to be created.
  *
- * `true` means "no chip yet, make one". A chip that is already there for the **same path** is
- * left alone (the decorator runs on every mutation of the explorer), and one that was made
- * for a different path is removed first: the row element outlives a rename, so the chip has
- * to be rebuilt with the new path rather than keep acting on the old one.
+ * A chip that was made for a **different** path is removed first: the row element outlives a
+ * rename, so the chip has to be rebuilt with the new path rather than keep acting on the old
+ * one. A chip on the same path is left alone — the decorator runs on every mutation of the
+ * explorer — and its place is re-checked by {@link ensureBeforeTag}.
  */
-function recyclableChip(titleEl: HTMLElement, className: string, path: string): boolean {
+function existingChip(titleEl: HTMLElement, className: string, path: string): HTMLElement | null {
   const existing = titleEl.querySelector<HTMLElement>(`.${className}`);
-  if (existing === null) return true;
-  if (existing.getAttribute("data-path") === path) return false;
+  if (existing === null) return null;
+  if (existing.getAttribute("data-path") === path) return existing;
   existing.detach();
-  return true;
+  return null;
 }
 
 /**
- * One row-end chip, placed before the extension tag when the row has one.
+ * Keep the chip immediately before the row's extension tag.
+ *
+ * The row reads `name … [版本历史] PNG` only while the chip is the tag's previous sibling, and
+ * the file name's truncation (`styles.css`) is about that place. Obsidian's own `updateTitle`
+ * can rebuild the tag, which appends it after the chip; re-inserting is idempotent, so every
+ * decoration pass repairs the order instead of trusting the one it established at creation.
+ */
+function ensureBeforeTag(titleEl: HTMLElement, button: HTMLElement): void {
+  const tag = titleEl.querySelector(".nav-file-tag");
+  if (tag !== null && button.nextElementSibling !== tag) titleEl.insertBefore(button, tag);
+}
+
+/**
+ * One row-end chip: in the row's flow before the extension tag, when the row has one.
  *
  * Every chip in this explorer is the same shape: a `role="button"` div that stops the row's
  * own click (which would open the file), reachable from the keyboard, and drawn only on the
  * hovered/focused row (see `styles.css`). It records the path it was made for in `data-path`,
- * so {@link recyclableChip} can tell "already decorated" from "decorated before a rename".
+ * so {@link existingChip} can tell "already decorated" from "decorated before a rename".
+ *
+ * "Before the tag" is the whole point: while the chip is shown it takes layout space, so the
+ * file name truncates with an ellipsis in front of it instead of running under it, and the
+ * extension tag stays the row's rightmost item (`name … [版本历史] PNG`). The chip is
+ * collapsed to zero width on an idle row (`styles.css`), so that truncation costs the name
+ * nothing until the pointer is on the row.
  */
 function chip(titleEl: HTMLElement, className: string, path: string, label: string): HTMLElement {
   const button = titleEl.createDiv({ cls: className });
   button.setText(label);
   button.setAttribute("role", "button");
   button.setAttribute("data-path", path);
-  // The row itself is not a focus stop for the chip; the chip has to be one, or the
-  // `:focus-visible` rule in `styles.css` could never match and a keyboard user could not
-  // reach the action at all.
+  // The row itself is not a focus stop for the chip; the chip has to be one, or the focus
+  // rule in `styles.css` could never match and a keyboard user could not reach the action.
   button.setAttribute("tabindex", "0");
   button.setAttribute("data-tooltip-position", "top");
-
-  const tag = titleEl.querySelector(".nav-file-tag");
-  if (tag !== null) titleEl.insertBefore(button, tag);
+  ensureBeforeTag(titleEl, button);
   return button;
 }
 

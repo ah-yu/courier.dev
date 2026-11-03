@@ -2482,30 +2482,33 @@ body.is-phone .courier-login-control.has-action .courier-login-input {
 }
 
 /*
- * The version-history chip is **not** in the row's flow: it is laid over the row's right end
- * and only drawn on hover. A chip in the flow would reserve its width on every row of the
- * explorer (the conflict chip above accepts that for the few parked copies there are), and
- * file names would truncate half a word earlier for a button most rows never show. Docking
- * it over the extension tag is the trade: while the pointer is on the row, the tag is not
- * what the user is looking at.
+ * The version-history chip is a **row-end item in the row's flow**, before the extension tag,
+ * and only takes its width while the row is hovered or the chip is focused.
  *
- * The row gets `position: relative` from the decorator's own class, so a theme's own
- * positioning of `.nav-file-title` is not overridden for every row in the vault.
+ * Collapsed (the idle row), it is `width: 0` with nothing drawn: it reserves no space, so the
+ * file name uses the whole row and every row keeps its natural truncation point. Shown, it
+ * takes its content width and the name truncates in front of it — the name's ellipsis moves
+ * left the moment the pointer arrives, which is the accepted trade: an always-reserved slot
+ * shortened every file name for a button most rows never show, and an absolutely positioned
+ * chip painted over the name instead (in a narrow explorer the two read as one blob).
+ *
+ * The collapse must not remove the chip from the tab order, so it is `width: 0` +
+ * `overflow: hidden`, never `display: none`: a keyboard user still tabs to it and
+ * `:focus-within` expands it, which is also how the focus state is asserted in the e2e suite.
+ *
+ * The row is also what makes `name … [版本历史] PNG` possible: the chip is inserted before the
+ * tag, and its `margin-left: auto` pushes the pair to the row's end; the tag rule with the chip
+ * states below then gives the tag a 6 px gap instead of the auto margin it carries on its own.
  */
-.nav-file-title.courier-has-version-action {
-  position: relative;
-}
-
 .nav-file-title .courier-version-history-action {
-  position: absolute;
-  top: 50%;
-  right: 6px;
-  z-index: 1;
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
-  transform: translateY(-50%);
-  padding: 0 6px;
-  border: 1px solid var(--background-modifier-border);
+  margin-left: auto;
+  width: 0;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
   border-radius: 4px;
   background: var(--nav-item-background-hover, var(--background-modifier-hover));
   color: var(--text-muted);
@@ -3210,7 +3213,8 @@ body.is-phone .courier-conflict-replace-actions button {
 }
 
 /* The tag stays the rightmost item; the action sits just before it. */
-.nav-file-title .courier-conflict-action + .nav-file-tag {
+.nav-file-title .courier-conflict-action + .nav-file-tag,
+.nav-file-title .courier-version-history-action + .nav-file-tag {
   margin-left: 6px;
 }
 
@@ -3228,7 +3232,10 @@ body.is-phone .courier-conflict-replace-actions button {
 }
 
 .nav-file-title:hover .courier-version-history-action,
-.nav-file-title .courier-version-history-action:focus-visible {
+.nav-file-title .courier-version-history-action:focus-within {
+  width: auto;
+  padding: 0 6px;
+  border: 1px solid var(--background-modifier-border);
   opacity: 1;
   pointer-events: auto;
 }

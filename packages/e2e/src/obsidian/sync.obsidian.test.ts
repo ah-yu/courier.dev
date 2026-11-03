@@ -95,6 +95,7 @@ import {
   readStatusMenuStorage,
   readStatusMenuStyles,
   readSyncHistoryDialog,
+  readVersionHistoryChipBesideTag,
   readVersionHistoryView,
   reconcile,
   removeConfigFileInVault,
@@ -197,6 +198,14 @@ const itL = layout ? it : it.skip;
 
 /** Prefix for every file this suite creates, so cleanup can be precise. */
 const PROBE_PREFIX = "courier-e2e-";
+
+/**
+ * A 1×1 PNG, base64. Written through `app.vault.createBinary` to get a real attachment row:
+ * Obsidian draws its extension tag for exactly the files it has no view for, and that tag
+ * shares the row's right end with the version-history chip.
+ */
+const ONE_PIXEL_PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
 /**
  * Folder the nested-path probe notes live in. It also starts with
@@ -3216,6 +3225,92 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
         await cleanAttachments();
       }
     }, 300_000);
+  });
+
+  /**
+   * The row of a file Obsidian has no view for.
+   *
+   * Obsidian draws its own extension tag (`.nav-file-tag`, `PNG`) for every attachment, at
+   * the row's right end; the version-history chip is an in-flow row item just before it that
+   * is collapsed until the row is hovered. A note never carries that tag, so an attachment is
+   * the row where all three — name, chip and tag — have to share the end.
+   */
+  describe("attachment rows", () => {
+    /**
+     * The chip takes its width only while it is shown, and the name truncates in front of it.
+     *
+     * A narrow explorer is where the old absolute chip painted over the file name. The fix is
+     * not a permanently reserved slot either: an idle row must keep its whole width, so the
+     * chip is collapsed to zero until the row is hovered or the chip is focused. Shown, it
+     * takes its width and the name's laying-out box — which clips its own text — ends where
+     * the chip begins. Focus is the half of the shown state a geometry test can drive without
+     * a pointer, since CSS `:hover` cannot be simulated; the reader takes a pointer that is
+     * already on the row off it (a transform, which `:hover` follows) before the idle read.
+     */
+    itL("takes the chip's width only while shown, truncating the name in front of it", async () => {
+      const path = `${PROBE_PREFIX}version-chip-tag-with-a-name-long-enough-to-truncate.png`;
+      await configurePluginHost(names.a, { ...setup, deviceName: "obsidian-A" });
+      const a = new ObsidianVault(names.a);
+      await a.writeBinary(path, ONE_PIXEL_PNG_BASE64);
+      await waitForVaultState(
+        async () =>
+          (await readFileExplorerRowChips(names.a, path)).some((cls) =>
+            cls.includes(VERSION_HISTORY_ACTION_CLASS),
+          ),
+        "the attachment row never got its version-history chip",
+        30_000,
+      );
+
+      const reading = await readVersionHistoryChipBesideTag(names.a, path);
+      // The app stores the raw extension; `text-transform: uppercase` is what makes the row
+      // read `PNG`.
+      expect(reading.tag.toLowerCase(), "the row carried no extension tag").toBe("png");
+      expect(reading.idle, "the row was not measured idle").not.toBeNull();
+      expect(reading.shown, "the chip was never measured shown").not.toBeNull();
+      const idle = reading.idle!;
+      const shown = reading.shown!;
+      expect(idle.contentClipped, "the test's name was not long enough to truncate").toBe(true);
+
+      // Idle: the chip takes no space, and the name's clipped box runs into the slot the chip
+      // will take when it appears. The reader shifts a hovered row out from under the pointer
+      // before reading, so these two assertions are unconditional — a regression that keeps
+      // the chip expanded cannot hide behind a stray pointer.
+      expect(
+        reading.idleHovered,
+        "the pointer could not be taken off the row to read its idle state",
+      ).toBe(false);
+      expect(idle.chipWidth, "the idle chip reserved space").toBe(0);
+      expect(
+        idle.contentRight,
+        `name=${JSON.stringify(idle)} shown=${JSON.stringify(shown)}`,
+      ).toBeGreaterThanOrEqual(shown.chipLeft);
+
+      // Shown (focused): the chip has taken its width, the name ends in front of it, and the
+      // extension tag still follows the chip.
+      expect(shown.active, "the chip never took focus").toBe(true);
+      expect(shown.opacity, "the focused chip stayed invisible").toBe("1");
+      expect(shown.chipWidth).toBeGreaterThan(0);
+      expect(shown.insideRow, "the chip rendered outside its row").toBe(true);
+      expect(shown.contentClipped, "the shown name was not truncated").toBe(true);
+      expect(shown.contentRight, `name=${JSON.stringify(shown)}`).toBeLessThanOrEqual(
+        shown.chipLeft + 1,
+      );
+      expect(shown.chipRight, `chip=${JSON.stringify(shown)}`).toBeLessThanOrEqual(shown.tagLeft);
+      expect(shown.tagLeft - shown.chipRight, "the chip drifted away from the tag").toBeLessThan(
+        24,
+      );
+
+      // Blurred, with the pointer off the row, the chip gives its width back.
+      expect(
+        reading.afterBlurHovered,
+        "the pointer could not be taken off the row after the blur",
+      ).toBe(false);
+      expect(reading.afterBlurWidth, "the chip stayed wide after the focus was gone").toBe(0);
+
+      // The tag is drawn in every state; the chip is what changes.
+      expect(reading.tagIdle, "the tag was not drawn on an idle row").toBe("visible");
+      expect(shown.tagVisibility, "the tag hid while the chip was shown").toBe("visible");
+    });
   });
 
   /**
