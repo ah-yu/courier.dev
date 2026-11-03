@@ -15,6 +15,12 @@ import { FileContentModal } from "./file-content-modal";
 import { PromiseModal } from "./promise-modal";
 import { readVersionContent } from "../../shared/version-content";
 
+/** One deleted chain and the plaintext path its row shows (`null` when it will not decrypt). */
+interface RecycleBinRow {
+  file: DeletedFileInfo;
+  plainPath: string | null;
+}
+
 /**
  * The recycle bin, as a dialog the settings page opens.
  *
@@ -36,11 +42,29 @@ import { readVersionContent } from "../../shared/version-content";
  *
  * The rules behind a row's warning line, its click and its disabled button are
  * `shared/recycle-bin-row.ts`; this dialog only renders them.
+ *
+ * A re-read **repaints in place**. Only the first read puts the list through its skeleton;
+ * a refresh (or the read after a restore or a clear) keeps the rows on screen until the
+ * new list is in hand and then replaces them in one synchronous paint. Blanking the list
+ * for a refresh is what made the dialog flash — on the desktop and on a phone alike — and
+ * the spinner on the header's control is what says a silent read is running.
  */
 export class RecycleBinModal extends Modal {
-  private files: DeletedFileInfo[] = [];
+  /**
+   * The deleted chains on screen, each with the plaintext path its row shows (`null` when
+   * it will not decrypt). Decrypted before a paint, so painting cannot yield halfway.
+   */
+  private rows: RecycleBinRow[] = [];
+  /** A read is in flight; only the first one is painted as a skeleton (see {@link paint}). */
   private loading = false;
+  /**
+   * Whether a read has already painted its result. From then on a re-read repaints in
+   * place instead of going back through the loading state.
+   */
+  private painted = false;
   private error: string | null = null;
+  /** Number of the newest read, so a slow answer cannot repaint a newer one. */
+  private loadGeneration = 0;
   private headingEl!: HTMLElement;
   private listEl!: HTMLElement;
   /**
@@ -62,6 +86,13 @@ export class RecycleBinModal extends Modal {
     this.setTitle(t("dialog.recycleBin.title"));
     this.modalEl.addClass("courier-recycle-bin-modal");
     this.contentEl.addClass("courier-recycle-bin");
+    // A modal instance can be reopened: the read of the previous open is discarded and the
+    // dialog starts from the skeleton again.
+    this.rows = [];
+    this.loading = false;
+    this.painted = false;
+    this.error = null;
+    this.loadGeneration += 1;
 
     const header = this.contentEl.createDiv({ cls: "courier-recycle-bin-header" });
     this.headingEl = header.createDiv({ cls: "courier-recycle-bin-heading" });
@@ -99,6 +130,9 @@ export class RecycleBinModal extends Modal {
   }
 
   override onClose(): void {
+    // Whatever read is still in flight belongs to a dialog nobody is looking at any more.
+    this.loadGeneration += 1;
+    this.setRefreshing(false);
     this.contentEl.empty();
   }
 
@@ -111,33 +145,71 @@ export class RecycleBinModal extends Modal {
    *
    * The server's chain order is not the order a person expects in a recycle bin, so the
    * list is sorted newest deletion first here rather than relying on the query.
+   *
+   * The paths are decrypted and the order is settled **before** the paint, so a re-read is
+   * one synchronous replacement of the rows rather than a list that empties and refills
+   * row by row. A read that a newer one replaced drops its answer instead of painting it.
    */
   private async load(): Promise<void> {
+    const generation = ++this.loadGeneration;
     const vaultId = this.vaultId();
-    if (!vaultId) {
-      this.files = [];
-      this.loading = false;
-      this.error = null;
-      await this.paint();
-      return;
-    }
+    // The first read has nothing to keep, so it is the one that shows the skeleton.
+    const silent = this.painted;
 
     this.loading = true;
-    this.error = null;
-    await this.paint();
-    try {
-      const response = await this.host.actions.listDeleted(vaultId);
-      this.files = sortedCopy(response.files, (a, b) => {
-        if (a.deletedAt === b.deletedAt) return 0;
-        return a.deletedAt < b.deletedAt ? 1 : -1;
+    this.setRefreshing(true);
+    if (!silent) this.paint();
+
+    let files: DeletedFileInfo[] = [];
+    let error: string | null = null;
+    if (vaultId) {
+      try {
+        const response = await this.host.actions.listDeleted(vaultId);
+        files = sortedCopy(response.files, (a, b) => {
+          if (a.deletedAt === b.deletedAt) return 0;
+          return a.deletedAt < b.deletedAt ? 1 : -1;
+        });
+      } catch (err) {
+        console.error("Loading the recycle bin failed:", err);
+        files = [];
+        error = describeActionError(err, t("action.loadRecycleBin"));
+      }
+    }
+
+    const key = this.host.encryptionKey;
+    const rows: RecycleBinRow[] = [];
+    for (const file of files) {
+      rows.push({
+        file,
+        plainPath: file.lastEncryptedPath
+          ? await decryptPathOrNull(key, file.lastEncryptedPath)
+          : null,
       });
-    } catch (err) {
-      console.error("Loading the recycle bin failed:", err);
-      this.error = describeActionError(err, t("action.loadRecycleBin"));
-      this.files = [];
-    } finally {
-      this.loading = false;
-      await this.paint();
+    }
+    // A newer read owns the dialog now: this answer is about a list nobody is waiting for,
+    // and painting it would put the rows back to what they were before that read.
+    if (generation !== this.loadGeneration) return;
+
+    this.rows = rows;
+    this.error = error;
+    this.loading = false;
+    this.painted = true;
+    this.setRefreshing(false);
+    this.paint();
+  }
+
+  /**
+   * Mark the dialog while a read is in flight. A silent re-read keeps the rows on screen,
+   * so the header's control is the only thing on screen that can say the read is running —
+   * and `aria-busy` is the same fact for a screen reader, which cannot see the icon turn.
+   */
+  private setRefreshing(refreshing: boolean): void {
+    if (refreshing) {
+      this.contentEl.addClass("is-refreshing");
+      this.listEl.setAttribute("aria-busy", "true");
+    } else {
+      this.contentEl.removeClass("is-refreshing");
+      this.listEl.setAttribute("aria-busy", "false");
     }
   }
 
@@ -152,7 +224,8 @@ export class RecycleBinModal extends Modal {
       });
       return;
     }
-    if (this.loading) {
+    // Only the first read has no count to show yet; a re-read keeps the one on screen.
+    if (this.loading && !this.painted) {
       this.headingEl.createSpan({
         cls: "courier-recycle-bin-status",
         text: t("dialog.recycleBin.loading"),
@@ -169,25 +242,33 @@ export class RecycleBinModal extends Modal {
 
     this.headingEl.createSpan({
       cls: "courier-recycle-bin-count",
-      text: String(this.files.length),
+      text: String(this.rows.length),
     });
     this.headingEl.createSpan({
       cls: "courier-recycle-bin-count-label",
       text: plural(
         "dialog.recycleBin.countLabel.one",
         "dialog.recycleBin.countLabel.other",
-        this.files.length,
+        this.rows.length,
       ),
     });
   }
 
-  /** Paint the header, the list and the footer — the only parts that change. */
-  private async paint(): Promise<void> {
+  /**
+   * Paint the header, the list and the footer — the only parts that change.
+   *
+   * Synchronous on purpose: every `await` in here used to split the paint, so a refresh
+   * emptied the list and then filled it row by row while the browser was free to draw the
+   * gap. The rows are already decrypted (see {@link load}), so this cannot yield.
+   */
+  private paint(): void {
+    // A re-read replaces the rows in place, so it must not scroll the reader back to the top.
+    const scrollTop = this.painted ? this.listEl.scrollTop : 0;
     this.renderHeading();
     this.listEl.empty();
 
     const hasRows =
-      !this.loading && this.error === null && this.vaultId() !== null && this.files.length > 0;
+      this.painted && this.error === null && this.vaultId() !== null && this.rows.length > 0;
     this.footerEl.setCssStyles({ display: hasRows ? "flex" : "none" });
 
     if (this.loading) {
@@ -209,7 +290,7 @@ export class RecycleBinModal extends Modal {
       });
       return;
     }
-    if (this.files.length === 0) {
+    if (this.rows.length === 0) {
       this.renderPlaceholder({
         icon: "trash-2",
         title: t("dialog.recycleBin.emptyTitle"),
@@ -218,13 +299,8 @@ export class RecycleBinModal extends Modal {
       return;
     }
 
-    const key = this.host.encryptionKey;
-    for (const file of this.files) {
-      const plainPath = file.lastEncryptedPath
-        ? await decryptPathOrNull(key, file.lastEncryptedPath)
-        : null;
-      this.renderRow(file, plainPath);
-    }
+    for (const row of this.rows) this.renderRow(row.file, row.plainPath);
+    this.listEl.scrollTop = scrollTop;
   }
 
   /** A list-shaped placeholder while the first read is in flight. */
@@ -409,7 +485,7 @@ export class RecycleBinModal extends Modal {
       return;
     }
 
-    const confirm = new ClearRecycleBinConfirmModal(this.app, this.files.length);
+    const confirm = new ClearRecycleBinConfirmModal(this.app, this.rows.length);
     confirm.open();
     if ((await confirm.getResult()) !== true) return;
 

@@ -3083,11 +3083,159 @@ describe("plugin e2e — the real plugin against a real server", () => {
         (button) => button.tooltip === "刷新回收站",
       );
       expect(refresh, "the header offered no refresh control").toBeDefined();
+
+      // A re-read repaints in place: the rows on screen stay there until the new list is in
+      // hand. Emptying the list for the skeleton (or for an empty frame that fills in row by
+      // row) is the flash this pins — the desktop and the phone share this dialog.
+      const list = elementsWithClass(dialog.contentEl, "courier-recycle-bin-list")[0];
+      expect(list, "the dialog rendered no list").toBeDefined();
+      const footer = elementsWithClass(dialog.contentEl, "courier-recycle-bin-footer")[0];
+      expect(footer, "the dialog rendered no footer").toBeDefined();
+      list.scrollTop = 90;
       refresh!.click();
+
+      // Nothing was torn down, from the count over the list to the footer that owns 清空回收站.
+      expect(listedDeletedPaths(dialog)).toEqual(["second.md", "first.md"]);
+      expect(elementsWithClass(dialog.contentEl, "courier-recycle-bin-skeleton")).toEqual([]);
+      expect(elementsWithClass(dialog.contentEl, "courier-recycle-bin-status")).toEqual([]);
+      expect(elementsWithClass(dialog.contentEl, "courier-recycle-bin-count")[0]?.text).toBe("2");
+      expect(footer.style.display).toBe("flex");
+      // …and the header's control is what says the read is running, for the eye and for a
+      // screen reader (which cannot see the icon turn).
+      expect(dialog.contentEl.classes).toContain("is-refreshing");
+      expect(list.getAttribute("aria-busy")).toBe("true");
+
       await waitForAsync(
         async () => requestsMatching(/\/sync\/deleted$/).length > before,
         "the refresh control never re-read the recycle bin",
       );
+      await waitFor(
+        () => !dialog.contentEl.classes.includes("is-refreshing"),
+        "the refresh never settled",
+      );
+      expect(listedDeletedPaths(dialog)).toEqual(["second.md", "first.md"]);
+      // The list was replaced under the reader, not scrolled back to the top.
+      expect(list.scrollTop).toBe(90);
+      expect(list.getAttribute("aria-busy")).toBe("false");
+    });
+
+    it("shows the skeleton only while the first read runs", async () => {
+      const { plugin, vault, remote } = await startHostedPlugin(
+        "Recycle Bin Skeleton",
+        async (v) => {
+          await v.create("gone.md", "gone");
+        },
+      );
+      await vault.remove("gone.md");
+      await vault.settle();
+      await waitForAsync(
+        async () => (await deletedFiles(server, remote.id)).length === 1,
+        "the delete never reached the recycle bin",
+      );
+
+      // Hold the first read, so the state the dialog is in while it runs is observable
+      // without racing the answer: the skeleton and the loading line are what a first read
+      // looks like, and they must not come back for a re-read.
+      let release: (() => void) | null = null;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const real = plugin.actions.listDeleted.bind(plugin.actions);
+      plugin.actions.listDeleted = async (vaultId: string) => {
+        await gate;
+        return await real(vaultId);
+      };
+      try {
+        const dialog = await openRecycleBin(plugin);
+        // The rule is "a skeleton while the first read runs", not its row count.
+        expect(
+          elementsWithClass(dialog.contentEl, "courier-recycle-bin-skeleton").length,
+        ).toBeGreaterThan(0);
+        expect(listedDeletedPaths(dialog)).toEqual([]);
+        expect(elementsWithClass(dialog.contentEl, "courier-recycle-bin-status")[0]?.text).toBe(
+          t("dialog.recycleBin.loading"),
+        );
+        const footer = elementsWithClass(dialog.contentEl, "courier-recycle-bin-footer")[0];
+        expect(footer, "the dialog rendered no footer").toBeDefined();
+        expect(footer.style.display).toBe("none");
+
+        release!();
+        await waitFor(
+          () => listedDeletedPaths(dialog).includes("gone.md"),
+          "the first read never landed",
+        );
+        expect(elementsWithClass(dialog.contentEl, "courier-recycle-bin-skeleton")).toEqual([]);
+        expect(footer.style.display).toBe("flex");
+      } finally {
+        plugin.actions.listDeleted = real;
+      }
+    });
+
+    it("drops a slow re-read when a newer one replaced it", async () => {
+      const { plugin, vault, remote } = await startHostedPlugin(
+        "Recycle Bin Stale Read",
+        async (v) => {
+          await v.create("first.md", "first");
+          await v.create("second.md", "second");
+        },
+      );
+      await waitForAsync(
+        async () => (await vaultHistory(server, remote.id)).length === 2,
+        "not all notes were pushed",
+      );
+      for (const path of ["first.md", "second.md"]) {
+        await vault.remove(path);
+        await vault.settle();
+      }
+      await waitForAsync(
+        async () => (await deletedFiles(server, remote.id)).length === 2,
+        "the deletes never reached the recycle bin",
+      );
+
+      const dialog = await openRecycleBin(plugin);
+      await waitFor(
+        () => listedDeletedPaths(dialog).length === 2,
+        "the recycle bin dialog never listed both deleted notes",
+      );
+      // What the reader is looking at, whatever order the two deletes were recorded in:
+      // this case is about the stale paint, not about the sort.
+      const listed = listedDeletedPaths(dialog);
+      const refresh = extraButtonsIn(dialog.contentEl).find(
+        (button) => button.tooltip === "刷新回收站",
+      );
+      expect(refresh, "the header offered no refresh control").toBeDefined();
+
+      // Hold the first re-read, then let a second one land on top of it. The held answer
+      // comes back with an empty bin, so a stale paint would be unmistakable.
+      let release: (() => void) | null = null;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const real = plugin.actions.listDeleted.bind(plugin.actions);
+      let calls = 0;
+      plugin.actions.listDeleted = async (vaultId: string) => {
+        calls += 1;
+        if (calls === 1) {
+          await gate;
+          return { files: [] };
+        }
+        return await real(vaultId);
+      };
+      try {
+        refresh!.click();
+        refresh!.click();
+        await waitFor(
+          () => !dialog.contentEl.classes.includes("is-refreshing"),
+          "the newer read never settled",
+        );
+        release!();
+        // The stale answer runs on a microtask after the release; nothing is awaited on the
+        // other side of it, so this only has to outlast that continuation.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(listedDeletedPaths(dialog), "a stale read repainted the bin").toEqual(listed);
+      } finally {
+        plugin.actions.listDeleted = real;
+      }
     });
 
     it("shows the empty state, with the footer gone, when nothing was deleted", async () => {
@@ -3101,6 +3249,30 @@ describe("plugin e2e — the real plugin against a real server", () => {
       const footer = elementsWithClass(dialog.contentEl, "courier-recycle-bin-footer")[0];
       expect(footer, "the dialog rendered no footer element").toBeDefined();
       expect(footer.style.display).toBe("none");
+
+      // Refreshing an empty bin goes through the placeholder, not back through the skeleton.
+      const refresh = extraButtonsIn(dialog.contentEl).find(
+        (button) => button.tooltip === "刷新回收站",
+      );
+      expect(refresh, "the header offered no refresh control").toBeDefined();
+      const before = requestsMatching(/\/sync\/deleted$/).length;
+      refresh!.click();
+      expect(elementsWithClass(dialog.contentEl, "courier-recycle-bin-skeleton")).toEqual([]);
+      expect(elementsWithClass(dialog.contentEl, "courier-recycle-bin-placeholder")).toHaveLength(
+        1,
+      );
+
+      await waitForAsync(
+        async () => requestsMatching(/\/sync\/deleted$/).length > before,
+        "the refresh control never re-read an empty recycle bin",
+      );
+      await waitFor(
+        () => !dialog.contentEl.classes.includes("is-refreshing"),
+        "the refresh never settled",
+      );
+      expect(elementsWithClass(dialog.contentEl, "courier-recycle-bin-placeholder")).toHaveLength(
+        1,
+      );
     });
   });
 
