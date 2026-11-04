@@ -254,12 +254,12 @@ GitHub's macOS arm64 pool is capacity-constrained, so the macOS job can be cance
 starts with "not acquired by Runner of type hosted" after ~15 minutes of queueing. That is not a
 code signal: re-run the job (the same commit passed in about three minutes once it got a runner).
 
-**The macOS job is advisory (`continue-on-error`) for now.** It has passed there (96 passed, 6
-skipped, 3m07s) and it has also hung on cases that wait for a vault state — a 300 s hook timeout,
-then 120 s per case — on the same commit that passed earlier. That is either a macOS product
-behaviour or a harness assumption about the app's windows, and it needs a Mac to tell which; until
-it is diagnosed the Linux and Windows L3 jobs are the gates, and the macOS job still publishes its
-log. Remove `continue-on-error` once the hang is understood.
+**The macOS job runs on manual dispatch only for now.** It has passed there (96 passed, 6 skipped,
+3m07s) and it has also hung on cases that wait for a vault state — a 300 s hook timeout, then 120 s
+per case — on the same commit that passed earlier. That is either a macOS product behaviour or a
+harness assumption about the app's windows, and it needs a Mac to tell which; until it is diagnosed
+`workflow_dispatch` runs it and pull requests do not, so a known-flaky run cannot redden an
+unrelated change. Remove the `if` once the hang is understood.
 
 - **The gate is `bun run verify obsidian-ci`**: the same suite with
   `COURIER_OBSIDIAN_E2E_LAYOUT=0`. The cases that mixed behaviour and layout were split: their

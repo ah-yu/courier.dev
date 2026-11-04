@@ -11,6 +11,7 @@ name: L3 (real Obsidian)
 # macOS is the one platform whose CLI registration is normally a UI step (Settings →
 # General, then an administrator dialog). The app bundle already carries the binary, so
 # the action symlinks it to `/usr/local/bin/obsidian` — the same file that dialog creates.
+# Its job runs on manual dispatch only while a timeout hang on the runner is investigated.
 #
 # Cost: this is the reason for the `paths` filter. Only a change on the sync
 # path spends the account's included GitHub-hosted minutes; docs changes never
@@ -157,19 +158,19 @@ jobs:
   # macOS: the same suite on the third platform. Its menus are native, so the one case
   # that reads a real menu (`itMenu`) skips itself here — everything else runs.
   #
-  # Advisory for now, not a gate: the suite has passed here (3m07s, 96 passed), and it has
-  # also hung on cases that wait for a vault state (a 300 s hook timeout, then 120 s per
-  # case) — which needs a Mac to diagnose, not another CI run. A red macOS job stays
-  # visible; the Linux and Windows jobs are the ones that block. Remove this once the hang
-  # is understood.
+  # Manual only for now, not a gate: the suite has passed here (3m07s, 96 passed, 6
+  # skipped) and it has also hung on cases that wait for a vault state (a 300 s hook
+  # timeout, then 120 s per case) on the same commit. That needs a Mac to diagnose, not
+  # another CI run, so `workflow_dispatch` runs it and pull requests do not — a known-flaky
+  # run must not redden an unrelated change. Drop the `if` once the hang is understood.
   #
   # GitHub's macOS arm64 pool is also capacity-constrained: a run can sit queued until the
   # runner is never acquired, and the job is then cancelled ("not acquired by Runner of
   # type hosted"). That is infrastructure, not the code.
   l3-obsidian-macos:
     name: L3 (real Obsidian, macOS)
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
-    continue-on-error: true
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
