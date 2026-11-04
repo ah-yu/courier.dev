@@ -1,5 +1,6 @@
 import { execFile, spawn, spawnSync } from "child_process";
-import { existsSync } from "fs";
+import { closeSync, existsSync, openSync, readFileSync } from "fs";
+import { tmpdir } from "os";
 import { delimiter, join } from "path";
 import { promisify } from "util";
 import { obsidianLaunchCommand } from "./platform";
@@ -331,12 +332,18 @@ export function startObsidianApp(): void {
       spawn(command, args, { detached: true, stdio: "ignore" }).unref();
       return;
     }
-    const result = spawnSync(command, args, { encoding: "utf8", windowsHide: true });
+    // The launcher's stderr goes to a file, not a pipe: `cmd /c start` and `open` hand
+    // their handles to the app they launch, so a captured pipe would keep `spawnSync`
+    // waiting for Obsidian itself to exit — a Windows CI run hung exactly that way.
+    const logFile = join(tmpdir(), `courier-obsidian-launch-${process.pid}.log`);
+    const fd = openSync(logFile, "w");
+    const result = spawnSync(command, args, { stdio: ["ignore", "ignore", fd], windowsHide: true });
+    closeSync(fd);
     // A launcher that refuses (a macOS bundle LaunchServices does not know, a Windows
     // `start` with no handler) is otherwise only visible as "Obsidian did not come up"
     // from the wait loop below, which says nothing about why.
     if (result.status !== 0) {
-      const detail = (result.stderr || result.stdout || "").trim();
+      const detail = readFileSync(logFile, "utf8").trim();
       console.log(
         `[courier:e2e] ${command} ${args.join(" ")} exited with ${String(result.status)}` +
           (detail ? `: ${detail}` : ""),
