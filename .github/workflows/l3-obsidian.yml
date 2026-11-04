@@ -1,9 +1,15 @@
 name: L3 (real Obsidian)
 
-# The real-Obsidian layer, on a headless Ubuntu runner: a pinned Obsidian build
-# under Xvfb, driven through the official CLI by `packages/e2e/src/obsidian/`.
-# The rendered-geometry assertions stay on the reference platform (Windows by
-# default; different fonts, DPI and theme); everything else runs here.
+# The real-Obsidian layer, on two runners: a headless Ubuntu one (a pinned Obsidian
+# Linux build under Xvfb) and a Windows one (a pinned Obsidian Windows installer).
+# Both are driven through the official CLI by `packages/e2e/src/obsidian/`, exactly as
+# a local run is. The rendered-geometry assertions stay on the reference platform (the
+# developer's Windows machine; different fonts, DPI and theme on a runner), so both
+# jobs run the behavioural subset with `COURIER_OBSIDIAN_E2E_LAYOUT=0`.
+#
+# macOS is not here yet: its CLI is registered through the app (Settings → General,
+# then an administrator dialog that creates `/usr/local/bin/obsidian`), which a runner
+# cannot click. The harness's macOS branches are exercised by the local gate instead.
 #
 # Cost: this is the reason for the `paths` filter. Only a change on the sync
 # path spends the account's included GitHub-hosted minutes; docs changes never
@@ -98,3 +104,51 @@ jobs:
             /tmp/obsidian-console.txt
             /tmp/fluxbox.log
           if-no-files-found: ignore
+
+  # The same suite on Windows: the platform the layout contract is pinned to, and the
+  # one whose file layer differs most from Linux (case folding, rename semantics, a
+  # process table instead of `pgrep`). The rendered-geometry cases stay off — they are a
+  # reference-machine contract, and a runner's fonts and DPI are not that machine.
+  l3-obsidian-windows:
+    name: L3 (real Obsidian, Windows)
+    runs-on: windows-latest
+    # A 340 MB installer, then the suite on a 2-vCPU runner. The cap is for a stuck
+    # run, not for the normal one.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+
+      - uses: ./.github/actions/obsidian-windows
+
+      # The silent installer may leave the app running, and the setup script refuses to
+      # rewrite the vault registry underneath a running Obsidian (the app reads that
+      # file only at startup and rewrites it itself).
+      - name: Close Obsidian before registration
+        shell: pwsh
+        run: Get-Process Obsidian -ErrorAction SilentlyContinue | Stop-Process -Force
+
+      - name: Register the two disposable vaults
+        env:
+          # Register both vaults as open: the cold start then restores their windows
+          # itself, instead of relying on a focused window for `obsidian://open`.
+          COURIER_E2E_OPEN_VAULTS: "1"
+        run: bun run e2e:obsidian
+
+      - name: Run the non-layout L3 suite
+        env:
+          COURIER_OBSIDIAN_E2E: "1"
+          COURIER_OBSIDIAN_E2E_LAYOUT: "0"
+        run: bun run verify obsidian-ci
+
+      - name: Collect Obsidian diagnostics
+        if: failure()
+        shell: pwsh
+        # The CLI still answers while the app is up, so read it here rather than losing
+        # the diagnosis with the runner. The Linux job writes the same two files.
+        run: |
+          if ($env:COURIER_OBSIDIAN_CLI) {
+            & $env:COURIER_OBSIDIAN_CLI dev:errors 2>&1 | Out-String | Write-Output
+            & $env:COURIER_OBSIDIAN_CLI dev:console limit=300 2>&1 | Out-String | Write-Output
+          }

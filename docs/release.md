@@ -21,9 +21,11 @@ expensive part of CI — three runners execute the whole suite instead of one �
 pull request because the alternative is discovering a platform break at release time.
 
 `l3-obsidian.yml` is the real-Obsidian layer: it runs on pull requests and pushes to `main` whose
-`paths` touch the sync path, plus manual dispatch, so a docs-only change never spends a run.
-`.github/actions/obsidian-linux` installs a pinned Obsidian Linux build (with its CLI) under
-Xvfb; the version and sha256 live in that action and are bumped together.
+`paths` touch the sync path, plus manual dispatch, so a docs-only change never spends a run. It has
+two jobs — a headless Ubuntu runner and a Windows runner — and `.github/actions/obsidian-linux` /
+`.github/actions/obsidian-windows` install the pinned app and expose its CLI; the version and sha256
+live in those actions and are bumped together. Both jobs run the behavioural subset
+(`bun run verify obsidian-ci`); the rendered-geometry cases stay on the reference machine.
 
 `bench.yml` runs the sync benchmark: three scenarios (many small files, one large chunked file,
 renames and deletes) against the merge base and the pull request on the same runner, then posts a
@@ -32,11 +34,11 @@ and on manual dispatch (one run per scenario, head only); it is **not** a gate �
 benchmark's correctness invariants can fail it. The scenarios, the comparison rules and the cost
 are in [ci-sync-benchmarks.md](ci-sync-benchmarks.md).
 
-| Job           | Runner                   | What it runs                                                                          |
-| ------------- | ------------------------ | ------------------------------------------------------------------------------------- |
-| `verify`      | Ubuntu, macOS, Windows   | `bun scripts/check-release.ts`, `bun run verify`, `bun run build`                     |
-| `boundary`    | Ubuntu                   | `bun run verify coverage`, `bun run verify format`                                    |
-| `l3-obsidian` | Ubuntu (pinned Obsidian) | pinned Obsidian under Xvfb: `bun run e2e:obsidian`, then `bun run verify obsidian-ci` |
+| Job           | Runner                 | What it runs                                                                             |
+| ------------- | ---------------------- | ---------------------------------------------------------------------------------------- |
+| `verify`      | Ubuntu, macOS, Windows | `bun scripts/check-release.ts`, `bun run verify`, `bun run build`                        |
+| `boundary`    | Ubuntu                 | `bun run verify coverage`, `bun run verify format`                                       |
+| `l3-obsidian` | Ubuntu and Windows     | real Obsidian through its CLI: `bun run e2e:obsidian`, then `bun run verify obsidian-ci` |
 
 `bun run verify` covers the docs index, the generated migration chain, lint, the community
 directory's scan, typecheck and the test suite (L0–L2, including the in-memory end-to-end suites) on
@@ -55,10 +57,10 @@ to. CI **does not** run:
   so CI runs their behavioural halves through `bun run verify obsidian-ci` and skips the
   measurements;
 - the compiled binary builds: the release workflow builds those;
-- **L3 on macOS or Windows**: the pinned Obsidian tarball and the Xvfb session the suite needs are
-  Linux-only, and the layout contract above belongs to one reference machine. The behavioural L3
-  stays a Linux CI job, and the local gate on a developer's own OS remains `bun run verify
-  obsidian` (see [testing.md](testing.md#l3-in-ci)).
+- **L3 on macOS**: its CLI is registered through the app's settings and an administrator dialog that
+  creates `/usr/local/bin/obsidian`, which a runner cannot click. The macOS branches run through the
+  local gate (`bun run verify obsidian`) on a Mac instead. The layout contract above stays off CI on
+  every platform; see [testing.md](testing.md#l3-in-ci).
 
 The binary build jobs run `bun build --compile` (see `@courier/build`, shared by both binaries) for each target. Bun
 downloads the target's runtime and embeds it, so a Linux runner can produce the darwin-arm64 and

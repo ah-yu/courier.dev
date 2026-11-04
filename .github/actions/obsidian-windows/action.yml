@@ -1,0 +1,72 @@
+name: Install Obsidian (Windows, pinned)
+description: Download, verify and install the pinned Obsidian Windows build used by the L3 suite.
+
+# The same pinning rule as `obsidian-linux`: the version is pinned twice on purpose —
+# a test run must not change because Obsidian released a new build, and the checksum
+# must match the asset that version names. Bump both together and re-run the full
+# local L3 suite (see docs/testing.md).
+#
+# No cache, unlike the Linux action: the installer registers the `obsidian://` protocol
+# handler, so a cached install directory is not the same machine state as an installed
+# app, and the download from GitHub's own release page is fast on the runner.
+inputs:
+  version:
+    description: Obsidian version to install.
+    required: false
+    default: "1.14.4"
+  sha256:
+    description: SHA-256 of `Obsidian-<version>.exe`.
+    required: false
+    default: "28662520368d5956df7798076b8370ac730164a8863dcd4f678ced53f63faa00"
+
+runs:
+  using: composite
+  steps:
+    - name: Download and verify
+      shell: pwsh
+      env:
+        OBSIDIAN_VERSION: ${{ inputs.version }}
+        OBSIDIAN_SHA256: ${{ inputs.sha256 }}
+      run: |
+        $ErrorActionPreference = "Stop"
+        # Progress rendering turns a 340 MB download into minutes of console writes.
+        $ProgressPreference = "SilentlyContinue"
+        $installer = Join-Path $env:RUNNER_TEMP "Obsidian-$env:OBSIDIAN_VERSION.exe"
+        $url = "https://github.com/obsidianmd/obsidian-releases/releases/download/v$env:OBSIDIAN_VERSION/Obsidian-$env:OBSIDIAN_VERSION.exe"
+        Invoke-WebRequest -Uri $url -OutFile $installer
+        $actual = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne $env:OBSIDIAN_SHA256) {
+          throw "Obsidian $env:OBSIDIAN_VERSION: the installer hashes to $actual, the pin says $env:OBSIDIAN_SHA256"
+        }
+        "OBSIDIAN_INSTALLER=$installer" >> $env:GITHUB_ENV
+
+    - name: Install the app
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        # `/S` is electron-builder's silent switch: the per-user install
+        # (`%LOCALAPPDATA%\Programs\Obsidian`) runs without a window or a UAC prompt.
+        Start-Process -FilePath $env:OBSIDIAN_INSTALLER -ArgumentList "/S" -Wait
+        $app = Join-Path $env:LOCALAPPDATA "Programs\Obsidian"
+        $exe = Join-Path $app "Obsidian.exe"
+        # The CLI redirector: Obsidian is a GUI app, so the installer also ships
+        # `Obsidian.com`, which is what a terminal can actually execute.
+        $cli = Join-Path $app "Obsidian.com"
+        if (-not (Test-Path -LiteralPath $exe)) { throw "the installer did not create $exe" }
+        if (-not (Test-Path -LiteralPath $cli)) { throw "the installer did not create the CLI redirector $cli" }
+        "COURIER_OBSIDIAN_APP=$exe" >> $env:GITHUB_ENV
+        "COURIER_OBSIDIAN_CLI=$cli" >> $env:GITHUB_ENV
+        Write-Output "Obsidian ${{ inputs.version }} (pinned) at $app"
+
+    - name: Pin Obsidian's update endpoints
+      shell: pwsh
+      # A pinned test build must not be replaced by a background auto-update in the
+      # middle of a run. The same rule as `obsidian-linux`, which writes `/etc/hosts`;
+      # the Windows runner is an administrator, so its hosts file is writable.
+      run: |
+        $ErrorActionPreference = "Stop"
+        $hosts = Join-Path $env:SystemRoot "System32\drivers\etc\hosts"
+        $line = "127.0.0.1 releases.obsidian.md"
+        if (-not (Select-String -LiteralPath $hosts -SimpleMatch $line -Quiet)) {
+          Add-Content -LiteralPath $hosts -Value $line
+        }
