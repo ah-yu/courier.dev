@@ -243,15 +243,15 @@ describe("startServer with TLS_NAME set", () => {
     const { createChallengeListener } = await import("./start");
 
     // Hold the port so the listener's first bind fails, the way port 80 is
-    // already taken (or not permitted) on a misconfigured server. The blocker
-    // binds every interface, because that is where the challenge listener
-    // listens — a specific-address bind does not conflict with it on Windows.
-    const blocker = createNetServer();
-    // Bind every interface explicitly: Bun's `net.listen(0)` without a host binds
-    // a specific address, which does not conflict with the challenge listener.
-    await new Promise<void>((resolve) => blocker.listen(0, "0.0.0.0", () => resolve()));
-    const blocked = blocker.address();
-    const port = typeof blocked === "object" && blocked !== null ? blocked.port : 0;
+    // already taken (or not permitted) on a misconfigured server. The blocker is a
+    // Bun server on Bun's own default hostname, not a raw socket on `0.0.0.0`:
+    // which address family that default resolves to differs by OS, and on macOS an
+    // IPv6 wildcard bind is allowed beside an IPv4 one — the listener came up next
+    // to the blocker and this case failed on the first macOS CI run. The same
+    // runtime asking for the same address keeps the conflict identical everywhere.
+    const blocker = Bun.serve({ port: 0, fetch: () => new Response(null) });
+    const port = blocker.port;
+    if (port === undefined) throw new Error("the port blocker did not bind a port");
 
     const listener = createChallengeListener(port, (token) =>
       token === "tok" ? "tok.thumb" : null,
@@ -260,7 +260,7 @@ describe("startServer with TLS_NAME set", () => {
     // The failed attempt is not cached: the next one tries the port again.
     await expect(listener.ensureListening()).rejects.toThrow();
 
-    await new Promise<void>((resolve) => blocker.close(() => resolve()));
+    await blocker.stop(true);
     await listener.ensureListening();
 
     // The one route the listener answers, with exactly the registered bytes…
