@@ -219,8 +219,8 @@ person can judge:
 
 - open Settings → Courier and scroll the page, then the sync-history dialog: no section clipped, the
   title stays put while the list scrolls;
-- hover a note in the explorer: the version-history chip appears without shifting the row; open the
-  tab and click through two versions;
+- hover a note in the explorer: the version-history chip appears and the file name truncates to make
+  room for it; open the tab and click through two versions;
 - park a conflict copy and open its comparison on a phone: one readable column, the replace
   confirmation reachable;
 - open the status bar menu and the account-usage bars: every row at one label size, the bars filled

@@ -2065,6 +2065,248 @@ export async function measureConflictActionNarrow(
   );
 }
 
+/** The width an explorer row is squeezed to while the chip's end-of-row layout is measured. */
+const NARROW_VERSION_ROW_WIDTH = 200;
+
+/**
+ * The vertical shifts tried, in order, to take the pointer off a hovered row.
+ *
+ * `:hover` is browser state and a page cannot move its own pointer. It does follow a layout
+ * change that moves the element out from under the pointer — a `transform` does; `margin`,
+ * `pointer-events` and `visibility` do not (measured in Chrome 150) — so the row is shifted
+ * down until it is demonstrably not hovered. The shift is vertical, which leaves every
+ * horizontal measurement in the frame untouched.
+ */
+const UNHOVER_SHIFTS = [60, 120, 240];
+
+/** What the idle row shows: the collapsed chip's width and the file name's clipped box. */
+export interface VersionHistoryIdleFrame {
+  chipWidth: number;
+  contentRight: number;
+  contentClipped: boolean;
+}
+
+/** What the shown row shows: the three boxes at the row's end and the chip's paint. */
+export interface VersionHistoryShownFrame {
+  chipLeft: number;
+  chipRight: number;
+  chipWidth: number;
+  insideRow: boolean;
+  tagLeft: number;
+  contentRight: number;
+  contentClipped: boolean;
+  active: boolean;
+  opacity: string;
+  tagVisibility: string;
+}
+
+/** What an attachment row's version-history chip, its file name and its tag look like. */
+export interface VersionHistoryChipReading {
+  row: boolean;
+  chip: boolean;
+  /** The app's own extension tag text (`png`; the app uppercases it with CSS). */
+  tag: string;
+  /** Computed `visibility` of the tag with nothing hovered or focused. */
+  tagIdle: string;
+  /** The idle row: the chip is collapsed and reserves nothing. */
+  idle: VersionHistoryIdleFrame | null;
+  /** Whether the idle frame could be read with the pointer off the row. */
+  idleHovered: boolean;
+  /** The shown row: the chip focused, so it has taken its width. */
+  shown: VersionHistoryShownFrame | null;
+  /** The chip's width once the focus is gone and the pointer is off the row. */
+  afterBlurWidth: number;
+  /** Whether that width could be read with the pointer off the row. */
+  afterBlurHovered: boolean;
+}
+
+type IdleReading = Pick<
+  VersionHistoryChipReading,
+  "row" | "chip" | "tag" | "tagIdle" | "idle" | "idleHovered"
+>;
+type ShownReading = Pick<VersionHistoryChipReading, "shown">;
+type AfterBlurReading = Pick<VersionHistoryChipReading, "afterBlurWidth" | "afterBlurHovered">;
+
+/**
+ * The version-history chip on an attachment row: idle, then **shown**.
+ *
+ * An attachment Obsidian has no view for (`PNG`, `PDF`, `canvas`) carries the app's own
+ * `.nav-file-tag` at the row's right end; the chip is an in-flow row item just in front of it
+ * that is collapsed (`width: 0`) until the row is hovered or the chip is focused. What a user
+ * must see is the name's ellipsis, then the chip, then the tag — never two of them laid over
+ * each other — and an idle row must not pay for the chip's width. So this reads the row in
+ * three `eval`s (each body stays small, see `evalInVault`): the idle row, the shown row with
+ * the chip focused (the half a geometry test can drive without a pointer), and the chip's
+ * width after the focus is gone. The row is squeezed to {@link NARROW_VERSION_ROW_WIDTH} for
+ * all three — the explorer width the overlap was reported at — and restored before each eval
+ * returns; the chip's opacity transition is suppressed for the settled frame. The inline
+ * width, flex and transform all go back to their previous values in the same eval that set
+ * them.
+ */
+export async function readVersionHistoryChipBesideTag(
+  vault: string,
+  path: string,
+): Promise<VersionHistoryChipReading> {
+  const idle = await evalInVault<IdleReading>(
+    vault,
+    `
+    const row = [...document.querySelectorAll('.nav-file-title[data-path]')].find(
+      (el) => el.getAttribute('data-path') === ${jsLiteral(path)},
+    );
+    const chip = row ? row.querySelector('.courier-version-history-action') : null;
+    const tag = row ? row.querySelector('.nav-file-tag') : null;
+    if (!row || !chip || !tag) {
+      return { row: !!row, chip: !!chip, tag: '', tagIdle: '', idle: null, idleHovered: false };
+    }
+    const content = row.querySelector('.nav-file-title-content');
+    const width = row.style.width;
+    const flex = row.style.flex;
+    const transform = row.style.transform;
+    row.style.width = ${NARROW_VERSION_ROW_WIDTH} + 'px';
+    row.style.flex = '0 0 ' + ${NARROW_VERSION_ROW_WIDTH} + 'px';
+    void row.offsetWidth;
+    // :hover is recomputed on a lifecycle/frame task, not by a forced layout flush, so each
+    // shift has to wait for two frames before its effect can be read. The timer is a fallback
+    // for a window whose frames are throttled; it keeps the eval from hanging.
+    const nextFrame = () =>
+      new Promise((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          resolve();
+        };
+        requestAnimationFrame(() => requestAnimationFrame(finish));
+        setTimeout(finish, 400);
+      });
+    for (const shift of ${JSON.stringify(UNHOVER_SHIFTS)}) {
+      if (!row.matches(':hover')) break;
+      row.style.transform = 'translateY(' + shift + 'px)';
+      void row.offsetWidth;
+      await nextFrame();
+    }
+    const idle = {
+      chipWidth: Math.round(chip.getBoundingClientRect().width),
+      contentRight: content ? Math.round(content.getBoundingClientRect().right) : 0,
+      contentClipped: content ? content.scrollWidth > content.clientWidth : false,
+    };
+    const idleHovered = row.matches(':hover');
+    row.style.transform = transform;
+    row.style.width = width;
+    row.style.flex = flex;
+    void row.offsetWidth;
+    return {
+      row: true,
+      chip: true,
+      tag: (tag.textContent || '').trim(),
+      tagIdle: getComputedStyle(tag).visibility,
+      idle,
+      idleHovered,
+    };
+    `,
+    60_000,
+  );
+  if (idle.idle === null) {
+    return { ...idle, shown: null, afterBlurWidth: 0, afterBlurHovered: false };
+  }
+
+  const shown = await evalInVault<ShownReading>(
+    vault,
+    `
+    const row = [...document.querySelectorAll('.nav-file-title[data-path]')].find(
+      (el) => el.getAttribute('data-path') === ${jsLiteral(path)},
+    );
+    const chip = row ? row.querySelector('.courier-version-history-action') : null;
+    const tag = row ? row.querySelector('.nav-file-tag') : null;
+    if (!row || !chip || !tag) return { shown: null };
+    const content = row.querySelector('.nav-file-title-content');
+    const width = row.style.width;
+    const flex = row.style.flex;
+    row.style.width = ${NARROW_VERSION_ROW_WIDTH} + 'px';
+    row.style.flex = '0 0 ' + ${NARROW_VERSION_ROW_WIDTH} + 'px';
+    void row.offsetWidth;
+    const transition = chip.style.transition;
+    chip.style.transition = 'none';
+    chip.focus();
+    void chip.offsetWidth;
+    const rect = (el) => el.getBoundingClientRect();
+    const rowBox = rect(row);
+    const chipBox = rect(chip);
+    const shown = {
+      chipLeft: Math.round(chipBox.left),
+      chipRight: Math.round(chipBox.right),
+      chipWidth: Math.round(chipBox.width),
+      insideRow:
+        chipBox.width > 0 &&
+        chipBox.left >= rowBox.left - 1 &&
+        chipBox.right <= rowBox.right + 1,
+      tagLeft: Math.round(rect(tag).left),
+      contentRight: content ? Math.round(rect(content).right) : 0,
+      contentClipped: content ? content.scrollWidth > content.clientWidth : false,
+      active: document.activeElement === chip,
+      opacity: getComputedStyle(chip).opacity,
+      tagVisibility: getComputedStyle(tag).visibility,
+    };
+    chip.blur();
+    void chip.offsetWidth;
+    chip.style.transition = transition;
+    row.style.width = width;
+    row.style.flex = flex;
+    void row.offsetWidth;
+    return { shown };
+    `,
+    60_000,
+  );
+  if (shown.shown === null) {
+    return { ...idle, shown: null, afterBlurWidth: 0, afterBlurHovered: false };
+  }
+
+  const afterBlur = await evalInVault<AfterBlurReading>(
+    vault,
+    `
+    const row = [...document.querySelectorAll('.nav-file-title[data-path]')].find(
+      (el) => el.getAttribute('data-path') === ${jsLiteral(path)},
+    );
+    const chip = row ? row.querySelector('.courier-version-history-action') : null;
+    const tag = row ? row.querySelector('.nav-file-tag') : null;
+    if (!row || !chip || !tag) return { afterBlurWidth: 0, afterBlurHovered: false };
+    const width = row.style.width;
+    const flex = row.style.flex;
+    const transform = row.style.transform;
+    row.style.width = ${NARROW_VERSION_ROW_WIDTH} + 'px';
+    row.style.flex = '0 0 ' + ${NARROW_VERSION_ROW_WIDTH} + 'px';
+    void row.offsetWidth;
+    const nextFrame = () =>
+      new Promise((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          resolve();
+        };
+        requestAnimationFrame(() => requestAnimationFrame(finish));
+        setTimeout(finish, 400);
+      });
+    chip.blur();
+    for (const shift of ${JSON.stringify(UNHOVER_SHIFTS)}) {
+      if (!row.matches(':hover')) break;
+      row.style.transform = 'translateY(' + shift + 'px)';
+      void row.offsetWidth;
+      await nextFrame();
+    }
+    const afterBlurHovered = row.matches(':hover');
+    const afterBlurWidth = Math.round(chip.getBoundingClientRect().width);
+    row.style.transform = transform;
+    row.style.width = width;
+    row.style.flex = flex;
+    void row.offsetWidth;
+    return { afterBlurWidth, afterBlurHovered };
+    `,
+    60_000,
+  );
+  return { ...idle, ...shown, ...afterBlur };
+}
+
 /** Press that button, the way a user does. */
 export async function clickConflictAction(vault: string, path: string): Promise<boolean> {
   return await evalInVault<boolean>(
@@ -2557,6 +2799,27 @@ export class ObsidianVault {
       const existing = app.vault.getAbstractFileByPath(${jsLiteral(path)});
       if (existing) { await app.vault.modify(existing, ${jsLiteral(content)}); return 'modified'; }
       await app.vault.create(${jsLiteral(path)}, ${jsLiteral(content)});
+      return 'created';
+      `,
+      60_000,
+    );
+  }
+
+  /**
+   * Create a binary file (an attachment) from base64, the way a paste into the vault does.
+   *
+   * `write` is text-only, and an attachment is the one row that carries Obsidian's own
+   * extension tag — the row the version-history chip shares its end with (`name … [版本历史] PNG`).
+   */
+  async writeBinary(path: string, base64: string): Promise<void> {
+    await this.ensureFolder(parentDir(path));
+    await evalInVault(
+      this.name,
+      `
+      const bytes = Uint8Array.from(atob(${jsLiteral(base64)}), (c) => c.charCodeAt(0));
+      const existing = app.vault.getAbstractFileByPath(${jsLiteral(path)});
+      if (existing) { await app.vault.modifyBinary(existing, bytes.buffer); return 'modified'; }
+      await app.vault.createBinary(${jsLiteral(path)}, bytes.buffer);
       return 'created';
       `,
       60_000,

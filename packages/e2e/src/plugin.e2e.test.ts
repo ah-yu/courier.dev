@@ -4133,6 +4133,26 @@ describe("plugin e2e — the real plugin against a real server", () => {
         tagged.children.indexOf(tag),
       );
 
+      // The same repair as the history chip: a tag in front of an existing chip is moved back
+      // behind it, so the extension tag stays rightmost.
+      const rebuilt = createFakeEl("div");
+      const rebuiltTag = rebuilt.createDiv({ cls: "nav-file-tag", text: "PNG" });
+      const rebuiltPath = "photos/raw-2026-02-14-101530.conflict.png";
+      const repaired = decorateConflictTitle(
+        rebuilt as unknown as HTMLElement,
+        rebuiltPath,
+        handlers,
+      )!;
+      rebuilt.insertBefore(rebuiltTag as unknown as FakeEl, repaired as unknown as FakeEl);
+      expect(
+        decorateConflictTitle(rebuilt as unknown as HTMLElement, rebuiltPath, handlers),
+        "a decorated row was decorated again",
+      ).toBeNull();
+      expect(
+        rebuilt.children.indexOf(repaired as unknown as FakeEl),
+        "the conflict chip stayed behind the rebuilt tag",
+      ).toBeLessThan(rebuilt.children.indexOf(rebuiltTag as unknown as FakeEl));
+
       // An ordinary file is left alone.
       expect(decorateConflictTitle(makeTitle(), "plan.md", handlers)).toBeNull();
     });
@@ -4148,6 +4168,44 @@ describe("plugin e2e — the real plugin against a real server", () => {
       expect(asFake(chip).text).toBe(t("explorer.versionHistory"));
       chip.click();
       expect(opened).toEqual(["notes/plan.md"]);
+
+      // An attachment row keeps the app's extension tag rightmost: the chip goes **before**
+      // it, in the row's flow, so the file name truncates in front of the chip.
+      const tagged = createFakeEl("div");
+      const tag = tagged.createDiv({ cls: "nav-file-tag", text: "PNG" });
+      const beforeTag = decorateVersionHistoryTitle(
+        tagged as unknown as HTMLElement,
+        "photos/raw.png",
+        handlers,
+      )!;
+      expect(
+        tagged.children.indexOf(beforeTag as unknown as FakeEl),
+        "the chip did not take its place before the extension tag",
+      ).toBeLessThan(tagged.children.indexOf(tag));
+
+      // A tag that ends up in front of an existing chip (the row's children can be rebuilt
+      // under the decorator) must not stay there: the next pass puts the chip back in front
+      // of it instead of leaving the two to split the row's free space.
+      const rebuilt = createFakeEl("div");
+      const rebuiltTag = rebuilt.createDiv({ cls: "nav-file-tag", text: "PNG" });
+      const repairedChip = decorateVersionHistoryTitle(
+        rebuilt as unknown as HTMLElement,
+        "photos/raw.png",
+        handlers,
+      )!;
+      rebuilt.insertBefore(rebuiltTag as unknown as FakeEl, repairedChip as unknown as FakeEl);
+      expect(
+        rebuilt.children.indexOf(repairedChip as unknown as FakeEl),
+        "the test did not put the tag in front of the chip",
+      ).toBeGreaterThan(rebuilt.children.indexOf(rebuiltTag as unknown as FakeEl));
+      expect(
+        decorateVersionHistoryTitle(rebuilt as unknown as HTMLElement, "photos/raw.png", handlers),
+        "a decorated row was decorated again",
+      ).toBeNull();
+      expect(
+        rebuilt.children.indexOf(repairedChip as unknown as FakeEl),
+        "the chip stayed behind the rebuilt tag",
+      ).toBeLessThan(rebuilt.children.indexOf(rebuiltTag as unknown as FakeEl));
 
       // A parked copy has no chain at all, so it gets no chip — and a chip a previous path
       // gave the same row is removed: Obsidian reuses the row element across a rename, and a
