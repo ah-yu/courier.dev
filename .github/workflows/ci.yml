@@ -14,10 +14,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The product ships for Linux, macOS and Windows, and the sync engine runs on each
+  # host's own filesystem: path case rules, rename semantics, file watching and the
+  # adapter's error codes differ per OS. A green Ubuntu run therefore says nothing about
+  # the Windows adapter, so every platform runs the same gates — the suite, not a smoke
+  # subset. A platform that cannot pass the suite is a platform the product does not
+  # support, and the fix belongs in the code, not in a skip list.
   verify:
-    name: Verify (docs, migrations, lint, types, tests, build)
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    name: Verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # Windows is the slowest runner (2 vCPU, slower disk, Defender on every write) and
+    # runs the same end-to-end suite; the cap is for a stuck run, not for the normal one.
+    timeout-minutes: 45
+    strategy:
+      # Report every platform even when one fails: the useful answer is "which OS broke",
+      # not "who finished first". A cancelled sibling hides a second failure.
+      fail-fast: false
+      matrix:
+        # `macos-latest` is arm64, the architecture of the published darwin asset, so the
+        # suite runs where that build runs rather than on an Intel image nobody ships.
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -29,6 +45,22 @@ jobs:
       - name: Verify
         run: bun run verify
 
+      - name: Build production bundles
+        run: bun run build
+
+  # Two gates are a boundary rather than a per-platform signal, so they run once on the
+  # platform they are pinned to: the coverage floors are measured on the Linux runner (a
+  # second OS would move the numbers for reasons that are not the change), and
+  # formatting does not depend on the OS at all.
+  boundary:
+    name: Coverage and formatting
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+
       # The per-package floors in `vitest.config.ts` are a ratchet only if something
       # runs the instrumented suite. It is opt-in locally (a couple of minutes on top of
       # the plain run), so CI is where the ratchet is actually enforced: without this
@@ -38,6 +70,3 @@ jobs:
 
       - name: Check formatting
         run: bun run verify format
-
-      - name: Build production bundles
-        run: bun run build

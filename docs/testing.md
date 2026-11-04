@@ -344,7 +344,8 @@ plugin's now does too. When you add a host, copy the CLI's shape, not the eager 
 - Coverage is measured over `packages/*/src` only — the e2e harness is the instrument, not the
   subject — and a module that lands without tests moves its package's number down. The thresholds
   only ever ratchet up; never lower one to make a change pass.
-- **CI runs it** (`.github/workflows/ci.yml`, its own step in the `verify` job). Locally it stays
+- **CI runs it** (`.github/workflows/ci.yml`, its own step in the `boundary` job, which is
+  Ubuntu-only because the floors are measured there). Locally it stays
   opt-in because instrumenting every project costs a couple of minutes, but a ratchet nobody
   executes is not a ratchet: the engine drifted 0.13 points under its line floor over two weeks of
   feature work and nothing noticed until the gate was run by hand. When a floor is raised, raise it
