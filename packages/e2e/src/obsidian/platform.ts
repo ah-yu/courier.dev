@@ -92,12 +92,15 @@ export function obsidianLaunchCommand({
     };
   }
   if (platform === "darwin") {
-    return uri
-      ? { command: "open", args: [uri] }
-      : {
-          command: "open",
-          args: ["-a", "Obsidian", ...(flags.length > 0 ? ["--args", ...flags] : [])],
-        };
+    if (uri) return { command: "open", args: [uri] };
+    // The app *name* is resolved through LaunchServices, which does not know a bundle
+    // that was merely copied into /Applications — a CI runner, where the app never went
+    // through the Finder. The path form asks for that bundle directly, so an explicit
+    // `COURIER_OBSIDIAN_APP` wins when the harness has one.
+    return {
+      command: "open",
+      args: ["-a", appPath ?? "Obsidian", ...(flags.length > 0 ? ["--args", ...flags] : [])],
+    };
   }
   if (uri && !appPath) return { command: "xdg-open", args: [uri] };
   return {

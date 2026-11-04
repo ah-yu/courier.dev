@@ -329,8 +329,18 @@ export function startObsidianApp(): void {
       // `spawnSync` would block until the app exits: on Linux the app *is* the
       // command, while Windows' `start` and macOS' `open` return immediately.
       spawn(command, args, { detached: true, stdio: "ignore" }).unref();
-    } else {
-      spawnSync(command, args, { stdio: "ignore", windowsHide: true });
+      return;
+    }
+    const result = spawnSync(command, args, { encoding: "utf8", windowsHide: true });
+    // A launcher that refuses (a macOS bundle LaunchServices does not know, a Windows
+    // `start` with no handler) is otherwise only visible as "Obsidian did not come up"
+    // from the wait loop below, which says nothing about why.
+    if (result.status !== 0) {
+      const detail = (result.stderr || result.stdout || "").trim();
+      console.log(
+        `[courier:e2e] ${command} ${args.join(" ")} exited with ${String(result.status)}` +
+          (detail ? `: ${detail}` : ""),
+      );
     }
   } catch {
     // The caller's wait loop reports the failure with more context.

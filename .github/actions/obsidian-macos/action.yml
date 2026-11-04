@@ -60,6 +60,11 @@ runs:
         sudo ln -sf /Applications/Obsidian.app/Contents/MacOS/obsidian-cli /usr/local/bin/obsidian
         test -x /usr/local/bin/obsidian
         test -x /Applications/Obsidian.app/Contents/MacOS/Obsidian
+        # LaunchServices: a bundle that only appeared through `ditto` is not in the
+        # database yet, so both `open -a Obsidian` and the `obsidian://` handler the suite
+        # uses can miss it. Registering it is what the Finder's first launch does.
+        lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+        "$lsregister" -f /Applications/Obsidian.app
         {
           echo "COURIER_OBSIDIAN_APP=/Applications/Obsidian.app/Contents/MacOS/Obsidian"
           echo "COURIER_OBSIDIAN_CLI=/usr/local/bin/obsidian"

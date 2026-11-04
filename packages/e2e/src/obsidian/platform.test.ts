@@ -75,6 +75,14 @@ describe("obsidianLaunchCommand", () => {
     });
   });
 
+  it("opens the macOS app by path when the harness has one", () => {
+    // A bundle copied into /Applications is not in LaunchServices until something
+    // registers it, so the name form can miss it on a runner; the path form cannot.
+    expect(
+      obsidianLaunchCommand({ platform: "darwin", appPath: "/Applications/Obsidian.app" }),
+    ).toEqual({ command: "open", args: ["-a", "/Applications/Obsidian.app"] });
+  });
+
   it("opens a macOS URI with open", () => {
     expect(obsidianLaunchCommand({ platform: "darwin", uri })).toEqual({
       command: "open",
