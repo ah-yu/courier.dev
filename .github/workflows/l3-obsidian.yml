@@ -156,6 +156,11 @@ jobs:
 
   # macOS: the same suite on the third platform. Its menus are native, so the one case
   # that reads a real menu (`itMenu`) skips itself here — everything else runs.
+  #
+  # GitHub's macOS arm64 pool is capacity-constrained: a run can sit queued until the
+  # runner is never acquired, and the job is then cancelled ("not acquired by Runner of
+  # type hosted"). That is infrastructure, not the code — re-run the job rather than
+  # changing a case.
   l3-obsidian-macos:
     name: L3 (real Obsidian, macOS)
     runs-on: macos-latest

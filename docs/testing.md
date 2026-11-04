@@ -250,6 +250,10 @@ other half of that setting, the `cli` flag in Obsidian's vault registry, is writ
 The Windows and macOS jobs register the vaults with `COURIER_E2E_OPEN_VAULTS=1` like the Linux one,
 so the cold start restores both windows instead of needing a focused window for `obsidian://open`.
 
+GitHub's macOS arm64 pool is capacity-constrained, so the macOS job can be cancelled before it
+starts with "not acquired by Runner of type hosted" after ~15 minutes of queueing. That is not a
+code signal: re-run the job (the same commit passed in about three minutes once it got a runner).
+
 - **The gate is `bun run verify obsidian-ci`**: the same suite with
   `COURIER_OBSIDIAN_E2E_LAYOUT=0`. The cases that mixed behaviour and layout were split: their
   behavioural halves (the history's content, the parked-copy comparison/replace flow, the status
