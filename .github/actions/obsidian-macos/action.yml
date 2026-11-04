@@ -1,0 +1,77 @@
+name: Install Obsidian (macOS, pinned)
+description: Download, verify and install the pinned Obsidian macOS build used by the L3 suite.
+
+# The same pinning rule as `obsidian-linux` and `obsidian-windows`: a test run must not
+# change because Obsidian released a new build, and the checksum must match the asset that
+# version names. Bump both together and re-run the full local L3 suite (see docs/testing.md).
+#
+# The app ships its CLI beside its own binary (`Contents/MacOS/obsidian-cli`), so the suite
+# does not need the app's own "Register the CLI" step: that one opens an administrator
+# dialog and creates `/usr/local/bin/obsidian`, which a runner cannot click. Symlinking the
+# bundled binary is the same result. The other half of that setting — the `cli` flag in
+# Obsidian's vault registry — is written by `bun run e2e:obsidian` before the app starts.
+inputs:
+  version:
+    description: Obsidian version to install.
+    required: false
+    default: "1.14.4"
+  sha256:
+    description: SHA-256 of `Obsidian-<version>.dmg`.
+    required: false
+    default: "dcf818dd20ee5d9dd3e782eee0c0c4c47cc225383b051c2fc9af7d5772f59f70"
+
+runs:
+  using: composite
+  steps:
+    - name: Download and verify
+      shell: bash
+      env:
+        OBSIDIAN_VERSION: ${{ inputs.version }}
+        OBSIDIAN_SHA256: ${{ inputs.sha256 }}
+      run: |
+        set -euo pipefail
+        dmg="$RUNNER_TEMP/obsidian-${OBSIDIAN_VERSION}.dmg"
+        curl -fsSL -o "$dmg" \
+          "https://github.com/obsidianmd/obsidian-releases/releases/download/v${OBSIDIAN_VERSION}/Obsidian-${OBSIDIAN_VERSION}.dmg"
+        echo "${OBSIDIAN_SHA256}  ${dmg}" | shasum -a 256 -c -
+
+    - name: Install the app and expose the CLI
+      shell: bash
+      env:
+        OBSIDIAN_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        dmg="$RUNNER_TEMP/obsidian-${OBSIDIAN_VERSION}.dmg"
+        mount="$RUNNER_TEMP/obsidian-dmg"
+        mkdir -p "$mount"
+        hdiutil attach -nobrowse -quiet -mountpoint "$mount" "$dmg"
+        # `ditto` keeps the bundle's extended attributes and code signature; the volume
+        # unmounts even when the copy fails, so a failure does not wedge the runner.
+        sudo ditto "$mount/Obsidian.app" /Applications/Obsidian.app || {
+          status=$?
+          hdiutil detach -quiet "$mount" || true
+          exit "$status"
+        }
+        hdiutil detach -quiet "$mount"
+        # An image fetched by curl is normally not quarantined; a runner image can still
+        # carry the attribute, and clearing it is a no-op when it is absent.
+        sudo xattr -dr com.apple.quarantine /Applications/Obsidian.app || true
+        sudo mkdir -p /usr/local/bin
+        sudo ln -sf /Applications/Obsidian.app/Contents/MacOS/obsidian-cli /usr/local/bin/obsidian
+        test -x /usr/local/bin/obsidian
+        test -x /Applications/Obsidian.app/Contents/MacOS/Obsidian
+        {
+          echo "COURIER_OBSIDIAN_APP=/Applications/Obsidian.app/Contents/MacOS/Obsidian"
+          echo "COURIER_OBSIDIAN_CLI=/usr/local/bin/obsidian"
+        } >> "$GITHUB_ENV"
+        echo "Obsidian ${OBSIDIAN_VERSION} (pinned) at /Applications/Obsidian.app"
+
+    - name: Pin Obsidian's update endpoints
+      shell: bash
+      # A pinned test build must not be replaced by a background auto-update in the middle
+      # of a run. The same rule as `obsidian-linux`, which writes the same line.
+      run: |
+        set -euo pipefail
+        if ! grep -q "releases.obsidian.md" /etc/hosts; then
+          echo "127.0.0.1 releases.obsidian.md" | sudo tee -a /etc/hosts > /dev/null
+        fi

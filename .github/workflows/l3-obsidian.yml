@@ -1,15 +1,16 @@
 name: L3 (real Obsidian)
 
-# The real-Obsidian layer, on two runners: a headless Ubuntu one (a pinned Obsidian
-# Linux build under Xvfb) and a Windows one (a pinned Obsidian Windows installer).
-# Both are driven through the official CLI by `packages/e2e/src/obsidian/`, exactly as
-# a local run is. The rendered-geometry assertions stay on the reference platform (the
-# developer's Windows machine; different fonts, DPI and theme on a runner), so both
-# jobs run the behavioural subset with `COURIER_OBSIDIAN_E2E_LAYOUT=0`.
+# The real-Obsidian layer, on all three platforms the product ships for: a headless Ubuntu
+# runner (a pinned Obsidian Linux build under Xvfb), a Windows runner (a pinned Obsidian
+# Windows installer) and a macOS runner (a pinned Obsidian DMG). All are driven through the
+# app's own CLI by `packages/e2e/src/obsidian/`, exactly as a local run is. The
+# rendered-geometry assertions stay on the reference platform (the developer's Windows
+# machine; different fonts, DPI and theme on a runner), so every job runs the behavioural
+# subset with `COURIER_OBSIDIAN_E2E_LAYOUT=0`.
 #
-# macOS is not here yet: its CLI is registered through the app (Settings → General,
-# then an administrator dialog that creates `/usr/local/bin/obsidian`), which a runner
-# cannot click. The harness's macOS branches are exercised by the local gate instead.
+# macOS is the one platform whose CLI registration is normally a UI step (Settings →
+# General, then an administrator dialog). The app bundle already carries the binary, so
+# the action symlinks it to `/usr/local/bin/obsidian` — the same file that dialog creates.
 #
 # Cost: this is the reason for the `paths` filter. Only a change on the sync
 # path spends the account's included GitHub-hosted minutes; docs changes never
@@ -152,3 +153,42 @@ jobs:
             & $env:COURIER_OBSIDIAN_CLI dev:errors 2>&1 | Out-String | Write-Output
             & $env:COURIER_OBSIDIAN_CLI dev:console limit=300 2>&1 | Out-String | Write-Output
           }
+
+  # macOS: the same suite on the third platform. Its menus are native, so the one case
+  # that reads a real menu (`itMenu`) skips itself here — everything else runs.
+  l3-obsidian-macos:
+    name: L3 (real Obsidian, macOS)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+
+      - uses: ./.github/actions/obsidian-macos
+
+      # The setup script refuses to rewrite the vault registry underneath a running
+      # Obsidian; a DMG install does not start the app, but a retried run can leave one up.
+      - name: Close Obsidian before registration
+        shell: bash
+        run: pkill -x Obsidian || true
+
+      - name: Register the two disposable vaults
+        env:
+          # Register both vaults as open: the cold start then restores their windows
+          # itself, instead of relying on a focused window for `obsidian://open`.
+          COURIER_E2E_OPEN_VAULTS: "1"
+        run: bun run e2e:obsidian
+
+      - name: Run the non-layout L3 suite
+        env:
+          COURIER_OBSIDIAN_E2E: "1"
+          COURIER_OBSIDIAN_E2E_LAYOUT: "0"
+        run: bun run verify obsidian-ci
+
+      - name: Collect Obsidian diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          obsidian dev:errors || true
+          obsidian dev:console limit=300 || true

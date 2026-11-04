@@ -22,9 +22,9 @@ pull request because the alternative is discovering a platform break at release 
 
 `l3-obsidian.yml` is the real-Obsidian layer: it runs on pull requests and pushes to `main` whose
 `paths` touch the sync path, plus manual dispatch, so a docs-only change never spends a run. It has
-two jobs — a headless Ubuntu runner and a Windows runner — and `.github/actions/obsidian-linux` /
-`.github/actions/obsidian-windows` install the pinned app and expose its CLI; the version and sha256
-live in those actions and are bumped together. Both jobs run the behavioural subset
+three jobs — Ubuntu (Xvfb), Windows and macOS — and `.github/actions/obsidian-linux` /
+`obsidian-windows` / `obsidian-macos` install the pinned app and expose its CLI; the version and
+sha256 live in those actions and are bumped together. All three run the behavioural subset
 (`bun run verify obsidian-ci`); the rendered-geometry cases stay on the reference machine.
 
 `bench.yml` runs the sync benchmark: three scenarios (many small files, one large chunked file,
@@ -34,11 +34,11 @@ and on manual dispatch (one run per scenario, head only); it is **not** a gate �
 benchmark's correctness invariants can fail it. The scenarios, the comparison rules and the cost
 are in [ci-sync-benchmarks.md](ci-sync-benchmarks.md).
 
-| Job           | Runner                 | What it runs                                                                             |
-| ------------- | ---------------------- | ---------------------------------------------------------------------------------------- |
-| `verify`      | Ubuntu, macOS, Windows | `bun scripts/check-release.ts`, `bun run verify`, `bun run build`                        |
-| `boundary`    | Ubuntu                 | `bun run verify coverage`, `bun run verify format`                                       |
-| `l3-obsidian` | Ubuntu and Windows     | real Obsidian through its CLI: `bun run e2e:obsidian`, then `bun run verify obsidian-ci` |
+| Job           | Runner                    | What it runs                                                                             |
+| ------------- | ------------------------- | ---------------------------------------------------------------------------------------- |
+| `verify`      | Ubuntu, macOS, Windows    | `bun scripts/check-release.ts`, `bun run verify`, `bun run build`                        |
+| `boundary`    | Ubuntu                    | `bun run verify coverage`, `bun run verify format`                                       |
+| `l3-obsidian` | Ubuntu, Windows and macOS | real Obsidian through its CLI: `bun run e2e:obsidian`, then `bun run verify obsidian-ci` |
 
 `bun run verify` covers the docs index, the generated migration chain, lint, the community
 directory's scan, typecheck and the test suite (L0–L2, including the in-memory end-to-end suites) on
@@ -56,11 +56,7 @@ to. CI **does not** run:
   default, `COURIER_OBSIDIAN_LAYOUT_PLATFORM` moves it); fonts, DPI and the theme differ per OS,
   so CI runs their behavioural halves through `bun run verify obsidian-ci` and skips the
   measurements;
-- the compiled binary builds: the release workflow builds those;
-- **L3 on macOS**: its CLI is registered through the app's settings and an administrator dialog that
-  creates `/usr/local/bin/obsidian`, which a runner cannot click. The macOS branches run through the
-  local gate (`bun run verify obsidian`) on a Mac instead. The layout contract above stays off CI on
-  every platform; see [testing.md](testing.md#l3-in-ci).
+- the compiled binary builds: the release workflow builds those.
 
 The binary build jobs run `bun build --compile` (see `@courier/build`, shared by both binaries) for each target. Bun
 downloads the target's runtime and embeds it, so a Linux runner can produce the darwin-arm64 and

@@ -222,30 +222,33 @@ phone. Use it — the mobile path is not "the same code, so L2 covers it"; L2's 
 
 ### L3 in CI
 
-`.github/workflows/l3-obsidian.yml` runs the suite on **two runners**, both driven through the
-official CLI exactly as a local run is: a headless Ubuntu runner with a pinned Obsidian Linux build
-under Xvfb, and a Windows runner with a pinned Obsidian Windows installer. It triggers on pull
-requests (and pushes to `main`) whose `paths` touch the sync path, and on manual dispatch;
-docs-only changes do not spend a run. `.github/actions/obsidian-linux` installs
-`xvfb`/`fluxbox` and the Electron libraries, verifies the pinned tarball's sha256, caches the
-extracted build, and pins `releases.obsidian.md` to `127.0.0.1` so a background update cannot
-replace the app mid-run. It installs **no CJK font**: `fonts-noto-cjk` was 61 MB of the ~85 MB the
-step downloads on every run, the gate skips every `itL` case, and its value cases compare text, file
-state and CSS-anchored corners, so no assertion depends on a glyph's shape. The job's 40-minute cap
-has the same reason — a slow package mirror once took 28 minutes of a 30-minute run and must not
-decide whether the run says anything.
+`.github/workflows/l3-obsidian.yml` runs the suite on **all three runners**, each driven through the
+app's own CLI exactly as a local run is: a headless Ubuntu runner with a pinned Obsidian Linux build
+under Xvfb, a Windows runner with a pinned Obsidian Windows installer, and a macOS runner with a
+pinned Obsidian DMG. It triggers on pull requests (and pushes to `main`) whose `paths` touch the
+sync path, and on manual dispatch; docs-only changes do not spend a run.
+`.github/actions/obsidian-linux` installs `xvfb`/`fluxbox` and the Electron libraries, verifies the
+pinned tarball's sha256, caches the extracted build, and pins `releases.obsidian.md` to `127.0.0.1`
+so a background update cannot replace the app mid-run. It installs **no CJK font**:
+`fonts-noto-cjk` was 61 MB of the ~85 MB the step downloads on every run, the gate skips every
+`itL` case, and its value cases compare text, file state and CSS-anchored corners, so no assertion
+depends on a glyph's shape. The job's 40-minute cap has the same reason — a slow package mirror
+once took 28 minutes of a 30-minute run and must not decide whether the run says anything.
 
 `.github/actions/obsidian-windows` downloads the pinned `Obsidian-<version>.exe`, verifies its
 sha256, installs it silently to `%LOCALAPPDATA%\Programs\Obsidian`, and exposes `Obsidian.exe` as
 `COURIER_OBSIDIAN_APP` and `Obsidian.com` — the terminal redirector a GUI app needs — as
-`COURIER_OBSIDIAN_CLI`. It pins the same update endpoint through the runner's hosts file. The
-Windows job registers the vaults with `COURIER_E2E_OPEN_VAULTS=1` like the Linux one, so the cold
-start restores both windows instead of needing a focused window for `obsidian://open`.
+`COURIER_OBSIDIAN_CLI`. It pins the same update endpoint through the runner's hosts file.
 
-**macOS is not in CI yet.** Its CLI is registered through the app (Settings → General, then an
-administrator dialog that creates `/usr/local/bin/obsidian`), which a runner cannot click. The
-harness's macOS branches — the `Application Support` registry path, `open -a Obsidian`, and the
-native menu `itMenu` skips — are exercised by the local gate on a Mac instead.
+`.github/actions/obsidian-macos` downloads the pinned `Obsidian-<version>.dmg`, verifies its
+sha256, copies `Obsidian.app` to `/Applications`, and symlinks the CLI the bundle already carries
+(`Contents/MacOS/obsidian-cli`) to `/usr/local/bin/obsidian`. That is the file the app's own
+"Register the CLI" step creates through an administrator dialog, which a runner cannot click; the
+other half of that setting, the `cli` flag in Obsidian's vault registry, is written by
+`bun run e2e:obsidian` before the app starts.
+
+The Windows and macOS jobs register the vaults with `COURIER_E2E_OPEN_VAULTS=1` like the Linux one,
+so the cold start restores both windows instead of needing a focused window for `obsidian://open`.
 
 - **The gate is `bun run verify obsidian-ci`**: the same suite with
   `COURIER_OBSIDIAN_E2E_LAYOUT=0`. The cases that mixed behaviour and layout were split: their
