@@ -387,6 +387,20 @@ describe("FakeEl — the DOM the file-explorer decoration relies on", () => {
   });
 });
 
+describe("FakeEl — closest", () => {
+  it("walks up to the nearest ancestor with a single class, itself included", () => {
+    const modal = createFakeEl().addClass("modal");
+    const pane = modal.createDiv();
+    const inner = pane.createDiv();
+
+    expect(inner.closest(".modal")).toBe(modal);
+    expect(modal.closest(".modal")).toBe(modal);
+    expect(inner.closest(".missing")).toBeNull();
+    // Anything but a single class is outside what the fake can answer honestly.
+    expect(inner.closest("div")).toBeNull();
+  });
+});
+
 describe("FakeEl — the settings page's scroll container", () => {
   it("returns to the top when its content is emptied, like a real scroller", () => {
     const scroller = createFakeEl();
@@ -586,5 +600,19 @@ describe("declarative settings (Obsidian 1.13)", () => {
 
     expect(plugin.settings.fileTypes.markdown).toBe(false);
     expect(tab.getControlValue("fileTypes.markdown")).toBe(false);
+  });
+
+  it("keeps the pane's scroll offset across an update, as the app's refresh does", () => {
+    const tab = new PluginSettingTab({}, { settings: {} });
+    tab.display();
+    tab.containerEl.scrollTop = 420;
+
+    tab.update();
+
+    // `update()` re-renders the open tab in place; the app saves the pane's offset around
+    // it and restores it. A fake that reset the offset here would certify a step change
+    // that leaves the user below the new page's content, which is exactly how the phone's
+    // blank settings pane shipped.
+    expect(tab.containerEl.scrollTop).toBe(420);
   });
 });
