@@ -446,9 +446,6 @@ export class SyncHost {
     this.bindCompleted = false;
     this.cancelBindRetry();
     const bindStartedAt = Date.now();
-    // The bind is a full pass too: report it as one so a forced pass (and the e2e
-    // harness) waits for it instead of starting over the same snapshot.
-    this.reconciling = true;
     try {
       await engine.initialSync({
         firstBind: true,
@@ -468,8 +465,6 @@ export class SyncHost {
       // The periodic pass is five minutes away; a limiter window or a server that is
       // still starting is not.
       this.scheduleBindRetry();
-    } finally {
-      this.reconciling = false;
     }
     if (this.stopped) return;
 
@@ -665,17 +660,6 @@ export class SyncHost {
    */
   get binding(): boolean {
     return this.engineInstance !== null && !this.bindCompleted;
-  }
-
-  /**
-   * True while a full reconcile is running.
-   *
-   * `runReconcile` drops a second caller instead of queueing it, so this is also the
-   * answer to "would a forced pass overlap the host's own one?". The e2e harness reads
-   * it before forcing a pass; the plugin could use it for a "syncing" status.
-   */
-  get reconcileInProgress(): boolean {
-    return this.reconciling;
   }
 
   /**

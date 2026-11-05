@@ -228,7 +228,7 @@ export async function configurePluginHost(
       syncPaused: p.settings.syncPaused,
     };
   `;
-  return await evalInVault<PluginHostStatus>(vault, body, 180_000, "configure host");
+  return await evalInVault<PluginHostStatus>(vault, body, 180_000);
 }
 
 /**
@@ -273,7 +273,6 @@ export async function ensurePluginHostRunning(vault: string): Promise<boolean> {
     return !!p.host;
     `,
     180_000,
-    "ensure host",
   );
 }
 
@@ -2772,66 +2771,19 @@ export async function readNotices(vault: string): Promise<string[]> {
   );
 }
 
-/**
- * Force a full reconcile in the live engine (what a reconnect does).
- *
- * One evaluation in the normal case: if the host is already inside its own pass the
- * evaluation answers `busy` at once and the caller waits, so a forced pass does not
- * start over the host's. Forced passes are serialized against each other through a
- * per-host entry on `window`; an entry older than 20 s is abandoned instead of
- * chaining every later test onto a pass that will never settle.
- *
- * This is not a lock shared with the host loop: a periodic, reconnect or bind-retry
- * pass can still start between the check and the forced pass. The wait only removes the
- * common overlap (the host's own pass already running) and keeps forced passes apart.
- */
-export async function reconcile(vault: string): Promise<void> {
-  const deadline = Date.now() + 30_000;
-  let lastStage: string | null = null;
-  for (;;) {
-    const result = await evalInVault<{ busy: boolean; stage?: string | null }>(
-      vault,
-      `
-      const p = app.plugins.plugins.courier;
-      const host = p && p.host;
-      if (!host || !host.engine) throw new Error('no running sync host');
-      if (host.reconciling) {
-        const engine = host.engine;
-        return { busy: true, stage: engine && engine.passStatus ? engine.passStatus.stage : null };
-      }
-      const previous = window.__courierE2ePass;
-      const now = Date.now();
-      // A lost CLI response leaves the app-side pass running. Join it only while it is
-      // fresh and belongs to this host: a plugin reload replaces the host, and a pass
-      // older than 20 s is already a failed pass, not one to hold this eval for.
-      if (previous && previous.host === host && now - previous.startedAt < 20000) {
-        // The previous caller already saw its failure; joining it must not turn that
-        // failure into this pass's failure.
-        try { await previous.promise; } catch {}
-      }
-      const run = host.engine.initialSync();
-      const entry = { host, promise: run, startedAt: Date.now() };
-      window.__courierE2ePass = entry;
-      try {
-        await run;
-      } finally {
-        if (window.__courierE2ePass === entry) window.__courierE2ePass = null;
-      }
-      return { busy: false };
-      `,
-      60_000,
-      "reconcile",
-    );
-    if (!result.busy) return;
-    lastStage = result.stage ?? null;
-    if (Date.now() >= deadline) {
-      throw new Error(
-        `Timed out: the sync host was still reconciling after 30s` +
-          (lastStage ? ` (stage: ${lastStage})` : ""),
-      );
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
-  }
+/** Force a full reconcile in the live engine (what a reconnect does). */ export async function reconcile(
+  vault: string,
+): Promise<void> {
+  await evalInVault(
+    vault,
+    `
+    const p = app.plugins.plugins.courier;
+    if (!p || !p.host) throw new Error('no running sync host');
+    await p.host.engine.initialSync();
+    return true;
+    `,
+    180_000,
+  );
 }
 
 /**
@@ -2856,7 +2808,6 @@ export class ObsidianVault {
       return 'created';
       `,
       60_000,
-      `write ${path}`,
     );
   }
 
@@ -2940,7 +2891,6 @@ export class ObsidianVault {
       return true;
       `,
       60_000,
-      `remove ${path}`,
     );
   }
 
