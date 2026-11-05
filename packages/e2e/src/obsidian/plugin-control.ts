@@ -2794,17 +2794,17 @@ export async function reconcile(vault: string): Promise<void> {
       `
       const p = app.plugins.plugins.courier;
       const host = p && p.host;
-      if (!host) throw new Error('no running sync host');
+      if (!host || !host.engine) throw new Error('no running sync host');
       if (host.reconciling) {
         const engine = host.engine;
         return { busy: true, stage: engine && engine.passStatus ? engine.passStatus.stage : null };
       }
       const previous = window.__courierE2ePass;
       const now = Date.now();
-      // A lost CLI response leaves the app-side pass running. Join it while it is fresh
-      // and belongs to this host: a plugin reload replaces the host, and a pass older
-      // than the CLI timeout is not going to settle.
-      if (previous && previous.host === host && now - previous.startedAt < 60000) {
+      // A lost CLI response leaves the app-side pass running. Join it only while it is
+      // fresh and belongs to this host: a plugin reload replaces the host, and a pass
+      // older than 20 s is already a failed pass, not one to hold this eval for.
+      if (previous && previous.host === host && now - previous.startedAt < 20000) {
         // The previous caller already saw its failure; joining it must not turn that
         // failure into this pass's failure.
         try { await previous.promise; } catch {}

@@ -2519,7 +2519,11 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
         [names.a, "obsidian-A"],
         [names.b, "obsidian-B"],
       ] as const) {
-        clearSnippetProbes(name);
+        try {
+          clearSnippetProbes(name);
+        } catch (err) {
+          console.warn(`[obsidian-e2e] snippet cleanup in ${name} failed:`, err);
+        }
         clearGroupProbes(name);
         await configurePluginHost(name, { ...setup, deviceName });
       }

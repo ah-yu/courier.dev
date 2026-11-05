@@ -517,12 +517,6 @@ export class SyncPushBaseError extends Error {
   }
 }
 
-/**
- * The unified TypeScript sync engine. Hosts (Obsidian plugin, headless CLI)
- * inject a filesystem adapter, network API, encryption key and conflict
- * policy; the engine owns scanning, decision, push/pull, echo suppression and
- * conflict handling.
- */
 /** Where a reconcile pass is; see `SyncEngine.passStatus`. */
 export type PassStage =
   | "idle"
@@ -535,6 +529,12 @@ export type PassStage =
   | "creates"
   | "persist";
 
+/**
+ * The unified TypeScript sync engine. Hosts (Obsidian plugin, headless CLI)
+ * inject a filesystem adapter, network API, encryption key and conflict
+ * policy; the engine owns scanning, decision, push/pull, echo suppression and
+ * conflict handling.
+ */
 export class SyncEngine {
   private state: LocalVersionState = {};
   private pathToFileId = new Map<string, string>();
@@ -2679,11 +2679,11 @@ export class SyncEngine {
     try {
       for (const path of ordered) {
         if (rateLimitedOut) break;
-        if (this.passOwner === passId) this.passFiles.set("untracked", path);
         if (this.pathToFileId.has(path) || remote.fileIdAt(path) !== null) continue;
         // A brand-new file whose `create` event is still in flight belongs to that
         // event: pushing it here is the second chain this pass must not create.
         if (this.inFlightPaths.has(path)) continue;
+        if (this.passOwner === passId) this.passFiles.set("untracked", path);
         const read = await this.readWithStamp(path);
         if (!read) continue;
         // The pass may already have hashed this file. Reuse that hash only while the bytes
