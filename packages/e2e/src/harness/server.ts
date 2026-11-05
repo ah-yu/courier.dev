@@ -1,5 +1,4 @@
 import { mkdirSync, mkdtempSync } from "fs";
-import { createServer as createNetServer } from "net";
 import { tmpdir } from "os";
 import { join } from "path";
 import { removeDirWithRetry } from "@courier/testing";
@@ -42,19 +41,6 @@ export interface TestServer {
   dropSockets: () => void;
   /** Stop the HTTP + WebSocket server and remove the temp directory. */
   close: () => Promise<void>;
-}
-
-/** Ask the OS for an unused TCP port (the listener is closed again immediately). */
-async function freePort(): Promise<number> {
-  return await new Promise<number>((resolve, reject) => {
-    const probe = createNetServer();
-    probe.once("error", reject);
-    probe.listen(0, "127.0.0.1", () => {
-      const address = probe.address();
-      const port = typeof address === "object" && address !== null ? address.port : 0;
-      probe.close(() => resolve(port));
-    });
-  });
 }
 
 /**
@@ -148,10 +134,14 @@ export async function startTestServer(name = "e2e user"): Promise<TestServer> {
   mkdirSync(join(rootDir, "blobs"), { recursive: true });
   applySchema(sqlitePath);
 
-  const port = await freePort();
+  // Port 0: the listener asks the OS for a free port itself. Probing with a separate
+  // socket and binding the real one afterwards leaves a window in which another process
+  // can take the port — a macOS CI run hit it three times in one file ("Failed to start
+  // server. Is port 51790 in use?"), and the window only widens as the machine gets
+  // busier.
   process.env.SQLITE_PATH = sqlitePath;
   process.env.BLOB_STORE_DIR = join(rootDir, "blobs");
-  process.env.PORT = String(port);
+  process.env.PORT = "0";
   // A scenario drives two clients through operations back-to-back, and each side
   // answers the other's push with its own pull (measured: ~3 requests per edit,
   // ~200 for the whole real-Obsidian suite). That is honest traffic, but it leaves
@@ -163,10 +153,13 @@ export async function startTestServer(name = "e2e user"): Promise<TestServer> {
   process.env.SYNC_RATE_LIMIT_WINDOW_MS = "60000";
 
   const { startServer } = await import("../../../server/src/commands/start");
-  const started = startServer({ port: String(port) });
+  const started = startServer({ port: "0" });
   // The listener is up once `ready` resolves (immediately: this harness never
-  // configures TLS, so there is no certificate wait).
-  await started.ready;
+  // configures TLS, so there is no certificate wait) — and that is also when the port
+  // the OS picked is known.
+  const server = await started.ready;
+  const port = server.port;
+  if (!port) throw new Error("the test listener did not report a port");
   const serverUrl = `http://127.0.0.1:${port}`;
   const user = await createTestUser(serverUrl, name);
 

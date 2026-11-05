@@ -1,9 +1,17 @@
 name: L3 (real Obsidian)
 
-# The real-Obsidian layer, on a headless Ubuntu runner: a pinned Obsidian build
-# under Xvfb, driven through the official CLI by `packages/e2e/src/obsidian/`.
-# The rendered-geometry assertions stay on the reference platform (Windows by
-# default; different fonts, DPI and theme); everything else runs here.
+# The real-Obsidian layer, on all three platforms the product ships for: a headless Ubuntu
+# runner (a pinned Obsidian Linux build under Xvfb), a Windows runner (a pinned Obsidian
+# Windows installer) and a macOS runner (a pinned Obsidian DMG). All are driven through the
+# app's own CLI by `packages/e2e/src/obsidian/`, exactly as a local run is. The
+# rendered-geometry assertions stay on the reference platform (the developer's Windows
+# machine; different fonts, DPI and theme on a runner), so every job runs the behavioural
+# subset with `COURIER_OBSIDIAN_E2E_LAYOUT=0`.
+#
+# macOS is the one platform whose CLI registration is normally a UI step (Settings →
+# General, then an administrator dialog). The app bundle already carries the binary, so
+# the action symlinks it to `/usr/local/bin/obsidian` — the same file that dialog creates.
+# Its job runs on manual dispatch only while a timeout hang on the runner is investigated.
 #
 # Cost: this is the reason for the `paths` filter. Only a change on the sync
 # path spends the account's included GitHub-hosted minutes; docs changes never
@@ -98,3 +106,101 @@ jobs:
             /tmp/obsidian-console.txt
             /tmp/fluxbox.log
           if-no-files-found: ignore
+
+  # The same suite on Windows: the platform the layout contract is pinned to, and the
+  # one whose file layer differs most from Linux (case folding, rename semantics, a
+  # process table instead of `pgrep`). The rendered-geometry cases stay off — they are a
+  # reference-machine contract, and a runner's fonts and DPI are not that machine.
+  l3-obsidian-windows:
+    name: L3 (real Obsidian, Windows)
+    runs-on: windows-latest
+    # A 340 MB installer, then the suite on a 2-vCPU runner. The cap is for a stuck
+    # run, not for the normal one.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+
+      - uses: ./.github/actions/obsidian-windows
+
+      # The silent installer may leave the app running, and the setup script refuses to
+      # rewrite the vault registry underneath a running Obsidian (the app reads that
+      # file only at startup and rewrites it itself).
+      - name: Close Obsidian before registration
+        shell: pwsh
+        run: Get-Process Obsidian -ErrorAction SilentlyContinue | Stop-Process -Force
+
+      - name: Register the two disposable vaults
+        env:
+          # Register both vaults as open: the cold start then restores their windows
+          # itself, instead of relying on a focused window for `obsidian://open`.
+          COURIER_E2E_OPEN_VAULTS: "1"
+        run: bun run e2e:obsidian
+
+      - name: Run the non-layout L3 suite
+        env:
+          COURIER_OBSIDIAN_E2E: "1"
+          COURIER_OBSIDIAN_E2E_LAYOUT: "0"
+        run: bun run verify obsidian-ci
+
+      - name: Collect Obsidian diagnostics
+        if: failure()
+        shell: pwsh
+        # The CLI still answers while the app is up, so read it here rather than losing
+        # the diagnosis with the runner. The Linux job writes the same two files.
+        run: |
+          if ($env:COURIER_OBSIDIAN_CLI) {
+            & $env:COURIER_OBSIDIAN_CLI dev:errors 2>&1 | Out-String | Write-Output
+            & $env:COURIER_OBSIDIAN_CLI dev:console limit=300 2>&1 | Out-String | Write-Output
+          }
+
+  # macOS: the same suite on the third platform. Its menus are native, so the one case
+  # that reads a real menu (`itMenu`) skips itself here — everything else runs.
+  #
+  # Manual only for now, not a gate: the suite has passed here (3m07s, 96 passed, 6
+  # skipped) and it has also hung on cases that wait for a vault state (a 300 s hook
+  # timeout, then 120 s per case) on the same commit. That needs a Mac to diagnose, not
+  # another CI run, so `workflow_dispatch` runs it and pull requests do not — a known-flaky
+  # run must not redden an unrelated change. Drop the `if` once the hang is understood.
+  #
+  # GitHub's macOS arm64 pool is also capacity-constrained: a run can sit queued until the
+  # runner is never acquired, and the job is then cancelled ("not acquired by Runner of
+  # type hosted"). That is infrastructure, not the code.
+  l3-obsidian-macos:
+    name: L3 (real Obsidian, macOS)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup
+
+      - uses: ./.github/actions/obsidian-macos
+
+      # The setup script refuses to rewrite the vault registry underneath a running
+      # Obsidian; a DMG install does not start the app, but a retried run can leave one up.
+      - name: Close Obsidian before registration
+        shell: bash
+        run: pkill -x Obsidian || true
+
+      - name: Register the two disposable vaults
+        env:
+          # Register both vaults as open: the cold start then restores their windows
+          # itself, instead of relying on a focused window for `obsidian://open`.
+          COURIER_E2E_OPEN_VAULTS: "1"
+        run: bun run e2e:obsidian
+
+      - name: Run the non-layout L3 suite
+        env:
+          COURIER_OBSIDIAN_E2E: "1"
+          COURIER_OBSIDIAN_E2E_LAYOUT: "0"
+        run: bun run verify obsidian-ci
+
+      - name: Collect Obsidian diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          obsidian dev:errors || true
+          obsidian dev:console limit=300 || true

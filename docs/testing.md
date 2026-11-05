@@ -222,17 +222,46 @@ phone. Use it — the mobile path is not "the same code, so L2 covers it"; L2's 
 
 ### L3 in CI
 
-`.github/workflows/l3-obsidian.yml` runs the suite on a headless Ubuntu runner: a pinned Obsidian
-Linux build under Xvfb, driven through the official CLI exactly as a local run is. It triggers on
-pull requests (and pushes to `main`) whose `paths` touch the sync path, and on manual dispatch;
-docs-only changes do not spend a run. `.github/actions/obsidian-linux` installs
-`xvfb`/`fluxbox` and the Electron libraries, verifies the pinned tarball's sha256, caches the
-extracted build, and pins `releases.obsidian.md` to `127.0.0.1` so a background update cannot
-replace the app mid-run. It installs **no CJK font**: `fonts-noto-cjk` was 61 MB of the ~85 MB the
-step downloads on every run, the gate skips every `itL` case, and its value cases compare text, file
-state and CSS-anchored corners, so no assertion depends on a glyph's shape. The job's 40-minute cap
-has the same reason — a slow package mirror once took 28 minutes of a 30-minute run and must not
-decide whether the run says anything.
+`.github/workflows/l3-obsidian.yml` runs the suite on **up to three runners**, each driven through the
+app's own CLI exactly as a local run is: a headless Ubuntu runner with a pinned Obsidian Linux build
+under Xvfb, a Windows runner with a pinned Obsidian Windows installer, and a macOS runner with a
+pinned Obsidian DMG. The workflow triggers on pull requests (and pushes to `main`) whose `paths`
+touch the sync path, and on manual dispatch; docs-only changes do not spend a run. Ubuntu and
+Windows run on every one of those events; the macOS job is manual-dispatch only while a runner hang
+is investigated (see the end of this section).
+`.github/actions/obsidian-linux` installs `xvfb`/`fluxbox` and the Electron libraries, verifies the
+pinned tarball's sha256, caches the extracted build, and pins `releases.obsidian.md` to `127.0.0.1`
+so a background update cannot replace the app mid-run. It installs **no CJK font**:
+`fonts-noto-cjk` was 61 MB of the ~85 MB the step downloads on every run, the gate skips every
+`itL` case, and its value cases compare text, file state and CSS-anchored corners, so no assertion
+depends on a glyph's shape. The job's 40-minute cap has the same reason — a slow package mirror
+once took 28 minutes of a 30-minute run and must not decide whether the run says anything.
+
+`.github/actions/obsidian-windows` downloads the pinned `Obsidian-<version>.exe`, verifies its
+sha256, installs it silently to `%LOCALAPPDATA%\Programs\Obsidian`, and exposes `Obsidian.exe` as
+`COURIER_OBSIDIAN_APP` and `Obsidian.com` — the terminal redirector a GUI app needs — as
+`COURIER_OBSIDIAN_CLI`. It pins the same update endpoint through the runner's hosts file.
+
+`.github/actions/obsidian-macos` downloads the pinned `Obsidian-<version>.dmg`, verifies its
+sha256, copies `Obsidian.app` to `/Applications`, and symlinks the CLI the bundle already carries
+(`Contents/MacOS/obsidian-cli`) to `/usr/local/bin/obsidian`. That is the file the app's own
+"Register the CLI" step creates through an administrator dialog, which a runner cannot click; the
+other half of that setting, the `cli` flag in Obsidian's vault registry, is written by
+`bun run e2e:obsidian` before the app starts.
+
+The Windows and macOS jobs register the vaults with `COURIER_E2E_OPEN_VAULTS=1` like the Linux one,
+so the cold start restores both windows instead of needing a focused window for `obsidian://open`.
+
+GitHub's macOS arm64 pool is capacity-constrained, so the macOS job can be cancelled before it
+starts with "not acquired by Runner of type hosted" after ~15 minutes of queueing. That is not a
+code signal: re-run the job (the same commit passed in about three minutes once it got a runner).
+
+**The macOS job runs on manual dispatch only for now.** It has passed there (96 passed, 6 skipped,
+3m07s) and it has also hung on cases that wait for a vault state — a 300 s hook timeout, then 120 s
+per case — on the same commit that passed earlier. That is either a macOS product behaviour or a
+harness assumption about the app's windows, and it needs a Mac to tell which; until it is diagnosed
+`workflow_dispatch` runs it and pull requests do not, so a known-flaky run cannot redden an
+unrelated change. Remove the `if` once the hang is understood.
 
 - **The gate is `bun run verify obsidian-ci`**: the same suite with
   `COURIER_OBSIDIAN_E2E_LAYOUT=0`. The cases that mixed behaviour and layout were split: their
@@ -344,7 +373,8 @@ plugin's now does too. When you add a host, copy the CLI's shape, not the eager 
 - Coverage is measured over `packages/*/src` only — the e2e harness is the instrument, not the
   subject — and a module that lands without tests moves its package's number down. The thresholds
   only ever ratchet up; never lower one to make a change pass.
-- **CI runs it** (`.github/workflows/ci.yml`, its own step in the `verify` job). Locally it stays
+- **CI runs it** (`.github/workflows/ci.yml`, its own step in the `boundary` job, which is
+  Ubuntu-only because the floors are measured there). Locally it stays
   opt-in because instrumenting every project costs a couple of minutes, but a ratchet nobody
   executes is not a ratchet: the engine drifted 0.13 points under its line floor over two weeks of
   feature work and nothing noticed until the gate was run by hand. When a floor is raised, raise it

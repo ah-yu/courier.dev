@@ -1806,6 +1806,11 @@ export async function readDeletedContent(vault: string): Promise<{
 /**
  * The restore dialog's file-name field: whether it is up, what it is pre-filled with, and
  * the inline error it is currently showing (empty when there is none).
+ *
+ * Matched by the dialog's own element, not by "a modal is on screen": the restore dialog is
+ * opened from the recycle bin, so for the moment before it mounts that list is still the
+ * top-most modal — and reading *its* (absent) text field answered `open: true, value: ''`,
+ * which made the caller's wait pass and the case fail as "the dialog asked with no name".
  */
 export async function readRestoreNameField(
   vault: string,
@@ -1814,9 +1819,10 @@ export async function readRestoreNameField(
     vault,
     `
     const container = ${DIALOG_EXPR};
-    if (!container) return { open: false, value: '', error: '' };
-    const input = container.querySelector('input[type="text"]');
-    const errorEl = container.querySelector('.courier-restore-path-error');
+    const modalEl = container ? container.querySelector('.courier-restore-path-modal') : null;
+    if (!modalEl) return { open: false, value: '', error: '' };
+    const input = modalEl.querySelector('input[type="text"]');
+    const errorEl = modalEl.querySelector('.courier-restore-path-error');
     return {
       open: true,
       value: input ? input.value : '',
