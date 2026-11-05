@@ -257,26 +257,11 @@ starts with "not acquired by Runner of type hosted" after ~15 minutes of queuein
 code signal: re-run the job (the same commit passed in about three minutes once it got a runner).
 
 **The macOS job runs on manual dispatch only for now.** It has passed there (96 passed, 6 skipped,
-3m07s) and it has also hung — a 300 s hook timeout, then 120 s per case — on the same commit that
-passed earlier. A local reproduction (`bun run verify obsidian-ci`, macOS 26, Obsidian 1.15.0; the CI
-pin is 1.14.4) stalls about one run in two (3 of the first 6 runs), always the same way: one CLI
-`eval` never returns while the app stays responsive and every later call answers. It has been seen
-in `vault.create` (the file is never written), `vault.delete` (the file is gone and the index clean),
-`engine.initialSync` and a config-folder `adapter` call. The harness-side observations point at
-the app's CLI/vault layer; the engine case has not been reproduced with the pass tracer yet, and the
-plugin's `requestUrl` had no timeout, so a stalled request could hold a pass forever. That path is now bounded
-separately (120 s, `NETWORK_ERROR`, retried by the host on its next pass). The harness made the
-hang worse: its per-call timeout sent SIGTERM, which the Obsidian CLI ignores while blocked in its
-socket read, so the call waited for Vitest's 300 s hook timeout. `runObsidianCli` now kills a
-timed-out call with SIGKILL, so it fails at its per-call timeout — 60 s for most helpers, 90 s for
-probe cleanup, 180 s for a vault reset — naming the operation. Probe cleanup is one idempotent evaluation
-per vault instead of a listing plus one call per probe file and folder. A forced reconcile is also
-one evaluation in the normal case: it waits while the host reports its own reconcile, then chains
-forced passes to each other through a per-host entry and abandons an entry older than 20 s. That is
-not a lock shared with the host loop: a periodic, reconnect or bind-retry pass can still start
-concurrently. The app-side lost answer is still open, so `workflow_dispatch` runs the job and pull
-requests do not — a known-flaky run must not redden an unrelated change. Remove the `if` once the
-loss is understood or fixed upstream.
+3m07s) and it has also hung on cases that wait for a vault state — a 300 s hook timeout, then 120 s
+per case — on the same commit that passed earlier. That is either a macOS product behaviour or a
+harness assumption about the app's windows, and it needs a Mac to tell which; until it is diagnosed
+`workflow_dispatch` runs it and pull requests do not, so a known-flaky run cannot redden an
+unrelated change. Remove the `if` once the hang is understood.
 
 - **The gate is `bun run verify obsidian-ci`**: the same suite with
   `COURIER_OBSIDIAN_E2E_LAYOUT=0`. The cases that mixed behaviour and layout were split: their

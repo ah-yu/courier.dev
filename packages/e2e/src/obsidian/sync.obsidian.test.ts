@@ -1,5 +1,5 @@
 import { spawnSync } from "child_process";
-import { mkdirSync, readdirSync, rmSync, utimesSync, writeFileSync } from "fs";
+import { mkdirSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { join } from "path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -214,6 +214,11 @@ const ONE_PIXEL_PNG_BASE64 =
  */
 const PROBE_DIR = "courier-e2e-paths";
 
+/** Path depth, so cleanup can delete the deepest probe folder first. */
+function pathDepth(path: string): number {
+  return path.split("/").length;
+}
+
 /** Build the plugin so the disposable vaults get the current source. */
 function buildPlugin(): void {
   const result = spawnSync("bun run --filter @courier/plugin build", {
@@ -313,7 +318,6 @@ async function engineInternals(vault: string): Promise<string> {
     return {
       ws: host.ws ? host.ws.getState() : null,
       initialized: engine.initialized,
-      pass: engine.passStatus ?? "missing",
       states: Object.values(engine.state).map((e) => e.plainPath + '@' + String(e.lastKnownVersionId).slice(0, 8)),
       selfWrites: keysOf(engine.selfEvents && engine.selfEvents.selfWrites).filter((p) => p.includes('courier-e2e')),
       inFlight: keysOf(engine.inFlightPaths),
@@ -393,91 +397,42 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
 
   /**
    * Remove only this suite's probe notes and probe folders, leaving the two
-   * hosts running.
+   * hosts running. Files go first: deleting a folder only works once it is
+   * empty, and the nested probes always leave one behind.
    *
-   * One evaluation, not one CLI call per file. Every `eval` is its own process +
-   * socket + `executeJavaScript` round trip, and teardown used to make one call for
-   * the listing, one per probe file and one per folder; losing any one of them left
-   * the hook waiting on a CLI that never answered. The whole wipe is a single
-   * idempotent evaluation now. It walks every indexed file, so attachment and canvas
-   * probes go too (the old listing was markdown-only), and it removes the probe folders
-   * one by one, non-recursively: a cleanup whose response was lost may still be running
-   * after its caller gave up, and it must not delete a later test's files.
-   *
-   * Best-effort, like the per-step handling it replaces: a probe that cannot be
-   * deleted must not abandon the rest or poison a later case. The file loop and the
-   * folder removal each catch their own failure; what cannot be removed is reported.
-   * One lost response now loses the whole wipe (rather than only the file being deleted
-   * at that moment); that is the trade for not making a hundred independent calls that
-   * can each lose one, and the outer catch reports it.
+   * Every step is best-effort on purpose. A probe that failed halfway can leave a
+   * folder that refuses to disappear, and a throw here would abandon the rest of
+   * the probe notes and poison every later test in the file — one of the observed
+   * failure modes was a `TFolder` handed to a file-only delete path (`EISDIR`).
    */
   async function cleanProbes(vault: string): Promise<void> {
-    try {
-      const result = await evalInVault<{
-        removed: number;
-        folders: number;
-        left: string[];
-        folderError: string | null;
-      }>(
-        vault,
-        `
-        const prefix = ${jsLiteral(PROBE_PREFIX)};
-        const failed = [];
-        let removed = 0;
-        for (const candidate of app.vault.getFiles()) {
-          if (!(candidate.path.startsWith(prefix) || candidate.path.includes('/' + prefix))) continue;
-          // Re-resolve before deleting: a cleanup whose response was lost can resume
-          // after the next test has re-created this path, and the stale TFile would
-          // otherwise delete the new file.
-          const file = app.vault.getAbstractFileByPath(candidate.path);
-          if (!file || file !== candidate) continue;
-          try {
-            await app.vault.delete(file);
-            removed++;
-          } catch (err) {
-            if (await app.vault.adapter.exists(candidate.path)) failed.push(candidate.path);
-          }
-        }
-        const root = ${jsLiteral(PROBE_DIR)};
-        let folders = 0;
-        let folderError = null;
-        const probeFolders = app.vault.getAllFolders()
-          .map((folder) => folder.path)
-          .filter((path) => path === root || path.startsWith(root + '/'))
-          .sort((a, b) => b.split('/').length - a.split('/').length);
-        for (const path of probeFolders) {
-          try {
-            if (!(await app.vault.adapter.exists(path))) continue;
-            // Only an empty folder is removed. Obsidian's adapter.rmdir has no
-            // non-recursive mode (fs.rm without recursive refuses a directory), and a
-            // recursive call could delete files a later test created after an abandoned
-            // cleanup resumed. The emptiness check is what keeps that safe.
-            const listed = await app.vault.adapter.list(path);
-            if (listed.files.length > 0 || listed.folders.length > 0) continue;
-            await app.vault.adapter.rmdir(path, true);
-            folders++;
-          } catch (err) {
-            if (await app.vault.adapter.exists(path)) {
-              folderError = err && err.message ? err.message : String(err);
-            }
-          }
-        }
-        const left = [];
-        for (const path of failed) if (await app.vault.adapter.exists(path)) left.push(path);
-        return { removed, folders, left, folderError };
-        `,
-        90_000,
-        "probe cleanup",
-      );
-      if (result.left.length > 0 || result.folderError !== null) {
-        console.warn(
-          `[obsidian-e2e] probe cleanup in ${vault} left ${result.left.length} file(s)` +
-            (result.folderError ? `; folder: ${result.folderError}` : "") +
-            (result.left.length > 0 ? `: ${result.left.join(", ")}` : ""),
-        );
+    const handle = new ObsidianVault(vault);
+    const attempt = async (step: () => Promise<unknown>) => {
+      try {
+        await step();
+      } catch (err) {
+        console.warn(`[obsidian-e2e] probe cleanup in ${vault} skipped a step:`, err);
       }
-    } catch (err) {
-      console.warn(`[obsidian-e2e] probe cleanup in ${vault} failed:`, err);
+    };
+
+    let files: string[] = [];
+    await attempt(async () => {
+      files = await handle.list();
+    });
+    for (const path of files) {
+      if (path.startsWith(PROBE_PREFIX) || path.includes(`/${PROBE_PREFIX}`)) {
+        await attempt(() => handle.remove(path));
+      }
+    }
+
+    let folders: string[] = [];
+    await attempt(async () => {
+      folders = await handle.folders(PROBE_DIR);
+    });
+    // Deepest first, so a nested probe folder can be deleted without leaving a
+    // non-empty parent behind.
+    for (const path of folders.toSorted((a, b) => pathDepth(b) - pathDepth(a))) {
+      await attempt(() => handle.removeFolder(path));
     }
   }
 
@@ -2457,51 +2412,20 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
       return { id, text: JSON.stringify(parsed, null, 2) };
     }
 
-    /** The disposable vault's folder on disk, by the name Obsidian knows it by. */
-    function vaultPathOf(name: string): string {
-      const vault = disposable.find((candidate) => candidate.name === name);
-      if (!vault) throw new Error(`no disposable vault named ${name}`);
-      return vault.path;
-    }
-
-    /**
-     * Remove this suite's probe files, and only the folders it made for them.
-     *
-     * Directly on disk, not through the app. The config folder is outside the vault
-     * index and fires no vault event, so an adapter call buys nothing here — but it is
-     * one more CLI round trip that can lose its answer (the macOS hang this harness is
-     * hardening against). The files belong to the suite; the app's settings pass reads
-     * the folder from disk anyway, so a removal and an adapter removal are equivalent.
-     */
-    function clearGroupProbes(vault: string): void {
-      const root = vaultPathOf(vault);
+    /** Remove this suite's probe files, and only the folders it made for them. */
+    async function clearGroupProbes(vault: string): Promise<void> {
       for (const { path } of PROBE_GROUPS) {
-        rmSync(join(root, path), { force: true });
+        await removeConfigFileInVault(vault, path);
         const folder = path.slice(0, path.lastIndexOf("/"));
         const leaf = folder.slice(folder.lastIndexOf("/") + 1);
         // Never a folder the vault owns: `snippets/` holds the user's CSS, and deleting
         // `plugins/` would take this very plugin — the one under test — with it. Only the
-        // probe folder itself, which is why it is named with the probe prefix.
+        // probe folder itself, which is why it is named with the probe prefix. Removed
+        // through the **data adapter**: the config folder is outside the vault index, so the
+        // vault API cannot see a folder under it (a leaked probe folder then shows up in the
+        // next run).
         if (!leaf.startsWith(PROBE_PREFIX)) continue;
-        rmSync(join(root, folder), { recursive: true, force: true });
-      }
-    }
-
-    /** Drop every snippets probe file the suite may have left, without a CLI call. */
-    function clearSnippetProbes(vault: string): void {
-      const snippets = join(vaultPathOf(vault), ".obsidian", "snippets");
-      const probeNames = new Set([
-        probe.slice(probe.lastIndexOf("/") + 1),
-        ...PROBE_GROUPS.map((group) => group.path)
-          .filter((path) => path.startsWith(".obsidian/snippets/"))
-          .map((path) => path.slice(path.lastIndexOf("/") + 1)),
-      ]);
-      try {
-        for (const entry of readdirSync(snippets)) {
-          if (probeNames.has(entry)) rmSync(join(snippets, entry), { force: true });
-        }
-      } catch (err) {
-        if ((err as { code?: string }).code !== "ENOENT") throw err;
+        await removeConfigFolderInVault(vault, folder).catch(() => undefined);
       }
     }
 
@@ -2519,12 +2443,11 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
         [names.a, "obsidian-A"],
         [names.b, "obsidian-B"],
       ] as const) {
-        try {
-          clearSnippetProbes(name);
-        } catch (err) {
-          console.warn(`[obsidian-e2e] snippet cleanup in ${name} failed:`, err);
+        await removeConfigFileInVault(name, probe);
+        for (const file of await listConfigFolderInVault(name, ".obsidian/snippets")) {
+          if (file.includes("courier-e2e-probe")) await removeConfigFileInVault(name, file);
         }
-        clearGroupProbes(name);
+        await clearGroupProbes(name);
         await configurePluginHost(name, { ...setup, deviceName });
       }
     }
@@ -2589,12 +2512,8 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
             `${group}: vault B never materialised the peer's probe`,
           );
         } finally {
-          try {
-            clearGroupProbes(names.a);
-          } catch {}
-          try {
-            clearGroupProbes(names.b);
-          } catch {}
+          await clearGroupProbes(names.a).catch(() => undefined);
+          await clearGroupProbes(names.b).catch(() => undefined);
           await resetSettingsSync();
         }
       },

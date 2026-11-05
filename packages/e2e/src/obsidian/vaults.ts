@@ -170,7 +170,6 @@ export async function resetVault(vault: E2eVault): Promise<void> {
     return removed;
     `,
     180_000,
-    "reset vault",
   );
   rmSync(pluginDataFile(vault), { force: true });
   for (const copy of configConflictCopies(vault)) rmSync(copy, { force: true });
