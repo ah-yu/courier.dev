@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
 import { jsLiteral, unwrapEvalPayload } from "./cli";
 
 /**
@@ -78,4 +81,67 @@ describe("unwrapEvalPayload", () => {
   it("leaves an ERR: payload for evalInVault to report", () => {
     expect(unwrapEvalPayload('=> "ERR:boom"')).toBe("ERR:boom");
   });
+});
+
+/**
+ * The timeout has to **end the process**, not just stop waiting for it.
+ *
+ * The failure this pins was seen on macOS: Obsidian's CLI ignored the default SIGTERM
+ * while it sat in its socket read, so a request the app never answered kept the call
+ * pending past its timeout. Every later helper waited behind it until Vitest's 300 s
+ * hook timeout — the hang that took the L3 job down. A shell that traps TERM stands in
+ * for it; only SIGKILL can end that one.
+ */
+const itPosix = process.platform === "win32" ? it.skip : it;
+
+describe("runObsidianCli timeout", () => {
+  itPosix(
+    "kills a CLI that ignores SIGTERM instead of waiting for the process to exit",
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), "courier-fake-cli-"));
+      const cli = join(dir, "obsidian");
+      const pidFile = join(dir, "pid");
+      await writeFile(
+        cli,
+        "#!/bin/sh\ntrap '' TERM\necho $$ > \"$FAKE_CLI_PID_FILE\"\nwhile :; do sleep 1; done\n",
+      );
+      await chmod(cli, 0o755);
+      const previousCli = process.env.COURIER_OBSIDIAN_CLI;
+      const previousPid = process.env.FAKE_CLI_PID_FILE;
+      process.env.COURIER_OBSIDIAN_CLI = cli;
+      process.env.FAKE_CLI_PID_FILE = pidFile;
+      // `CLI_BINARY` is resolved when the module loads, so the override needs a fresh
+      // instance rather than the one this file imported for the pure helpers.
+      vi.resetModules();
+      try {
+        const { runObsidianCli } = await import("./cli");
+        const started = Date.now();
+        const result = await runObsidianCli(["version"], 1_000);
+        expect(result.status).toBe(-1);
+        expect(result.stderr).toContain("did not answer within 1000ms");
+        expect(Date.now() - started).toBeLessThan(10_000);
+
+        const pid = Number((await readFile(pidFile, "utf8")).trim());
+        expect(pid).toBeGreaterThan(0);
+        let alive = true;
+        for (let attempt = 0; attempt < 20; attempt++) {
+          try {
+            process.kill(pid, 0);
+          } catch {
+            alive = false;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        expect(alive).toBe(false);
+      } finally {
+        if (previousCli === undefined) delete process.env.COURIER_OBSIDIAN_CLI;
+        else process.env.COURIER_OBSIDIAN_CLI = previousCli;
+        if (previousPid === undefined) delete process.env.FAKE_CLI_PID_FILE;
+        else process.env.FAKE_CLI_PID_FILE = previousPid;
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+    15_000,
+  );
 });

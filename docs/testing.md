@@ -257,11 +257,18 @@ starts with "not acquired by Runner of type hosted" after ~15 minutes of queuein
 code signal: re-run the job (the same commit passed in about three minutes once it got a runner).
 
 **The macOS job runs on manual dispatch only for now.** It has passed there (96 passed, 6 skipped,
-3m07s) and it has also hung on cases that wait for a vault state — a 300 s hook timeout, then 120 s
-per case — on the same commit that passed earlier. That is either a macOS product behaviour or a
-harness assumption about the app's windows, and it needs a Mac to tell which; until it is diagnosed
-`workflow_dispatch` runs it and pull requests do not, so a known-flaky run cannot redden an
-unrelated change. Remove the `if` once the hang is understood.
+3m07s) and it has also hung — a 300 s hook timeout, then 120 s per case — on the same commit that
+passed earlier. A local reproduction (`bun run verify obsidian-ci`, macOS 26, Obsidian 1.15.0; the CI
+pin is 1.14.4) stalls about one run in two (3 of the first 6 runs), always the same way: one CLI
+`eval` never returns while the app stays responsive and every later call answers. It has been seen
+in `vault.create` (the file is never written), `vault.delete` (the file is gone and the index clean)
+and `engine.initialSync` (no request is pending), so the promise is lost in the app's CLI/vault
+layer, not in a Courier pass. The harness made it worse: its per-call timeout sent SIGTERM, which
+the Obsidian CLI ignores while blocked in its socket read, so the call waited for Vitest's 300 s hook
+timeout. `runObsidianCli` now kills a timed-out call with SIGKILL, so such a run fails in 60 s
+naming the command instead of wedging the job. The app-side loss is still open, so
+`workflow_dispatch` runs the job and pull requests do not — a known-flaky run must not redden an
+unrelated change. Remove the `if` once the loss is understood or fixed upstream.
 
 - **The gate is `bun run verify obsidian-ci`**: the same suite with
   `COURIER_OBSIDIAN_E2E_LAYOUT=0`. The cases that mixed behaviour and layout were split: their

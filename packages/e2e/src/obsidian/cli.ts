@@ -154,6 +154,11 @@ export async function runObsidianCli(
   try {
     const { stdout, stderr } = await execFileAsync(CLI_BINARY, args, {
       timeout: timeoutMs,
+      // SIGTERM is not enough: the Obsidian CLI ignores it while it is blocked reading
+      // its socket, so a request the app never answers stays pending past its timeout.
+      // The suite then only escaped through Vitest's 300 s hook / 120 s case timeout —
+      // the macOS CI hang. SIGKILL is the signal that actually ends it.
+      killSignal: "SIGKILL",
       windowsHide: true,
       maxBuffer: 16 * 1024 * 1024,
       encoding: "utf8",
@@ -161,11 +166,17 @@ export async function runObsidianCli(
     return { status: 0, stdout, stderr };
   } catch (err) {
     const failure = err as ExecFileFailure;
+    // The `code=` payload is the body of one evaluation, not the command that was
+    // stuck; naming the command is what makes a CI log point at the case.
+    const operation = args
+      .filter((arg) => !arg.startsWith("code="))
+      .join(" ")
+      .slice(0, 120);
     return {
       status: typeof failure.code === "number" ? failure.code : -1,
       stdout: failure.stdout ?? "",
       stderr: failure.killed
-        ? `the Obsidian CLI did not answer within ${timeoutMs}ms`
+        ? `the Obsidian CLI did not answer within ${timeoutMs}ms (${operation})`
         : (failure.stderr ?? failure.message),
     };
   }
