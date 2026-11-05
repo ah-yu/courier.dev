@@ -127,6 +127,16 @@ import type { ReplaceTarget } from "./shared/conflict-replace";
 // ══════════════════════════════════
 
 /**
+ * How long one transport request may take.
+ *
+ * `requestUrl` has no timeout of its own. A request that never settles used to hold the
+ * whole reconcile pass — and the bind — forever, which is indistinguishable from a sync
+ * bug in the UI. 120 s still covers a 4 MiB chunk on a slow connection, and a dead
+ * socket becomes a `NETWORK_ERROR` the host retries on its next pass instead of hanging.
+ */
+const REQUEST_TIMEOUT_MS = 120_000;
+
+/**
  * The transport every plugin request goes through.
  *
  * `requestUrl` is Obsidian's own HTTP stack (Electron's `net`), so this is the
@@ -145,23 +155,31 @@ import type { ReplaceTarget } from "./shared/conflict-replace";
 const obsidianTransport: HttpTransport = async (request) => {
   const { "Content-Type": contentType, ...headers } = request.headers;
   const body = request.body;
-  const response = await requestUrl({
-    url: request.url,
-    method: request.method,
-    headers,
-    ...(contentType === undefined ? {} : { contentType }),
-    ...(body === undefined
-      ? {}
-      : {
-          body:
-            typeof body === "string" ? body : body instanceof Uint8Array ? exactBuffer(body) : body,
-        }),
-    // The shared client reads the status and maps the error body itself.
-    // Obsidian's `requestUrl` rejects on 4xx/5xx by default (`throw: true`),
-    // which hid every structured error from the settings page: an expired key
-    // and a stopped server both surfaced as "cannot reach the server".
-    throw: false,
-  });
+  const response = await withTimeout(
+    requestUrl({
+      url: request.url,
+      method: request.method,
+      headers,
+      ...(contentType === undefined ? {} : { contentType }),
+      ...(body === undefined
+        ? {}
+        : {
+            body:
+              typeof body === "string"
+                ? body
+                : body instanceof Uint8Array
+                  ? exactBuffer(body)
+                  : body,
+          }),
+      // The shared client reads the status and maps the error body itself.
+      // Obsidian's `requestUrl` rejects on 4xx/5xx by default (`throw: true`),
+      // which hid every structured error from the settings page: an expired key
+      // and a stopped server both surfaced as "cannot reach the server".
+      throw: false,
+    }),
+    REQUEST_TIMEOUT_MS,
+    `the server did not answer within ${REQUEST_TIMEOUT_MS}ms`,
+  );
   return {
     status: response.status,
     // `requestUrl` already lower-cases its header names; the shared client reads

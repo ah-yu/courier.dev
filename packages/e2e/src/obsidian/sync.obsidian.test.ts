@@ -1,5 +1,5 @@
 import { spawnSync } from "child_process";
-import { mkdirSync, rmSync, utimesSync, writeFileSync } from "fs";
+import { mkdirSync, readdirSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { join } from "path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -313,6 +313,7 @@ async function engineInternals(vault: string): Promise<string> {
     return {
       ws: host.ws ? host.ws.getState() : null,
       initialized: engine.initialized,
+      pass: engine.passStatus,
       states: Object.values(engine.state).map((e) => e.plainPath + '@' + String(e.lastKnownVersionId).slice(0, 8)),
       selfWrites: keysOf(engine.selfEvents && engine.selfEvents.selfWrites).filter((p) => p.includes('courier-e2e')),
       inFlight: keysOf(engine.inFlightPaths),
@@ -2422,20 +2423,47 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
       return { id, text: JSON.stringify(parsed, null, 2) };
     }
 
-    /** Remove this suite's probe files, and only the folders it made for them. */
+    /** The disposable vault's folder on disk, by the name Obsidian knows it by. */
+    function vaultPathOf(name: string): string {
+      const vault = disposable.find((candidate) => candidate.name === name);
+      if (!vault) throw new Error(`no disposable vault named ${name}`);
+      return vault.path;
+    }
+
+    /**
+     * Remove this suite's probe files, and only the folders it made for them.
+     *
+     * Directly on disk, not through the app. The config folder is outside the vault
+     * index and fires no vault event, so an adapter call buys nothing here — but it is
+     * one more CLI round trip that can lose its answer (the macOS hang this harness is
+     * hardening against). The files belong to the suite; the app's settings pass reads
+     * the folder from disk anyway, so a removal and an adapter removal are equivalent.
+     */
     async function clearGroupProbes(vault: string): Promise<void> {
+      const root = vaultPathOf(vault);
       for (const { path } of PROBE_GROUPS) {
-        await removeConfigFileInVault(vault, path);
+        rmSync(join(root, path), { force: true });
         const folder = path.slice(0, path.lastIndexOf("/"));
         const leaf = folder.slice(folder.lastIndexOf("/") + 1);
         // Never a folder the vault owns: `snippets/` holds the user's CSS, and deleting
         // `plugins/` would take this very plugin — the one under test — with it. Only the
-        // probe folder itself, which is why it is named with the probe prefix. Removed
-        // through the **data adapter**: the config folder is outside the vault index, so the
-        // vault API cannot see a folder under it (a leaked probe folder then shows up in the
-        // next run).
+        // probe folder itself, which is why it is named with the probe prefix.
         if (!leaf.startsWith(PROBE_PREFIX)) continue;
-        await removeConfigFolderInVault(vault, folder).catch(() => undefined);
+        rmSync(join(root, folder), { recursive: true, force: true });
+      }
+    }
+
+    /** Drop every snippets probe file the suite may have left, without a CLI call. */
+    function clearSnippetProbes(vault: string): void {
+      const snippets = join(vaultPathOf(vault), ".obsidian", "snippets");
+      try {
+        for (const entry of readdirSync(snippets)) {
+          if (entry.includes("courier-e2e-probe")) {
+            rmSync(join(snippets, entry), { recursive: true, force: true });
+          }
+        }
+      } catch {
+        // No snippets folder: nothing to clear.
       }
     }
 
@@ -2453,10 +2481,7 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
         [names.a, "obsidian-A"],
         [names.b, "obsidian-B"],
       ] as const) {
-        await removeConfigFileInVault(name, probe);
-        for (const file of await listConfigFolderInVault(name, ".obsidian/snippets")) {
-          if (file.includes("courier-e2e-probe")) await removeConfigFileInVault(name, file);
-        }
+        clearSnippetProbes(name);
         await clearGroupProbes(name);
         await configurePluginHost(name, { ...setup, deviceName });
       }

@@ -844,6 +844,19 @@ describe("SyncEngine", () => {
     expect(new TextDecoder().decode(adapter2.files.get("notes/a.md"))).toBe("# A");
   });
 
+  it("reports where a pass is and clears the stage and files when it ends", async () => {
+    const { engine, adapter } = await makeEngine();
+    adapter.files.set("notes/a.md", encoder.encode("# A"));
+
+    // Before any pass there is nothing in flight; a diagnostic reader can name both the
+    // phase and the file a hung pass is holding.
+    expect(engine.passStatus).toEqual({ stage: "idle", files: [] });
+
+    await engine.initialSync();
+
+    expect(engine.passStatus).toEqual({ stage: "idle", files: [] });
+  });
+
   it("states each pushed version's history kind, from the plaintext path", async () => {
     // The server never sees a path, so the device classifies the file: markdown and
     // canvas are documents (the vault's deep limit), every other synced path an

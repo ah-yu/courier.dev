@@ -572,6 +572,15 @@ export class SyncEngine {
   /** True during the single pass that binds the vault (see {@link initialSync}). */
   private firstBind = false;
   private initialized = false;
+  /**
+   * Where the current pass is, and which files it is holding (diagnostics only).
+   *
+   * A pass that never returns is otherwise a silent timeout: the host, the plugin UI and
+   * the L3 harness can tell a stalled index read from a stalled per-file step by reading
+   * {@link passStatus}, and a report can name the file.
+   */
+  private passStage = "idle";
+  private readonly passFiles = new Map<string, string>();
   /** Paths reported through `onFileTooLarge` in the current pass (one event each). */
   private tooLargeReported = new Set<string>();
   /** Paths reported through `onFileSkipped` in the current pass (one event each). */
@@ -1534,6 +1543,7 @@ export class SyncEngine {
   ): Promise<void> {
     this.firstBind = options.firstBind === true;
     this.tombstoneMerge = this.firstBind ? "bind-merge" : "apply-remote-delete";
+    this.passStage = "start";
     try {
       await this.reconcile(options.priorityPaths ?? []);
       this.initialized = true;
@@ -1544,8 +1554,22 @@ export class SyncEngine {
       // `initialized` flag deliberately stays false for a failed bind, so the settings
       // poll — which must not run before the pass that decides which settings files are
       // the user's own — keeps waiting, and the next pass runs as a bind again.
+      this.passStage = "persist";
       this.persist();
+      this.passStage = "idle";
     }
+  }
+
+  /**
+   * The current pass's stage and the files it is holding, for diagnostics.
+   *
+   * Read by the e2e harness when a pass does not return; the fields are otherwise inert.
+   */
+  get passStatus(): { stage: string; files: Array<{ fileId: string; path: string }> } {
+    return {
+      stage: this.passStage,
+      files: [...this.passFiles].map(([fileId, path]) => ({ fileId, path })),
+    };
   }
 
   /**
@@ -1641,6 +1665,8 @@ export class SyncEngine {
     // The host's list is a preference; normalize it once for the whole pass.
     const priority = priorityRanks(normalizePriorityPaths(priorityPaths));
     this.beginPass();
+    this.passFiles.clear();
+    this.passStage = "list";
     // The adapter lists what exists; the scope decides what this device syncs.
     const localPaths = (await adapter.listSyncableFiles()).filter((p) => this.isSyncable(p));
     const visiblePaths = localPaths.filter((p) => !isConflictFile(p));
@@ -1656,6 +1682,7 @@ export class SyncEngine {
     // those apart, and a first bind then reads the vault once instead of twice
     // (measured: `docs/first-bind-performance.md`). A failed index read also no longer
     // costs a full scan.
+    this.passStage = "index";
     const index = await api.getVaultSyncIndex(vaultId);
 
     const headByFileId = new Map<string, VersionChainEntry>();
@@ -1760,6 +1787,7 @@ export class SyncEngine {
     const skippedPaths = new Set<string>();
     const overCapPaths = new Set<string>();
     const untrackedPaths: string[] = [];
+    this.passStage = "scan";
     await this.scanLocalFiles(
       visiblePaths,
       localHashes,
@@ -1792,6 +1820,7 @@ export class SyncEngine {
     // Re-point the chains whose file was moved locally without an event reaching
     // the engine, so neither the tombstone branch nor the untracked branch below
     // mistakes a move for "deleted here, created there".
+    this.passStage = "repair";
     for (const [fileId, entry] of Object.entries(this.state)) {
       await this.repairMovedFile(fileId, entry, localHashes, liveFileIds, this.remoteIndex);
     }
@@ -1806,6 +1835,7 @@ export class SyncEngine {
       ...this.remoteIndex.fileIds(),
     ]);
 
+    this.passStage = "files";
     const failure = await this.reconcileLoop({
       fileIds: allFileIds,
       localHashes,
@@ -1870,6 +1900,7 @@ export class SyncEngine {
         pool.run(this.weightForFile(fileId, pass), async () => {
           const claim = this.resolvePaths(fileId, pass).claimed;
           await claims.acquire(claim);
+          this.passFiles.set(fileId, this.state[fileId]?.plainPath ?? "");
           try {
             const failure = await this.reconcileOne(fileId, pass);
             if (failure !== null) firstFailure ??= failure;
@@ -1880,6 +1911,7 @@ export class SyncEngine {
             // task has settled.
             firstFailure ??= err;
           } finally {
+            this.passFiles.delete(fileId);
             claims.release(claim);
             this.advanceProgress();
           }
@@ -1889,6 +1921,7 @@ export class SyncEngine {
 
     // Untracked local files (no fileId anywhere) → create on the server. Its own batch
     // failures are collected inside it, for the same reason the push sites above are.
+    this.passStage = "creates";
     const batchFailure = await this.createUntrackedFiles(
       pass.localHashes,
       pass.untrackedPaths,
