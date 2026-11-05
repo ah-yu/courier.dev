@@ -112,6 +112,15 @@ export interface FakeEl {
    */
   querySelector: (selector: string) => FakeEl | null;
   /**
+   * Walk up from this element (itself included) to the nearest ancestor carrying a single
+   * class selector (`.foo`).
+   *
+   * This is how the settings page finds the modal that bounds its pane; without it the
+   * stub only ever answers null and the ancestor half of that reset stays untested.
+   * Anything but a single class finds nothing, like {@link querySelector}.
+   */
+  closest: (selector: string) => FakeEl | null;
+  /**
    * Remove this element from its parent — Obsidian's `detach()`.
    *
    * Modelled rather than stubbed out: a plugin that takes its own UI down calls this, and a
@@ -280,6 +289,14 @@ export function createFakeEl(tagName = "div"): FakeEl {
         return null;
       };
       return walk(el);
+    },
+    closest(selector) {
+      const wanted = singleClassSelector(selector);
+      if (wanted === null) return null;
+      for (let node: FakeEl | null = el; node; node = node.parent) {
+        if (node.classes.includes(wanted)) return node;
+      }
+      return null;
     },
     detach() {
       const parent = el.parent;
@@ -1316,9 +1333,15 @@ export class PluginSettingTab {
   /**
    * Re-render from the definitions, which is what `update()` means in 1.13: the rows are
    * rebuilt, so a `visible` predicate that just changed takes effect.
+   *
+   * The pane's scroll offset survives it, as it does in the app: `refreshCurrentPage`
+   * saves the offset around the re-render and restores it afterwards. A fake that dropped
+   * it here would hide the step-change bug where a shorter page opens below its content.
    */
   update(): void {
+    const scrollTop = this.containerEl.scrollTop;
     this.display();
+    this.containerEl.scrollTop = scrollTop;
   }
 
   hide(): void {}

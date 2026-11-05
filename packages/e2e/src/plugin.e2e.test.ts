@@ -6933,6 +6933,35 @@ describe("plugin e2e — the real plugin against a real server", () => {
       expect(hosted.plugin.settings.serverUrl).toBe(server.serverUrl);
     });
 
+    it("starts a step change at the top of the pane, even after the old page was scrolled", async () => {
+      const hosted = await startHostedPlugin("Settings Scroll");
+      const tab = settingsTabOf(hosted.plugin);
+      tab.display();
+
+      // Signing out means scrolling down to the account section first. Obsidian restores
+      // that offset across the re-render, and on a phone it survives even when the new page
+      // is shorter — the sign-in form sits above the viewport and the pane reads as empty
+      // until it is swiped. A phone can scroll the pane's containers as well as the tab
+      // itself, so all three carry an offset here.
+      const pane = createFakeEl("div");
+      const modal = createFakeEl("div").addClass("modal");
+      modal.appendChild(pane);
+      pane.appendChild(tab.containerEl);
+      tab.containerEl.scrollTop = 1200;
+      pane.scrollTop = 800;
+      modal.scrollTop = 400;
+
+      clickSettingsButton(hosted.plugin, "退出登录");
+      await waitFor(
+        () => elementsWithClass(tab.containerEl, "courier-login-input").length === 2,
+        "the page never went back to the login step",
+      );
+
+      expect(tab.containerEl.scrollTop).toBe(0);
+      expect(pane.scrollTop).toBe(0);
+      expect(modal.scrollTop).toBe(0);
+    });
+
     it("pauses from its own row without unbinding, and resumes from the same row", async () => {
       const { plugin, vault, remote } = await startHostedPlugin("Pause Sync");
       const tab = settingsTabOf(plugin);
@@ -6950,6 +6979,9 @@ describe("plugin e2e — the real plugin against a real server", () => {
       const runningRow = settingsIn(tab.containerEl).find((row) => row.name === "同步")!;
       expect(runningRow.buttons.map((button) => button.text)).toEqual(["暂停同步"]);
 
+      // An action that stays on the same step keeps the pane where the user was: only a
+      // step change starts at the top (see the log out case above).
+      tab.containerEl.scrollTop = 600;
       clickSettingsButton(plugin, "暂停同步");
       // Persisted *and* applied: the page re-renders after the host is stopped, so the state
       // and the row below have to be read after both.
@@ -6964,6 +6996,7 @@ describe("plugin e2e — the real plugin against a real server", () => {
           ),
         "the page never showed the paused state",
       );
+      expect(tab.containerEl.scrollTop).toBe(600);
 
       // Everything a pause stops, and everything it keeps.
       expect(plugin.host).toBeNull();

@@ -162,6 +162,16 @@ export class CourierSettingTab extends PluginSettingTab {
   /** Set by a failed sign-in so the re-render can put focus back on the key field. */
   private focusLoginKey = false;
   /**
+   * The step the page last painted, or `null` before the first definitions are read.
+   *
+   * {@link refresh} compares against it: a changed step is a different page and starts at
+   * the top of the pane. `refresh()` is the only painter of a step change — Obsidian's
+   * `renderTab` reuses the items from its last `update()`, so a step that changes outside
+   * `refresh()` is not on screen — and {@link getSettingDefinitions} seeds this once when
+   * the tab is registered.
+   */
+  private shownStage: SettingsStage | null = null;
+  /**
    * Removers for the dismiss listeners of history-limit rows in edit mode.
    *
    * A row registers one while it is being edited and removes it when the edit ends. A
@@ -187,7 +197,35 @@ export class CourierSettingTab extends PluginSettingTab {
 
   /** Re-render the settings tab (called after a user action that changes its rows or step). */
   refresh(): void {
+    const previousStage = this.shownStage;
+    const stage = this.stage();
+    // A new step is a shorter page than the one the user scrolled through — signing out
+    // replaces the settings with the sign-in form. Obsidian saves the pane's scroll offset
+    // before the re-render and restores it afterwards; the old offset lands past the new
+    // content's end. On an iPhone that restored offset survived the shrink: the pane showed
+    // blank space until it was swiped, where a desktop Chromium session had clamped it back.
+    // Reset before the re-render so the saved offset is already the top, and again after it
+    // in case the app put one back.
+    const stageChanged = previousStage !== null && previousStage !== stage;
+    if (stageChanged) this.scrollPaneToTop();
     this.update();
+    if (stageChanged) this.scrollPaneToTop();
+    this.shownStage = stage;
+  }
+
+  /**
+   * Put the settings pane back at its start.
+   *
+   * The pane is the tab's own `containerEl` on the desktop, but a phone also scrolls the
+   * `.vertical-tabs-container` around it, so every scroller up to the settings modal is
+   * reset rather than only the inner one.
+   */
+  private scrollPaneToTop(): void {
+    const modal = this.containerEl.closest(".modal");
+    for (let node: HTMLElement | null = this.containerEl; node; node = node.parentElement) {
+      if (node.scrollTop > 0) node.scrollTop = 0;
+      if (node === modal) break;
+    }
   }
 
   /**
@@ -229,6 +267,9 @@ export class CourierSettingTab extends PluginSettingTab {
     this.clearHistoryLimitDismissers();
     this.historyLimitPaints.clear();
     const stage = this.stage();
+    // The first read is the step the tab opens on (the app calls this once when the tab is
+    // registered); `refresh()` compares later reads against it to detect a step change.
+    if (this.shownStage === null) this.shownStage = stage;
     // The login step owns the classes that flatten and centre it. Only another step (or a
     // re-render of this one, which cleans up at its own start) gets the app's chrome back;
     // a call that merely indexes or warms this page must not un-centre it.
