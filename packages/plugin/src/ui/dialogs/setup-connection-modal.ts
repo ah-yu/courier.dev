@@ -53,11 +53,15 @@ export class SetupConnectionModal extends Modal {
   private deviceName: string;
   private excludedFolders: string[];
   private error: string | null = null;
+  /** A refusal of the password, drawn under its own input instead of in {@link errorEl}. */
+  private passwordError: string | null = null;
   private submitting = false;
 
   private summaryEl!: HTMLElement;
   private chipsEl!: HTMLElement;
   private errorEl!: HTMLElement;
+  private passwordErrorEl!: HTMLElement;
+  private passwordRowEl!: HTMLElement;
   private bodyEl!: HTMLElement;
   private startButton!: HTMLButtonElement;
   private cancelButton!: HTMLButtonElement;
@@ -91,6 +95,7 @@ export class SetupConnectionModal extends Modal {
     this.renderFoldersSection(form);
 
     this.errorEl = body.createDiv({ cls: "courier-setup-error" });
+    this.errorEl.setAttribute("role", "alert");
     this.renderError();
     this.renderFooter(body);
     this.watchKeyboard();
@@ -136,6 +141,9 @@ export class SetupConnectionModal extends Modal {
         text.inputEl.type = "password";
         text.onChange((value) => {
           this.password = value;
+          // The sentence describes the value that was refused; once the user edits the
+          // field it no longer does, so it goes as soon as they type.
+          this.clearPasswordError();
         });
         text.inputEl.addEventListener("keydown", (event) => {
           if (event.key === "Enter") void this.start();
@@ -144,6 +152,17 @@ export class SetupConnectionModal extends Modal {
         this.passwordInput = text.inputEl;
       });
     this.asField(passwordRow);
+
+    // The password's own error slot, inside its row and directly under the input. The
+    // form-level slot before the footer is the wrong place for a refusal: on a phone this
+    // form is taller than the sheet, so that slot is below the fold and the sticky footer
+    // covers it exactly when it appears.
+    this.passwordRowEl = passwordRow.settingEl;
+    this.passwordErrorEl = passwordRow.settingEl.createDiv({
+      cls: "courier-setup-field-error",
+    });
+    this.passwordErrorEl.setAttribute("role", "alert");
+    this.renderPasswordError();
 
     const rememberRow = new Setting(card)
       .setName(t("dialog.setup.remember"))
@@ -296,15 +315,30 @@ export class SetupConnectionModal extends Modal {
     // the user which field the keyboard is typing into, and a row that is only half on
     // screen reads as a clipped form. The sticky footer is part of the body, so the row's
     // visible band ends at the footer's top edge, not at the body's.
-    const row = field.closest(".setting-item") ?? field;
+    const row = field.closest<HTMLElement>(".setting-item") ?? field;
+    this.revealElement(row);
+  }
+
+  /**
+   * Scroll the body so `element` clears the sticky footer.
+   *
+   * The footer overlays the scrolling body, so the band a field may occupy ends at the
+   * footer's top edge rather than at the body's bottom. Without this an error that appears
+   * below the fold stays under the footer — the red sliver this dialog used to show — even
+   * though its element is in the document.
+   */
+  private revealElement(element: HTMLElement): void {
     const bodyRect = this.bodyEl.getBoundingClientRect();
+    // An open dialog has a laid-out body. A window without layout (the L2 stub) reports
+    // a zero box, and there is no scroll band to compute.
+    if (bodyRect.height <= 0) return;
     const footer = this.bodyEl.querySelector<HTMLElement>(".courier-setup-footer");
     const footerTop = footer ? footer.getBoundingClientRect().top : bodyRect.bottom;
     const visibleBody = {
       top: bodyRect.top,
       bottom: Math.min(bodyRect.bottom, footerTop),
     };
-    const delta = revealScrollDelta(visibleBody, row.getBoundingClientRect(), 14);
+    const delta = revealScrollDelta(visibleBody, element.getBoundingClientRect(), 14);
     if (delta !== 0) this.bodyEl.scrollTop += delta;
   }
 
@@ -356,11 +390,64 @@ export class SetupConnectionModal extends Modal {
   // ── Connect ──
 
   private renderError(): void {
-    this.errorEl.setText(this.error === null ? "" : `⚠ ${this.error}`);
-    // `addClass`/`removeClass` rather than `classList` or a two-argument `toggleClass`:
-    // both work with Obsidian's DOM helpers and with the e2e stub's fake element.
-    if (this.error === null) this.errorEl.removeClass("is-visible");
-    else this.errorEl.addClass("is-visible");
+    // Show first, then write: a live region that is `display: none` while its text changes
+    // is out of the accessibility tree, and its arrival would go unannounced.
+    if (this.error === null) {
+      this.errorEl.removeClass("is-visible");
+      this.errorEl.setText("");
+      return;
+    }
+    this.errorEl.addClass("is-visible");
+    this.errorEl.setText(`⚠ ${this.error}`);
+  }
+
+  private renderPasswordError(): void {
+    if (this.passwordError === null) {
+      this.passwordErrorEl.removeClass("is-visible");
+      this.passwordErrorEl.setText("");
+      return;
+    }
+    this.passwordErrorEl.addClass("is-visible");
+    this.passwordErrorEl.setText(`⚠ ${this.passwordError}`);
+  }
+
+  /** Drop a password refusal as soon as the user edits the field it describes. */
+  private clearPasswordError(): void {
+    if (this.passwordError === null) return;
+    this.passwordError = null;
+    this.renderPasswordError();
+  }
+
+  private clearErrors(): void {
+    this.error = null;
+    this.passwordError = null;
+    this.renderError();
+    this.renderPasswordError();
+  }
+
+  /** Show a form-level failure and bring it clear of the sticky footer. */
+  private showFormError(message: string): void {
+    this.passwordError = null;
+    this.error = message;
+    this.renderPasswordError();
+    this.renderError();
+    this.revealElement(this.errorEl);
+  }
+
+  /**
+   * Show a password refusal directly under the password input.
+   *
+   * This dialog is taller than a phone's sheet, and its form-level slot sits below the fold
+   * under the sticky footer — so a wrong password reported there was far away from the field
+   * and mostly invisible. The message belongs to the input it is about; revealing the row
+   * also brings it back into the scroll band when the user had scrolled to the footer.
+   */
+  private showPasswordError(message: string): void {
+    this.error = null;
+    this.passwordError = message;
+    this.renderError();
+    this.renderPasswordError();
+    this.revealElement(this.passwordRowEl);
   }
 
   private setSubmitting(submitting: boolean): void {
@@ -378,27 +465,33 @@ export class SetupConnectionModal extends Modal {
   private async start(): Promise<void> {
     if (this.submitting) return;
     if (!this.password) {
-      this.error = t("dialog.setup.passwordRequired");
-      this.renderError();
+      this.showPasswordError(t("dialog.setup.passwordRequired"));
       this.passwordInput?.focus?.();
       return;
     }
 
-    this.error = null;
-    this.renderError();
+    this.clearErrors();
     this.setSubmitting(true);
 
     try {
+      // What the check answers about. The user can type a new password while it is in
+      // flight, and a refusal of the old one must not be attached to the new value.
+      const submittedPassword = this.password;
       const outcome = await this.options.onSubmit({
-        password: this.password,
+        password: submittedPassword,
         remember: this.remember,
         deviceName: normalizeDeviceName(this.deviceName),
         excludedFolders: this.excludedFolders,
       });
       if (!outcome.ok) {
-        this.error = outcome.error;
         this.setSubmitting(false);
-        this.renderError();
+        if (outcome.field === "password") {
+          if (this.password !== submittedPassword) return;
+          this.showPasswordError(outcome.error);
+          this.passwordInput?.focus?.();
+        } else {
+          this.showFormError(outcome.error);
+        }
         return;
       }
 
@@ -407,9 +500,8 @@ export class SetupConnectionModal extends Modal {
     } catch (err) {
       // The picker's action path normally returns an outcome; a thrown transport or
       // persistence error still belongs in the dialog, not in an unhandled rejection.
-      this.error = describeActionError(err, t("dialog.setup.connectFailed"));
       this.setSubmitting(false);
-      this.renderError();
+      this.showFormError(describeActionError(err, t("dialog.setup.connectFailed")));
     }
   }
 }

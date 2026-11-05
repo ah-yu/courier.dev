@@ -675,7 +675,9 @@ export default class CourierPlugin extends Plugin {
   ): Promise<ActionOutcome> {
     const verification = await this.fetchVaultCredentials(vaultId, password);
     if (verification.kind === "invalid-password") {
-      return { ok: false, error: t("error.passwordIncorrect") };
+      // Tagged with its field: the setup dialog is a long form on a phone, and its
+      // form-level slot would put this sentence below the fold, under the footer.
+      return { ok: false, error: t("error.passwordIncorrect"), field: "password" };
     }
     if (verification.kind === "error") {
       return {

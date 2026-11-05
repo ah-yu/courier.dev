@@ -754,9 +754,10 @@
 
 /* ── Error and footer ── */
 
-.courier-setup-error {
+/* Both error slots share one banner; only their placement differs. */
+.courier-setup-error,
+.courier-setup-field-error {
   display: none;
-  margin-top: 14px;
   padding: 9px 11px;
   border: 1px solid color-mix(in srgb, var(--text-error) 35%, var(--background-modifier-border));
   border-radius: var(--radius-s, 6px);
@@ -765,6 +766,16 @@
   font-size: var(--font-ui-smaller);
   line-height: 1.45;
   overflow-wrap: anywhere;
+}
+
+/* The form-level slot sits between the form and the sticky footer. */
+.courier-setup-error {
+  margin-top: 14px;
+}
+
+/* The field slot sits inside the password row, directly under its input. */
+.courier-setup-field-error {
+  margin-top: 8px;
 }
 
 .courier-setup-footer {
@@ -2647,6 +2658,11 @@ body.is-phone .courier-login-control.has-action .courier-login-input {
 .courier-setup-error.is-visible {
   display: block;
   margin-bottom: 16px;
+}
+
+/* Under the input there is no form gap to keep; the row's own padding ends the block. */
+.courier-setup-field-error.is-visible {
+  display: block;
 }
 
 .courier-vh-version.is-selectable {

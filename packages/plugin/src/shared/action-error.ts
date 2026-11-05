@@ -2,6 +2,16 @@ import { ApiClientError } from "@courier/shared";
 import { t } from "../i18n";
 
 /**
+ * The form field a failed action's sentence belongs to, when the producer can name one.
+ *
+ * A dialog owns the placement, but only the producer knows which input the refusal is
+ * about. The setup dialog is the case that needs it: it is taller than a phone's sheet, so
+ * its form-level slot sits below the fold, and a wrong password reported there is both far
+ * from the field that has to change and hidden under the sticky footer.
+ */
+export type ActionErrorField = "password";
+
+/**
  * The outcome of an action the settings page renders.
  *
  * Every failure that a user can act on comes back as a message rather than an
@@ -10,7 +20,9 @@ import { t } from "../i18n";
  * still used for events nobody asked for — a conflict the engine resolved, a
  * vault deleted from another device.
  */
-export type ActionOutcome<T = void> = { ok: true; value: T } | { ok: false; error: string };
+export type ActionOutcome<T = void> =
+  | { ok: true; value: T }
+  | { ok: false; error: string; field?: ActionErrorField };
 
 /**
  * Turn a server URL into the value stored in settings.
