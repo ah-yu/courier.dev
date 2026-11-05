@@ -222,11 +222,13 @@ phone. Use it — the mobile path is not "the same code, so L2 covers it"; L2's 
 
 ### L3 in CI
 
-`.github/workflows/l3-obsidian.yml` runs the suite on **all three runners**, each driven through the
+`.github/workflows/l3-obsidian.yml` runs the suite on **up to three runners**, each driven through the
 app's own CLI exactly as a local run is: a headless Ubuntu runner with a pinned Obsidian Linux build
 under Xvfb, a Windows runner with a pinned Obsidian Windows installer, and a macOS runner with a
-pinned Obsidian DMG. It triggers on pull requests (and pushes to `main`) whose `paths` touch the
-sync path, and on manual dispatch; docs-only changes do not spend a run.
+pinned Obsidian DMG. The workflow triggers on pull requests (and pushes to `main`) whose `paths`
+touch the sync path, and on manual dispatch; docs-only changes do not spend a run. Ubuntu and
+Windows run on every one of those events; the macOS job is manual-dispatch only while a runner hang
+is investigated (see the end of this section).
 `.github/actions/obsidian-linux` installs `xvfb`/`fluxbox` and the Electron libraries, verifies the
 pinned tarball's sha256, caches the extracted build, and pins `releases.obsidian.md` to `127.0.0.1`
 so a background update cannot replace the app mid-run. It installs **no CJK font**:

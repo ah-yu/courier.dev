@@ -301,7 +301,8 @@ registered (`bun run e2e:obsidian`, once per checkout, with Obsidian closed); ne
 developer's development vaults (`vault_a` / `vault_b`, or a worktree's suffixed pair), and run one
 L3 per checkout — different worktrees may run in parallel because each registers its own suffixed
 vault pair. CI runs the behavioural subset
-(`bun run verify obsidian-ci`, pinned Obsidian under Xvfb) on sync-path changes; rendered-geometry
+(`bun run verify obsidian-ci`: pinned Obsidian under Xvfb, and an installed pinned build on
+Windows) on sync-path changes; rendered-geometry
 assertions (`itL`) are a reference-platform contract — Windows by default, moved with
 `COURIER_OBSIDIAN_LAYOUT_PLATFORM` — and stay on that machine. CI is additive; it does not replace
 the full local gate. When L3 did not run, say so in the report (`L3 not run: <why>`) and do not

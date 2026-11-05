@@ -21,10 +21,13 @@ expensive part of CI — three runners execute the whole suite instead of one �
 pull request because the alternative is discovering a platform break at release time.
 
 `l3-obsidian.yml` is the real-Obsidian layer: it runs on pull requests and pushes to `main` whose
-`paths` touch the sync path, plus manual dispatch, so a docs-only change never spends a run. It has
-three jobs — Ubuntu (Xvfb), Windows and macOS — and `.github/actions/obsidian-linux` /
-`obsidian-windows` / `obsidian-macos` install the pinned app and expose its CLI; the version and
-sha256 live in those actions and are bumped together. All three run the behavioural subset
+`paths` touch the sync path, plus manual dispatch, so a docs-only change never spends a run.
+`.github/actions/obsidian-linux` / `obsidian-windows` / `obsidian-macos` install the pinned app and
+expose its CLI; the version and sha256 live in those actions and are bumped together. **Ubuntu and
+Windows are the gates** — both run on every sync-path pull request and push. The **macOS job is
+manual-dispatch only** for now: the suite has passed there and has also hung on cases that wait for
+a vault state, which needs a Mac to diagnose (see
+[testing.md](testing.md#l3-in-ci)). All three run the behavioural subset
 (`bun run verify obsidian-ci`); the rendered-geometry cases stay on the reference machine.
 
 `bench.yml` runs the sync benchmark: three scenarios (many small files, one large chunked file,
@@ -34,16 +37,17 @@ and on manual dispatch (one run per scenario, head only); it is **not** a gate �
 benchmark's correctness invariants can fail it. The scenarios, the comparison rules and the cost
 are in [ci-sync-benchmarks.md](ci-sync-benchmarks.md).
 
-| Job           | Runner                    | What it runs                                                                             |
-| ------------- | ------------------------- | ---------------------------------------------------------------------------------------- |
-| `verify`      | Ubuntu, macOS, Windows    | `bun scripts/check-release.ts`, `bun run verify`, `bun run build`                        |
-| `boundary`    | Ubuntu                    | `bun run verify coverage`, `bun run verify format`                                       |
-| `l3-obsidian` | Ubuntu, Windows and macOS | real Obsidian through its CLI: `bun run e2e:obsidian`, then `bun run verify obsidian-ci` |
+| Job           | Runner                              | What it runs                                                                             |
+| ------------- | ----------------------------------- | ---------------------------------------------------------------------------------------- |
+| `verify`      | Ubuntu, macOS, Windows              | `bun scripts/check-release.ts`, `bun run verify`, `bun run build`                        |
+| `boundary`    | Ubuntu                              | `bun run verify coverage`, `bun run verify format`                                       |
+| `l3-obsidian` | Ubuntu, Windows (macOS on dispatch) | real Obsidian through its CLI: `bun run e2e:obsidian`, then `bun run verify obsidian-ci` |
 
 `bun run verify` covers the docs index, the generated migration chain, lint, the community
 directory's scan, typecheck and the test suite (L0–L2, including the in-memory end-to-end suites) on
-every platform. `bun run build` compiles the plugin bundle, the server and the CLI on every
-platform as well, so a build-script path assumption fails in CI rather than in a release job.
+every platform. `bun run build` builds the plugin bundle and the server on every platform and
+smoke-runs the CLI (`bun src/main.ts --help`), so a build-script path assumption fails in CI rather
+than in a release job; the compiled binaries are the release workflow's job.
 
 `boundary` exists because two gates are not a per-platform signal. The **coverage floors** are
 measured on the Linux runner — a second OS would move the numbers for reasons that are not the

@@ -17,7 +17,6 @@
  * ```
  */
 import { mkdirSync, mkdtempSync, rmSync } from "fs";
-import { createServer as createNetServer } from "net";
 import { tmpdir } from "os";
 import { join } from "path";
 import { Database } from "bun:sqlite";
@@ -40,18 +39,6 @@ interface BenchServer {
   userId: string;
   rootDir: string;
   close: () => Promise<void>;
-}
-
-async function freePort(): Promise<number> {
-  return await new Promise((resolve, reject) => {
-    const probe = createNetServer();
-    probe.once("error", reject);
-    probe.listen(0, "127.0.0.1", () => {
-      const address = probe.address();
-      const port = typeof address === "object" && address !== null ? address.port : 0;
-      probe.close(() => resolve(port));
-    });
-  });
 }
 
 /**
@@ -80,18 +67,21 @@ async function startDefaultServer(name: string): Promise<BenchServer> {
     schema.close();
   }
 
-  const port = await freePort();
+  // Port 0: the listener asks the OS for a free port itself. Probing one and binding it
+  // afterwards leaves a window for another process to take it (see the e2e harness).
   process.env.SQLITE_PATH = sqlitePath;
   process.env.BLOB_STORE_DIR = join(rootDir, "blobs");
-  process.env.PORT = String(port);
+  process.env.PORT = "0";
   delete process.env.SYNC_RATE_LIMIT_MAX_ATTEMPTS;
   delete process.env.SYNC_RATE_LIMIT_WINDOW_MS;
   delete process.env.SYNC_TRANSFER_RATE_LIMIT_MAX_ATTEMPTS;
   delete process.env.SYNC_TRANSFER_RATE_LIMIT_WINDOW_MS;
 
   const { startServer } = await import("../../../server/src/commands/start");
-  const started = startServer({ port: String(port) });
-  await started.ready;
+  const started = startServer({ port: "0" });
+  const server = await started.ready;
+  const port = server.port;
+  if (!port) throw new Error("the bench listener did not report a port");
 
   const serverUrl = `http://127.0.0.1:${port}`;
   const response = await fetch(`${serverUrl}/api/users`, {

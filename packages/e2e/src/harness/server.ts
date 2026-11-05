@@ -158,7 +158,8 @@ export async function startTestServer(name = "e2e user"): Promise<TestServer> {
   // configures TLS, so there is no certificate wait) — and that is also when the port
   // the OS picked is known.
   const server = await started.ready;
-  const port = server.port ?? 0;
+  const port = server.port;
+  if (!port) throw new Error("the test listener did not report a port");
   const serverUrl = `http://127.0.0.1:${port}`;
   const user = await createTestUser(serverUrl, name);
 
