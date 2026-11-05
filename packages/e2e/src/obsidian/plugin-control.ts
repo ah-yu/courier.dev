@@ -2771,18 +2771,68 @@ export async function readNotices(vault: string): Promise<string[]> {
   );
 }
 
-/** Force a full reconcile in the live engine (what a reconnect does). */ export async function reconcile(
-  vault: string,
-): Promise<void> {
+/**
+ * Resolve once the host is not inside its own full reconcile.
+ *
+ * The harness forces a pass with `engine.initialSync()` (see {@link reconcile}), which
+ * bypasses `SyncHost.runReconcile`'s single-flight. A CLI response that is lost leaves
+ * that pass running in the app after its caller has given up, so the next forced pass
+ * must join it instead of starting a second one over the same snapshot.
+ *
+ * Only the **full pass** is waited for: event-driven work (an in-flight path, a queued
+ * push) may overlap a reconcile by design, and waiting for that to drain made every
+ * forced pass pay for the background pulls the previous test had just scheduled.
+ */
+export async function waitForHostIdle(vault: string, timeoutMs = 30_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const idle = await evalInVault<boolean>(
+      vault,
+      `
+      const p = app.plugins.plugins.courier;
+      // p.host is the plugin's EngineHost wrapper; the SyncHost that owns the
+      // reconcile flag is one level down.
+      const wrapper = p && p.host;
+      const h = wrapper && (wrapper.host || wrapper);
+      return !h || !h.reconciling;
+      `,
+      10_000,
+    );
+    if (idle) return;
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out: the sync host in ${vault} never went idle`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
+/** Force a full reconcile in the live engine (what a reconnect does). */
+export async function reconcile(vault: string): Promise<void> {
+  // A pass is not reentrant: wait for the host's own work first, then chain onto any
+  // harness pass whose CLI response was lost (the app-side call is still running).
+  await waitForHostIdle(vault);
   await evalInVault(
     vault,
     `
     const p = app.plugins.plugins.courier;
     if (!p || !p.host) throw new Error('no running sync host');
-    await p.host.engine.initialSync();
+    const host = p.host;
+    const previous = window.__courierE2ePass;
+    const run = (async () => {
+      if (previous) {
+        try { await previous; } catch {}
+      }
+      await host.engine.initialSync();
+    })();
+    window.__courierE2ePass = run;
+    try {
+      await run;
+    } finally {
+      if (window.__courierE2ePass === run) window.__courierE2ePass = null;
+    }
     return true;
     `,
-    180_000,
+    60_000,
   );
 }
 

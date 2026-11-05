@@ -266,7 +266,10 @@ and `engine.initialSync` (no request is pending), so the promise is lost in the 
 layer, not in a Courier pass. The harness made it worse: its per-call timeout sent SIGTERM, which
 the Obsidian CLI ignores while blocked in its socket read, so the call waited for Vitest's 300 s hook
 timeout. `runObsidianCli` now kills a timed-out call with SIGKILL, so such a run fails in 60 s
-naming the command instead of wedging the job. The app-side loss is still open, so
+naming the command instead of wedging the job. The harness also makes fewer of those calls: teardown
+is one idempotent evaluation per vault instead of a listing plus one call per probe file and folder,
+and a forced reconcile waits for the host's own pass and chains onto a forced pass whose response
+was lost, so two full passes never decide from the same snapshot. The app-side loss is still open, so
 `workflow_dispatch` runs the job and pull requests do not — a known-flaky run must not redden an
 unrelated change. Remove the `if` once the loss is understood or fixed upstream.
 

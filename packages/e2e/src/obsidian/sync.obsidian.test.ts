@@ -214,11 +214,6 @@ const ONE_PIXEL_PNG_BASE64 =
  */
 const PROBE_DIR = "courier-e2e-paths";
 
-/** Path depth, so cleanup can delete the deepest probe folder first. */
-function pathDepth(path: string): number {
-  return path.split("/").length;
-}
-
 /** Build the plugin so the disposable vaults get the current source. */
 function buildPlugin(): void {
   const result = spawnSync("bun run --filter @courier/plugin build", {
@@ -397,42 +392,57 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
 
   /**
    * Remove only this suite's probe notes and probe folders, leaving the two
-   * hosts running. Files go first: deleting a folder only works once it is
-   * empty, and the nested probes always leave one behind.
+   * hosts running.
    *
-   * Every step is best-effort on purpose. A probe that failed halfway can leave a
-   * folder that refuses to disappear, and a throw here would abandon the rest of
-   * the probe notes and poison every later test in the file — one of the observed
-   * failure modes was a `TFolder` handed to a file-only delete path (`EISDIR`).
+   * One evaluation, not one CLI call per file. Every `eval` is its own process +
+   * socket + `executeJavaScript` round trip, and teardown used to make one call for
+   * the listing, one per probe file and one per folder; losing any one of them left
+   * the hook waiting on a CLI that never answered. The whole wipe is a single
+   * idempotent evaluation now, and the probe folder goes through the data adapter
+   * recursively (`removeFolderInVault`'s call) instead of walking `getAllFolders`.
+   *
+   * Best-effort, like the per-step handling it replaces: a probe that cannot be
+   * deleted must not abandon the rest or poison a later case. The file loop and the
+   * folder removal each catch their own failure; what cannot be removed is reported.
    */
   async function cleanProbes(vault: string): Promise<void> {
-    const handle = new ObsidianVault(vault);
-    const attempt = async (step: () => Promise<unknown>) => {
-      try {
-        await step();
-      } catch (err) {
-        console.warn(`[obsidian-e2e] probe cleanup in ${vault} skipped a step:`, err);
+    try {
+      const result = await evalInVault<{ removed: number; folder: boolean; left: string[] }>(
+        vault,
+        `
+        const prefix = ${jsLiteral(PROBE_PREFIX)};
+        const left = [];
+        let removed = 0;
+        for (const file of app.vault.getFiles()) {
+          if (!(file.path.startsWith(prefix) || file.path.includes('/' + prefix))) continue;
+          try {
+            await app.vault.delete(file);
+            removed++;
+          } catch (err) {
+            if (await app.vault.adapter.exists(file.path)) left.push(file.path);
+          }
+        }
+        const root = ${jsLiteral(PROBE_DIR)};
+        let folder = false;
+        if (await app.vault.adapter.exists(root)) {
+          try {
+            await app.vault.adapter.rmdir(root, true);
+            folder = true;
+          } catch (err) {
+            if (await app.vault.adapter.exists(root)) throw err;
+          }
+        }
+        return { removed, folder, left };
+        `,
+        90_000,
+      );
+      if (result.left.length > 0) {
+        console.warn(
+          `[obsidian-e2e] probe cleanup in ${vault} left ${result.left.length} file(s): ${result.left.join(", ")}`,
+        );
       }
-    };
-
-    let files: string[] = [];
-    await attempt(async () => {
-      files = await handle.list();
-    });
-    for (const path of files) {
-      if (path.startsWith(PROBE_PREFIX) || path.includes(`/${PROBE_PREFIX}`)) {
-        await attempt(() => handle.remove(path));
-      }
-    }
-
-    let folders: string[] = [];
-    await attempt(async () => {
-      folders = await handle.folders(PROBE_DIR);
-    });
-    // Deepest first, so a nested probe folder can be deleted without leaving a
-    // non-empty parent behind.
-    for (const path of folders.toSorted((a, b) => pathDepth(b) - pathDepth(a))) {
-      await attempt(() => handle.removeFolder(path));
+    } catch (err) {
+      console.warn(`[obsidian-e2e] probe cleanup in ${vault} failed:`, err);
     }
   }
 
