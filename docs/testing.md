@@ -261,17 +261,22 @@ code signal: re-run the job (the same commit passed in about three minutes once 
 passed earlier. A local reproduction (`bun run verify obsidian-ci`, macOS 26, Obsidian 1.15.0; the CI
 pin is 1.14.4) stalls about one run in two (3 of the first 6 runs), always the same way: one CLI
 `eval` never returns while the app stays responsive and every later call answers. It has been seen
-in `vault.create` (the file is never written), `vault.delete` (the file is gone and the index clean)
-and `engine.initialSync` (no request is pending), so the promise is lost in the app's CLI/vault
-layer, not in a Courier pass. The harness made it worse: its per-call timeout sent SIGTERM, which
-the Obsidian CLI ignores while blocked in its socket read, so the call waited for Vitest's 300 s hook
-timeout. `runObsidianCli` now kills a timed-out call with SIGKILL, so such a run fails in 60 s
-naming the command instead of wedging the job. The harness also makes fewer of those calls: teardown
-is one idempotent evaluation per vault instead of a listing plus one call per probe file and folder,
-and a forced reconcile waits for the host's own pass and chains onto a forced pass whose response
-was lost, so two full passes never decide from the same snapshot. The app-side loss is still open, so
-`workflow_dispatch` runs the job and pull requests do not — a known-flaky run must not redden an
-unrelated change. Remove the `if` once the loss is understood or fixed upstream.
+in `vault.create` (the file is never written), `vault.delete` (the file is gone and the index clean),
+`engine.initialSync` and a config-folder `adapter` call. The harness-side observations point at
+the app's CLI/vault layer; the engine case has not been reproduced with the pass tracer yet, and the
+plugin's `requestUrl` had no timeout, so a stalled request could hold a pass forever. That path is now bounded
+separately (120 s, `NETWORK_ERROR`, retried by the host on its next pass). The harness made the
+hang worse: its per-call timeout sent SIGTERM, which the Obsidian CLI ignores while blocked in its
+socket read, so the call waited for Vitest's 300 s hook timeout. `runObsidianCli` now kills a
+timed-out call with SIGKILL, so it fails at its per-call timeout — 60 s for most helpers, 90 s for
+probe cleanup, 180 s for a vault reset — naming the operation. Probe cleanup is one idempotent evaluation
+per vault instead of a listing plus one call per probe file and folder. A forced reconcile is also
+one evaluation in the normal case: it waits while the host reports its own reconcile, then chains
+forced passes to each other through a per-host entry and abandons an entry older than 60 s. That is
+not a lock shared with the host loop: a periodic, reconnect or bind-retry pass can still start
+concurrently. The app-side lost answer is still open, so `workflow_dispatch` runs the job and pull
+requests do not — a known-flaky run must not redden an unrelated change. Remove the `if` once the
+loss is understood or fixed upstream.
 
 - **The gate is `bun run verify obsidian-ci`**: the same suite with
   `COURIER_OBSIDIAN_E2E_LAYOUT=0`. The cases that mixed behaviour and layout were split: their

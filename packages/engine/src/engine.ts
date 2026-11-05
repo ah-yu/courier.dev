@@ -523,6 +523,18 @@ export class SyncPushBaseError extends Error {
  * policy; the engine owns scanning, decision, push/pull, echo suppression and
  * conflict handling.
  */
+/** Where a reconcile pass is; see `SyncEngine.passStatus`. */
+export type PassStage =
+  | "idle"
+  | "start"
+  | "list"
+  | "index"
+  | "scan"
+  | "repair"
+  | "files"
+  | "creates"
+  | "persist";
+
 export class SyncEngine {
   private state: LocalVersionState = {};
   private pathToFileId = new Map<string, string>();
@@ -579,8 +591,11 @@ export class SyncEngine {
    * the L3 harness can tell a stalled index read from a stalled per-file step by reading
    * {@link passStatus}, and a report can name the file.
    */
-  private passStage = "idle";
+  private passStage: PassStage = "idle";
   private readonly passFiles = new Map<string, string>();
+  /** The latest pass and which pass owns the shared diagnostic fields. */
+  private passId = 0;
+  private passOwner = 0;
   /** Paths reported through `onFileTooLarge` in the current pass (one event each). */
   private tooLargeReported = new Set<string>();
   /** Paths reported through `onFileSkipped` in the current pass (one event each). */
@@ -1543,9 +1558,11 @@ export class SyncEngine {
   ): Promise<void> {
     this.firstBind = options.firstBind === true;
     this.tombstoneMerge = this.firstBind ? "bind-merge" : "apply-remote-delete";
+    const passId = ++this.passId;
+    this.passOwner = passId;
     this.passStage = "start";
     try {
-      await this.reconcile(options.priorityPaths ?? []);
+      await this.reconcile(options.priorityPaths ?? [], passId);
       this.initialized = true;
     } finally {
       // Whatever the pass established is recorded even when part of it failed: the sync
@@ -1554,10 +1571,21 @@ export class SyncEngine {
       // `initialized` flag deliberately stays false for a failed bind, so the settings
       // poll — which must not run before the pass that decides which settings files are
       // the user's own — keeps waiting, and the next pass runs as a bind again.
-      this.passStage = "persist";
-      this.persist();
-      this.passStage = "idle";
+      this.setPassStage(passId, "persist");
+      try {
+        this.persist();
+      } finally {
+        if (this.passOwner === passId) {
+          this.passStage = "idle";
+          this.passFiles.clear();
+        }
+      }
     }
+  }
+
+  /** Update the diagnostic stage only while the pass that owns it is still the latest. */
+  private setPassStage(passId: number, stage: PassStage): void {
+    if (this.passOwner === passId) this.passStage = stage;
   }
 
   /**
@@ -1565,7 +1593,7 @@ export class SyncEngine {
    *
    * Read by the e2e harness when a pass does not return; the fields are otherwise inert.
    */
-  get passStatus(): { stage: string; files: Array<{ fileId: string; path: string }> } {
+  get passStatus(): { stage: PassStage; files: Array<{ fileId: string; path: string }> } {
     return {
       stage: this.passStage,
       files: [...this.passFiles].map(([fileId, path]) => ({ fileId, path })),
@@ -1660,13 +1688,13 @@ export class SyncEngine {
     }
   }
 
-  private async reconcile(priorityPaths: readonly string[]): Promise<void> {
+  private async reconcile(priorityPaths: readonly string[], passId: number): Promise<void> {
     const { adapter, api, vaultId } = this.opts;
     // The host's list is a preference; normalize it once for the whole pass.
     const priority = priorityRanks(normalizePriorityPaths(priorityPaths));
     this.beginPass();
-    this.passFiles.clear();
-    this.passStage = "list";
+    if (this.passOwner === passId) this.passFiles.clear();
+    this.setPassStage(passId, "list");
     // The adapter lists what exists; the scope decides what this device syncs.
     const localPaths = (await adapter.listSyncableFiles()).filter((p) => this.isSyncable(p));
     const visiblePaths = localPaths.filter((p) => !isConflictFile(p));
@@ -1682,7 +1710,7 @@ export class SyncEngine {
     // those apart, and a first bind then reads the vault once instead of twice
     // (measured: `docs/first-bind-performance.md`). A failed index read also no longer
     // costs a full scan.
-    this.passStage = "index";
+    this.setPassStage(passId, "index");
     const index = await api.getVaultSyncIndex(vaultId);
 
     const headByFileId = new Map<string, VersionChainEntry>();
@@ -1787,7 +1815,7 @@ export class SyncEngine {
     const skippedPaths = new Set<string>();
     const overCapPaths = new Set<string>();
     const untrackedPaths: string[] = [];
-    this.passStage = "scan";
+    this.setPassStage(passId, "scan");
     await this.scanLocalFiles(
       visiblePaths,
       localHashes,
@@ -1820,7 +1848,7 @@ export class SyncEngine {
     // Re-point the chains whose file was moved locally without an event reaching
     // the engine, so neither the tombstone branch nor the untracked branch below
     // mistakes a move for "deleted here, created there".
-    this.passStage = "repair";
+    this.setPassStage(passId, "repair");
     for (const [fileId, entry] of Object.entries(this.state)) {
       await this.repairMovedFile(fileId, entry, localHashes, liveFileIds, this.remoteIndex);
     }
@@ -1835,18 +1863,21 @@ export class SyncEngine {
       ...this.remoteIndex.fileIds(),
     ]);
 
-    this.passStage = "files";
-    const failure = await this.reconcileLoop({
-      fileIds: allFileIds,
-      localHashes,
-      untrackedPaths,
-      chainByFileId,
-      remote: this.remoteIndex,
-      skippedPaths,
-      overCapPaths,
-      localStamps,
-      priority,
-    });
+    this.setPassStage(passId, "files");
+    const failure = await this.reconcileLoop(
+      {
+        fileIds: allFileIds,
+        localHashes,
+        untrackedPaths,
+        chainByFileId,
+        remote: this.remoteIndex,
+        skippedPaths,
+        overCapPaths,
+        localStamps,
+        priority,
+      },
+      passId,
+    );
     // Raised only now: the pass has done everything it still could (see `reconcileLoop`).
     // A refusal is an `Error` in practice; the wrap keeps a host that threw something else
     // from turning this into a `throw` of a non-error value, and `cause` keeps whatever
@@ -1877,7 +1908,7 @@ export class SyncEngine {
    * Its whole snapshot arrives as one {@link ReconcilePass}: seven positional arguments
    * of four different container types was a call nobody could read (or get right).
    */
-  private async reconcileLoop(pass: ReconcilePass): Promise<unknown> {
+  private async reconcileLoop(pass: ReconcilePass, passId: number): Promise<unknown> {
     // The set answers "which files does this pass consider"; the array is what gives
     // the user's own files a head start (see `orderFileIds`).
     const ordered = this.orderFileIds([...pass.fileIds], pass);
@@ -1900,7 +1931,12 @@ export class SyncEngine {
         pool.run(this.weightForFile(fileId, pass), async () => {
           const claim = this.resolvePaths(fileId, pass).claimed;
           await claims.acquire(claim);
-          this.passFiles.set(fileId, this.state[fileId]?.plainPath ?? "");
+          if (this.passOwner === passId) {
+            this.passFiles.set(
+              fileId,
+              this.state[fileId]?.plainPath ?? pass.remote.pathOf(fileId) ?? "",
+            );
+          }
           try {
             const failure = await this.reconcileOne(fileId, pass);
             if (failure !== null) firstFailure ??= failure;
@@ -1911,7 +1947,7 @@ export class SyncEngine {
             // task has settled.
             firstFailure ??= err;
           } finally {
-            this.passFiles.delete(fileId);
+            if (this.passOwner === passId) this.passFiles.delete(fileId);
             claims.release(claim);
             this.advanceProgress();
           }
@@ -1921,13 +1957,14 @@ export class SyncEngine {
 
     // Untracked local files (no fileId anywhere) → create on the server. Its own batch
     // failures are collected inside it, for the same reason the push sites above are.
-    this.passStage = "creates";
+    this.setPassStage(passId, "creates");
     const batchFailure = await this.createUntrackedFiles(
       pass.localHashes,
       pass.untrackedPaths,
       pass.remote,
       pass.localStamps,
       pass.priority,
+      passId,
     );
     // The pass is over: report the final pair, whose `done === total` tells a host to stop
     // showing a counter (a create that a limiter left unsent was counted and dropped).
@@ -2516,6 +2553,7 @@ export class SyncEngine {
     remote: RemoteIndex,
     localStamps: Map<string, FileStamp>,
     priority: ReadonlyMap<string, number>,
+    passId: number,
   ): Promise<unknown> {
     let batch: PreparedPush[] = [];
     let batchBytes = 0;
@@ -2641,6 +2679,7 @@ export class SyncEngine {
     try {
       for (const path of ordered) {
         if (rateLimitedOut) break;
+        if (this.passOwner === passId) this.passFiles.set("untracked", path);
         if (this.pathToFileId.has(path) || remote.fileIdAt(path) !== null) continue;
         // A brand-new file whose `create` event is still in flight belongs to that
         // event: pushing it here is the second chain this pass must not create.

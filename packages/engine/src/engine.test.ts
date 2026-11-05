@@ -857,6 +857,43 @@ describe("SyncEngine", () => {
     expect(engine.passStatus).toEqual({ stage: "idle", files: [] });
   });
 
+  it("reports the stage and the untracked file while its create is on the wire", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("notes/a.md", encoder.encode("# A"));
+    const held = holdFirstPush(api);
+
+    const run = engine.initialSync();
+    await held.reached;
+
+    expect(engine.passStatus.stage).toBe("creates");
+    expect(engine.passStatus.files).toContainEqual({ fileId: "untracked", path: "notes/a.md" });
+
+    held.release();
+    await run;
+    expect(engine.passStatus).toEqual({ stage: "idle", files: [] });
+  });
+
+  it("reports the index stage while the index read is waiting", async () => {
+    const { engine, api } = await makeEngine();
+    let release!: () => void;
+    let reached!: () => void;
+    const waiting = new Promise<void>((resolve) => (reached = resolve));
+    api.getVaultSyncIndex = () => {
+      reached();
+      return new Promise((resolve) => {
+        release = () => resolve({ files: [] });
+      });
+    };
+
+    const run = engine.initialSync();
+    await waiting;
+    expect(engine.passStatus).toEqual({ stage: "index", files: [] });
+
+    release();
+    await run;
+    expect(engine.passStatus).toEqual({ stage: "idle", files: [] });
+  });
+
   it("states each pushed version's history kind, from the plaintext path", async () => {
     // The server never sees a path, so the device classifies the file: markdown and
     // canvas are documents (the vault's deep limit), every other synced path an

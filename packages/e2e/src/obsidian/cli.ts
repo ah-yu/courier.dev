@@ -140,6 +140,8 @@ interface ExecFileFailure extends Error {
 export async function runObsidianCli(
   args: string[],
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  /** A short name for the operation, used in the timeout message. */
+  label?: string,
 ): Promise<CliResult> {
   // Checked before the try so a missing CLI is a clear, loud failure rather than
   // being folded into the per-command error shape.
@@ -158,6 +160,8 @@ export async function runObsidianCli(
       // its socket, so a request the app never answers stays pending past its timeout.
       // The suite then only escaped through Vitest's 300 s hook / 120 s case timeout —
       // the macOS CI hang. SIGKILL is the signal that actually ends it.
+      // execFile resolves on the pipes' 'close', so a grandchild that inherits stdout
+      // could still delay the rejection; the Obsidian CLI is one binary on macOS/Linux.
       killSignal: "SIGKILL",
       windowsHide: true,
       maxBuffer: 16 * 1024 * 1024,
@@ -168,15 +172,17 @@ export async function runObsidianCli(
     const failure = err as ExecFileFailure;
     // The `code=` payload is the body of one evaluation, not the command that was
     // stuck; naming the command is what makes a CI log point at the case.
-    const operation = args
-      .filter((arg) => !arg.startsWith("code="))
-      .join(" ")
-      .slice(0, 120);
+    const operation = (label ?? args.filter((arg) => !arg.startsWith("code=")).join(" ")).slice(
+      0,
+      120,
+    );
     return {
       status: typeof failure.code === "number" ? failure.code : -1,
       stdout: failure.stdout ?? "",
       stderr: failure.killed
-        ? `the Obsidian CLI did not answer within ${timeoutMs}ms (${operation})`
+        ? `the Obsidian CLI did not answer within ${timeoutMs}ms` +
+          (operation ? ` (${operation})` : "") +
+          (failure.stderr ? `: ${failure.stderr.trim()}` : "")
         : (failure.stderr ?? failure.message),
     };
   }
@@ -242,7 +248,13 @@ export function jsLiteral(value: string): string {
  * that budget, and a case that needs several steps should make several calls rather than
  * one big one.
  */
-export async function evalInVault<T>(vault: string, body: string, timeoutMs?: number): Promise<T> {
+export async function evalInVault<T>(
+  vault: string,
+  body: string,
+  timeoutMs?: number,
+  /** A short name for the operation, used in the timeout message. */
+  label?: string,
+): Promise<T> {
   const code =
     `(async()=>{${body}})().then(` +
     `r=>'OK:'+JSON.stringify(r===undefined?null:r),` +
@@ -251,6 +263,7 @@ export async function evalInVault<T>(vault: string, body: string, timeoutMs?: nu
   const { status, stdout, stderr } = await runObsidianCli(
     [`vault=${vault}`, "eval", `code=${code}`],
     timeoutMs,
+    label,
   );
   const payload = unwrapEvalPayload(stdout);
 

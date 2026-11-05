@@ -313,7 +313,7 @@ async function engineInternals(vault: string): Promise<string> {
     return {
       ws: host.ws ? host.ws.getState() : null,
       initialized: engine.initialized,
-      pass: engine.passStatus,
+      pass: engine.passStatus ?? "missing",
       states: Object.values(engine.state).map((e) => e.plainPath + '@' + String(e.lastKnownVersionId).slice(0, 8)),
       selfWrites: keysOf(engine.selfEvents && engine.selfEvents.selfWrites).filter((p) => p.includes('courier-e2e')),
       inFlight: keysOf(engine.inFlightPaths),
@@ -399,47 +399,81 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
    * socket + `executeJavaScript` round trip, and teardown used to make one call for
    * the listing, one per probe file and one per folder; losing any one of them left
    * the hook waiting on a CLI that never answered. The whole wipe is a single
-   * idempotent evaluation now, and the probe folder goes through the data adapter
-   * recursively (`removeFolderInVault`'s call) instead of walking `getAllFolders`.
+   * idempotent evaluation now. It walks every indexed file, so attachment and canvas
+   * probes go too (the old listing was markdown-only), and it removes the probe folders
+   * one by one, non-recursively: a cleanup whose response was lost may still be running
+   * after its caller gave up, and it must not delete a later test's files.
    *
    * Best-effort, like the per-step handling it replaces: a probe that cannot be
    * deleted must not abandon the rest or poison a later case. The file loop and the
    * folder removal each catch their own failure; what cannot be removed is reported.
+   * One lost response now loses the whole wipe (rather than only the file being deleted
+   * at that moment); that is the trade for not making a hundred independent calls that
+   * can each lose one, and the outer catch reports it.
    */
   async function cleanProbes(vault: string): Promise<void> {
     try {
-      const result = await evalInVault<{ removed: number; folder: boolean; left: string[] }>(
+      const result = await evalInVault<{
+        removed: number;
+        folders: number;
+        left: string[];
+        folderError: string | null;
+      }>(
         vault,
         `
         const prefix = ${jsLiteral(PROBE_PREFIX)};
-        const left = [];
+        const failed = [];
         let removed = 0;
-        for (const file of app.vault.getFiles()) {
-          if (!(file.path.startsWith(prefix) || file.path.includes('/' + prefix))) continue;
+        for (const candidate of app.vault.getFiles()) {
+          if (!(candidate.path.startsWith(prefix) || candidate.path.includes('/' + prefix))) continue;
+          // Re-resolve before deleting: a cleanup whose response was lost can resume
+          // after the next test has re-created this path, and the stale TFile would
+          // otherwise delete the new file.
+          const file = app.vault.getAbstractFileByPath(candidate.path);
+          if (!file || file !== candidate) continue;
           try {
             await app.vault.delete(file);
             removed++;
           } catch (err) {
-            if (await app.vault.adapter.exists(file.path)) left.push(file.path);
+            if (await app.vault.adapter.exists(candidate.path)) failed.push(candidate.path);
           }
         }
         const root = ${jsLiteral(PROBE_DIR)};
-        let folder = false;
-        if (await app.vault.adapter.exists(root)) {
+        let folders = 0;
+        let folderError = null;
+        const probeFolders = app.vault.getAllFolders()
+          .map((folder) => folder.path)
+          .filter((path) => path === root || path.startsWith(root + '/'))
+          .sort((a, b) => b.split('/').length - a.split('/').length);
+        for (const path of probeFolders) {
           try {
-            await app.vault.adapter.rmdir(root, true);
-            folder = true;
+            if (!(await app.vault.adapter.exists(path))) continue;
+            // Only an empty folder is removed. Obsidian's adapter.rmdir has no
+            // non-recursive mode (fs.rm without recursive refuses a directory), and a
+            // recursive call could delete files a later test created after an abandoned
+            // cleanup resumed. The emptiness check is what keeps that safe.
+            const listed = await app.vault.adapter.list(path);
+            if (listed.files.length > 0 || listed.folders.length > 0) continue;
+            await app.vault.adapter.rmdir(path, true);
+            folders++;
           } catch (err) {
-            if (await app.vault.adapter.exists(root)) throw err;
+            if (await app.vault.adapter.exists(path)) {
+              folderError = err && err.message ? err.message : String(err);
+            }
           }
         }
-        return { removed, folder, left };
+        const left = [];
+        for (const path of failed) if (await app.vault.adapter.exists(path)) left.push(path);
+        return { removed, folders, left, folderError };
         `,
         90_000,
+        "probe cleanup",
       );
-      if (result.left.length > 0) {
+      if (result.left.length > 0 || result.folderError !== null) {
         console.warn(
-          `[obsidian-e2e] probe cleanup in ${vault} left ${result.left.length} file(s): ${result.left.join(", ")}`,
+          `[obsidian-e2e] probe cleanup in ${vault} left ${result.left.length} file(s)` +
+            (result.folderError ? `; folder: ${result.folderError}` : "") +
+            (result.left.length > 0 ? `: ${result.left.join(", ")}` : ""),
         );
       }
     } catch (err) {
@@ -2439,7 +2473,7 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
      * hardening against). The files belong to the suite; the app's settings pass reads
      * the folder from disk anyway, so a removal and an adapter removal are equivalent.
      */
-    async function clearGroupProbes(vault: string): Promise<void> {
+    function clearGroupProbes(vault: string): void {
       const root = vaultPathOf(vault);
       for (const { path } of PROBE_GROUPS) {
         rmSync(join(root, path), { force: true });
@@ -2456,14 +2490,18 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
     /** Drop every snippets probe file the suite may have left, without a CLI call. */
     function clearSnippetProbes(vault: string): void {
       const snippets = join(vaultPathOf(vault), ".obsidian", "snippets");
+      const probeNames = new Set([
+        probe.slice(probe.lastIndexOf("/") + 1),
+        ...PROBE_GROUPS.map((group) => group.path)
+          .filter((path) => path.startsWith(".obsidian/snippets/"))
+          .map((path) => path.slice(path.lastIndexOf("/") + 1)),
+      ]);
       try {
         for (const entry of readdirSync(snippets)) {
-          if (entry.includes("courier-e2e-probe")) {
-            rmSync(join(snippets, entry), { recursive: true, force: true });
-          }
+          if (probeNames.has(entry)) rmSync(join(snippets, entry), { force: true });
         }
-      } catch {
-        // No snippets folder: nothing to clear.
+      } catch (err) {
+        if ((err as { code?: string }).code !== "ENOENT") throw err;
       }
     }
 
@@ -2482,7 +2520,7 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
         [names.b, "obsidian-B"],
       ] as const) {
         clearSnippetProbes(name);
-        await clearGroupProbes(name);
+        clearGroupProbes(name);
         await configurePluginHost(name, { ...setup, deviceName });
       }
     }
@@ -2547,8 +2585,12 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
             `${group}: vault B never materialised the peer's probe`,
           );
         } finally {
-          await clearGroupProbes(names.a).catch(() => undefined);
-          await clearGroupProbes(names.b).catch(() => undefined);
+          try {
+            clearGroupProbes(names.a);
+          } catch {}
+          try {
+            clearGroupProbes(names.b);
+          } catch {}
           await resetSettingsSync();
         }
       },

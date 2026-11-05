@@ -242,6 +242,11 @@ export class EngineHost {
     return this.host?.binding ?? false;
   }
 
+  /** True while the inner host is inside its own full reconcile. */
+  get reconciling(): boolean {
+    return this.host?.reconcileInProgress ?? false;
+  }
+
   /**
    * True only for a vault this device has never synced (see `SyncHost.firstSync`).
    *

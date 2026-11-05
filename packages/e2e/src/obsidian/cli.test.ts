@@ -92,6 +92,8 @@ describe("unwrapEvalPayload", () => {
  * hook timeout — the hang that took the L3 job down. A shell that traps TERM stands in
  * for it; only SIGKILL can end that one.
  */
+// POSIX only: the fake CLI needs a shell that can trap TERM. Windows maps SIGKILL to
+// TerminateProcess; the Windows L3 job exercises that path end to end.
 const itPosix = process.platform === "win32" ? it.skip : it;
 
 describe("runObsidianCli timeout", () => {
@@ -103,7 +105,7 @@ describe("runObsidianCli timeout", () => {
       const pidFile = join(dir, "pid");
       await writeFile(
         cli,
-        "#!/bin/sh\ntrap '' TERM\necho $$ > \"$FAKE_CLI_PID_FILE\"\nwhile :; do sleep 1; done\n",
+        '#!/bin/sh\ntrap \'\' TERM\necho $$ > "$FAKE_CLI_PID_FILE"\ni=0\nwhile [ "$i" -lt 30 ]; do sleep 1; i=$((i + 1)); done\n',
       );
       await chmod(cli, 0o755);
       const previousCli = process.env.COURIER_OBSIDIAN_CLI;
@@ -116,12 +118,20 @@ describe("runObsidianCli timeout", () => {
       try {
         const { runObsidianCli } = await import("./cli");
         const started = Date.now();
-        const result = await runObsidianCli(["version"], 1_000);
+        const result = await runObsidianCli(["version"], 2_000);
         expect(result.status).toBe(-1);
-        expect(result.stderr).toContain("did not answer within 1000ms");
+        expect(result.stderr).toContain("did not answer within 2000ms");
+        expect(result.stderr).toContain("version");
         expect(Date.now() - started).toBeLessThan(10_000);
 
-        const pid = Number((await readFile(pidFile, "utf8")).trim());
+        let pid = 0;
+        for (let attempt = 0; attempt < 40 && pid === 0; attempt++) {
+          try {
+            pid = Number((await readFile(pidFile, "utf8")).trim());
+          } catch {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+        }
         expect(pid).toBeGreaterThan(0);
         let alive = true;
         for (let attempt = 0; attempt < 20; attempt++) {
