@@ -65,8 +65,10 @@ runs:
         # uses can miss it. Registering it is what the Finder's first launch does.
         lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
         "$lsregister" -f /Applications/Obsidian.app
+        # The bundle, not the binary inside it: `open -a` takes an application, and the
+        # harness's `pgrep -f` still matches the running app by that prefix.
         {
-          echo "COURIER_OBSIDIAN_APP=/Applications/Obsidian.app/Contents/MacOS/Obsidian"
+          echo "COURIER_OBSIDIAN_APP=/Applications/Obsidian.app"
           echo "COURIER_OBSIDIAN_CLI=/usr/local/bin/obsidian"
         } >> "$GITHUB_ENV"
         echo "Obsidian ${OBSIDIAN_VERSION} (pinned) at /Applications/Obsidian.app"

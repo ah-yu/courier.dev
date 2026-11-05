@@ -99,7 +99,11 @@ export function obsidianLaunchCommand({
     // `COURIER_OBSIDIAN_APP` wins when the harness has one.
     return {
       command: "open",
-      args: ["-a", appPath ?? "Obsidian", ...(flags.length > 0 ? ["--args", ...flags] : [])],
+      args: [
+        "-a",
+        appPath ? appBundlePath(appPath) : "Obsidian",
+        ...(flags.length > 0 ? ["--args", ...flags] : []),
+      ],
     };
   }
   if (uri && !appPath) return { command: "xdg-open", args: [uri] };
@@ -107,6 +111,20 @@ export function obsidianLaunchCommand({
     command: appPath ?? "obsidian",
     args: [...flags, ...(uri ? [uri] : [])],
   };
+}
+
+/**
+ * The application bundle a macOS `open -a` expects.
+ *
+ * `COURIER_OBSIDIAN_APP` names the app *binary* on Linux and Windows. On macOS `open -a`
+ * wants the bundle instead, and a developer (or an older CI action) may still point the
+ * variable at `Obsidian.app/Contents/MacOS/Obsidian` — a path `open -a` does not take.
+ * Strip back to the `.app` when the path is inside one; anything else passes through.
+ */
+export function appBundlePath(path: string): string {
+  const marker = ".app/Contents/MacOS/";
+  const index = path.indexOf(marker);
+  return index === -1 ? path : path.slice(0, index + ".app".length);
 }
 
 export interface LayoutGateOptions {

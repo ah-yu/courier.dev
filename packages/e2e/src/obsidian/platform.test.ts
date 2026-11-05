@@ -77,10 +77,35 @@ describe("obsidianLaunchCommand", () => {
 
   it("opens the macOS app by path when the harness has one", () => {
     // A bundle copied into /Applications is not in LaunchServices until something
-    // registers it, so the name form can miss it on a runner; the path form cannot.
+    // registers it (`lsregister`, which `.github/actions/obsidian-macos` runs), so the
+    // name form can miss it on a runner; the path form cannot.
     expect(
       obsidianLaunchCommand({ platform: "darwin", appPath: "/Applications/Obsidian.app" }),
     ).toEqual({ command: "open", args: ["-a", "/Applications/Obsidian.app"] });
+  });
+
+  it("asks for the macOS bundle when the harness names the app binary", () => {
+    // `COURIER_OBSIDIAN_APP` is the binary on Linux and Windows, and `open -a` does not
+    // take `Contents/MacOS/Obsidian`; the launch has to ask for the enclosing bundle.
+    expect(
+      obsidianLaunchCommand({
+        platform: "darwin",
+        appPath: "/Applications/Obsidian.app/Contents/MacOS/Obsidian",
+      }),
+    ).toEqual({ command: "open", args: ["-a", "/Applications/Obsidian.app"] });
+  });
+
+  it("forwards macOS flags after --args when it launches by path", () => {
+    expect(
+      obsidianLaunchCommand({
+        platform: "darwin",
+        appPath: "/Applications/Obsidian.app/Contents/MacOS/Obsidian",
+        flags: ["--no-sandbox"],
+      }),
+    ).toEqual({
+      command: "open",
+      args: ["-a", "/Applications/Obsidian.app", "--args", "--no-sandbox"],
+    });
   });
 
   it("opens a macOS URI with open", () => {
