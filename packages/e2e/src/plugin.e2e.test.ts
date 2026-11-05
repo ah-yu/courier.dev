@@ -50,6 +50,7 @@ import { getSyncLog } from "../../plugin/src/shared/sync-log";
 import { t } from "../../plugin/src/i18n";
 import { MAX_HISTORY_LIMIT } from "../../shared/src/index";
 import { PasswordPromptModal } from "../../plugin/src/ui/dialogs/password-prompt-modal";
+import { SetupConnectionModal } from "../../plugin/src/ui/dialogs/setup-connection-modal";
 import {
   VaultPickerModal,
   type VaultPickerHost,
@@ -502,6 +503,18 @@ function setupFields(modal: Modal): {
   const texts = modalTexts(modal);
   expect(texts.length, "the setup dialog should offer a password and a device name").toBe(2);
   return { password: texts[0]!, deviceName: texts[1]! };
+}
+
+/**
+ * The error slot under the setup dialog's password input.
+ *
+ * It lives inside the row rather than on the dialog's content element, and the stub keeps a
+ * `Setting`'s own `settingEl` out of the content tree (the real app appends it) — so this
+ * reads through the row, the way the input itself is reached.
+ */
+function setupPasswordError(modal: Modal): FakeEl | undefined {
+  const row = settingsIn(modal.contentEl).find((setting) => setting.name === "库密码");
+  return row ? elementsWithClass(row.settingEl, "courier-setup-field-error")[0] : undefined;
 }
 
 /** Press the tree's 完成. */
@@ -1191,9 +1204,23 @@ describe("plugin e2e — the real plugin against a real server", () => {
     clickStartSyncing(modal!);
 
     await waitFor(
-      () => allText(modal!.contentEl).some((text) => text.includes("库密码不正确")),
-      "the wrong password was never reported",
+      () => setupPasswordError(modal!)?.text.includes("库密码不正确") === true,
+      "the wrong password was never reported under its field",
     );
+    // The refusal belongs to the password input, not to the form-level slot above the
+    // footer: on a phone that slot is below the fold and the sticky footer covers it.
+    const passwordError = setupPasswordError(modal!)!;
+    expect(passwordError.classes).toContain("is-visible");
+    const formError = elementsWithClass(modal!.contentEl, "courier-setup-error")[0]!;
+    expect(
+      formError.classes,
+      "the form-level slot should stay empty when one field explains the failure",
+    ).not.toContain("is-visible");
+
+    // Typing a new value drops the sentence: it described the password that was refused.
+    modalTexts(modal!).at(0)!.simulateChange("a second try");
+    expect(setupPasswordError(modal!)?.classes ?? []).not.toContain("is-visible");
+
     // The failure is reported where it happened: the setup dialog stays open with the
     // fields intact, the picker stays behind it, nothing was bound, no key was kept on
     // this device, and the vault was not marked as configured.
@@ -1204,6 +1231,78 @@ describe("plugin e2e — the real plugin against a real server", () => {
     expect(plugin.settings.vaultConnections).toEqual({});
     expect(plugin.host).toBeNull();
     expect(loadLocalStorage(VAULT_CREDENTIAL_KEY)).toBeNull();
+  });
+
+  it("scrolls a form-level setup failure clear of the sticky footer", async () => {
+    // The setup dialog is taller than a phone's sheet, so its slot above the footer can
+    // land under that footer. The dialog measures the visible band and scrolls itself;
+    // the stub's fake rects make that branch observable without a browser layout.
+    new SetupConnectionModal(createFakeApp(new FakeVault()) as unknown as App, {
+      vaultName: "daily",
+      deviceName: "phone",
+      excludedFolders: [],
+      configured: true,
+      onSubmit: async () => ({ ok: false, error: "无法连接服务器。" }),
+      onConnected: () => {},
+    }).open();
+    // Through `lastOpenedModal`, like every other dialog test: that is the stub's `Modal`
+    // (the class above is typed against the app's own `Modal`).
+    const modal = lastOpenedModal()!;
+
+    const body = elementsWithClass(modal.contentEl, "courier-setup-body")[0]!;
+    const footer = elementsWithClass(modal.contentEl, "courier-setup-footer")[0]!;
+    const error = elementsWithClass(modal.contentEl, "courier-setup-error")[0]!;
+    // A body scrolled to a position where the footer (sticky at 480) covers the error.
+    body.rect = { left: 0, top: 100, width: 300, height: 500 };
+    footer.rect = { left: 0, top: 480, width: 300, height: 80 };
+    error.rect = { left: 10, top: 500, width: 280, height: 40 };
+
+    setupFields(modal).password.simulateChange("wrong");
+    clickStartSyncing(modal);
+
+    await waitFor(
+      () => error.classes.includes("is-visible"),
+      "the form-level failure never appeared",
+    );
+    // 540 (error bottom) + 14 (margin) − 480 (footer top) = 74.
+    expect(body.scrollTop).toBe(74);
+    expect(setupPasswordError(modal)?.classes ?? []).not.toContain("is-visible");
+    modal.close();
+  });
+
+  it("drops a refusal for a password typed while the check was in flight", async () => {
+    // The answer is about the value that was submitted. If the user has already typed a
+    // new one, the sentence must not attach itself to that new value.
+    let finish!: (outcome: { ok: false; error: string; field: "password" }) => void;
+    new SetupConnectionModal(createFakeApp(new FakeVault()) as unknown as App, {
+      vaultName: "daily",
+      deviceName: "phone",
+      excludedFolders: [],
+      configured: true,
+      onSubmit: () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+      onConnected: () => {},
+    }).open();
+    const modal = lastOpenedModal()!;
+    const password = setupFields(modal).password;
+
+    password.simulateChange("first try");
+    clickStartSyncing(modal);
+    // The check is parked on the promise above; a new value arrives before it answers.
+    password.simulateChange("second try");
+    finish({ ok: false, error: "库密码不正确。", field: "password" });
+
+    const start = () =>
+      elementsWithClass(modal.contentEl, "courier-setup-start")[0] as unknown as {
+        disabled: boolean;
+      };
+    await waitFor(() => !start().disabled, "the dialog never finished the connect attempt");
+
+    expect(setupPasswordError(modal)?.classes ?? []).not.toContain("is-visible");
+    expect(modal.isOpen, "the dialog stays open after a failed attempt").toBe(true);
+    modal.close();
   });
 
   /**
@@ -1241,6 +1340,25 @@ describe("plugin e2e — the real plugin against a real server", () => {
       checkbox.checked = checked;
       for (const listener of checkbox.listeners.change ?? []) listener({});
     }
+
+    it("asks for the password under the password field", async () => {
+      const remote = await createTestVault(server, "Setup No Password", material);
+      const { plugin } = await loadPlugin({
+        vault: new FakeVault(),
+        settings: { serverUrl: server.serverUrl, userKey: server.userKey },
+      });
+
+      const { setup } = await openSetup(plugin, remote.name);
+      clickStartSyncing(setup);
+
+      expect(setupPasswordError(setup)?.text).toContain("请输入库密码");
+      expect(setupPasswordError(setup)?.classes).toContain("is-visible");
+      expect(
+        elementsWithClass(setup.contentEl, "courier-setup-error")[0]!.classes,
+        "the form-level slot stays out of a field failure",
+      ).not.toContain("is-visible");
+      expect(setup.isOpen, "an empty password is not a reason to close the dialog").toBe(true);
+    });
 
     it("configures the first connection and applies its folder exclusions to the bind", async () => {
       const remote = await createTestVault(server, "Setup First", material);
