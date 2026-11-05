@@ -2778,8 +2778,8 @@ export async function readNotices(vault: string): Promise<string[]> {
  * One evaluation in the normal case: if the host is already inside its own pass the
  * evaluation answers `busy` at once and the caller waits, so a forced pass does not
  * start over the host's. Forced passes are serialized against each other through a
- * per-host entry on `window`; an entry older than the CLI timeout is abandoned instead
- * of chaining every later test onto a pass that will never settle.
+ * per-host entry on `window`; an entry older than 20 s is abandoned instead of
+ * chaining every later test onto a pass that will never settle.
  *
  * This is not a lock shared with the host loop: a periodic, reconnect or bind-retry
  * pass can still start between the check and the forced pass. The wait only removes the

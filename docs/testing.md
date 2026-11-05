@@ -272,7 +272,7 @@ timed-out call with SIGKILL, so it fails at its per-call timeout — 60 s for mo
 probe cleanup, 180 s for a vault reset — naming the operation. Probe cleanup is one idempotent evaluation
 per vault instead of a listing plus one call per probe file and folder. A forced reconcile is also
 one evaluation in the normal case: it waits while the host reports its own reconcile, then chains
-forced passes to each other through a per-host entry and abandons an entry older than 60 s. That is
+forced passes to each other through a per-host entry and abandons an entry older than 20 s. That is
 not a lock shared with the host loop: a periodic, reconnect or bind-retry pass can still start
 concurrently. The app-side lost answer is still open, so `workflow_dispatch` runs the job and pull
 requests do not — a known-flaky run must not redden an unrelated change. Remove the `if` once the
