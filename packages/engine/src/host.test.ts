@@ -257,6 +257,23 @@ describe("SyncHost", () => {
     expect(settings.json).not.toBeNull();
   });
 
+  it("reports a reconcile in progress while the bind is waiting on the index", async () => {
+    const { host, api } = await newHost({ stateStore: store(null, true) });
+    track(host);
+    let release!: () => void;
+    api.getVaultSyncIndex.mockImplementationOnce(
+      () => new Promise((resolve) => (release = () => resolve({ files: [] }))),
+    );
+
+    const started = host.start();
+    await untilIndexRead(api);
+    expect(host.reconcileInProgress).toBe(true);
+
+    release();
+    await started;
+    expect(host.reconcileInProgress).toBe(false);
+  });
+
   /**
    * The server keeps no backlog: `subscribe` is answered with a session id and
    * nothing else, so every `file_pushed` sent while the socket was down is gone.

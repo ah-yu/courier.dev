@@ -14,14 +14,13 @@ import {
   sortedCopy,
   type CreateVaultResponse,
   type HistoryLimits,
-  type HttpTransport,
   type UserSummary,
 } from "@courier/shared";
 import { resolveObsidianLocale, setLocale, t } from "./i18n";
 import { pluginPlatform } from "./platform";
 import { getServerUrl, getWsUrl, type PluginActions } from "./shared/api";
 import { createPluginActions } from "./shared/actions";
-import { exactBuffer } from "./shared/bytes";
+import { createObsidianTransport } from "./shared/transport";
 import {
   DEFAULT_SETTINGS,
   connectionSettingsForVault,
@@ -126,65 +125,7 @@ import type { ReplaceTarget } from "./shared/conflict-replace";
 // which imports nothing from Obsidian and is therefore unit-tested directly.
 // ══════════════════════════════════
 
-/**
- * The transport every plugin request goes through.
- *
- * `requestUrl` is Obsidian's own HTTP stack (Electron's `net`), so this is the
- * only host-specific part of the plugin's networking: URLs, auth headers, the
- * session-id header and error mapping all belong to the shared client.
- *
- * Its response is handed on **lazily**, because Obsidian's `RequestUrlResponse` reads
- * its body on demand and `json` is a getter that throws when the body is not JSON. The
- * version-content route answers raw ciphertext, so reading `.json` eagerly here made
- * every download fail — as a `SyntaxError` the shared client could only report as
- * "cannot reach the server" — while pushes (JSON responses) kept working. Nothing
- * surfaced it either: a pass tolerates a pull that could not be carried out, and the
- * next one retries into the same failure. `json` therefore answers `null` for a body
- * that is not JSON, which is what `TransportResponse` documents.
- */
-const obsidianTransport: HttpTransport = async (request) => {
-  const { "Content-Type": contentType, ...headers } = request.headers;
-  const body = request.body;
-  const response = await requestUrl({
-    url: request.url,
-    method: request.method,
-    headers,
-    ...(contentType === undefined ? {} : { contentType }),
-    ...(body === undefined
-      ? {}
-      : {
-          body:
-            typeof body === "string" ? body : body instanceof Uint8Array ? exactBuffer(body) : body,
-        }),
-    // The shared client reads the status and maps the error body itself.
-    // Obsidian's `requestUrl` rejects on 4xx/5xx by default (`throw: true`),
-    // which hid every structured error from the settings page: an expired key
-    // and a stopped server both surfaced as "cannot reach the server".
-    throw: false,
-  });
-  return {
-    status: response.status,
-    // `requestUrl` already lower-cases its header names; the shared client reads
-    // `retry-after` to know how long a 429 asked it to wait.
-    headers: response.headers,
-    get text() {
-      return response.text;
-    },
-    get json(): unknown {
-      try {
-        // `RequestUrlResponse.json` is `any`; the shared client narrows what it needs, and
-        // answering `unknown` is what keeps the unsafe value from travelling further.
-        return response.json as unknown;
-      } catch {
-        // Not JSON: binary content, an empty body, a proxy's HTML error page.
-        return null;
-      }
-    },
-    get arrayBuffer() {
-      return response.arrayBuffer;
-    },
-  };
-};
+const obsidianTransport = createObsidianTransport(requestUrl);
 
 /**
  * Wire the plugin's network actions.

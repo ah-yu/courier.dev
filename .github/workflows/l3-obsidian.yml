@@ -159,10 +159,16 @@ jobs:
   # that reads a real menu (`itMenu`) skips itself here — everything else runs.
   #
   # Manual only for now, not a gate: the suite has passed here (3m07s, 96 passed, 6
-  # skipped) and it has also hung on cases that wait for a vault state (a 300 s hook
-  # timeout, then 120 s per case) on the same commit. That needs a Mac to diagnose, not
-  # another CI run, so `workflow_dispatch` runs it and pull requests do not — a known-flaky
-  # run must not redden an unrelated change. Drop the `if` once the hang is understood.
+  # skipped) and it has also hung on one CLI `eval` that never returned (a 300 s hook
+  # timeout, then 120 s per case) on the same commit. A local reproduction traced most
+  # stalls to the app's own vault/CLI layer — `vault.create`, `vault.delete`, a config
+  # adapter call — while the app stayed responsive; one `engine.initialSync` stall has not
+  # been reproduced with the pass tracer, and the plugin's request path is now bounded
+  # separately. `runObsidianCli` now SIGKILLs a timed-out call (the CLI ignores SIGTERM),
+  # so such a run fails at its per-call timeout naming the operation instead of wedging,
+  # but the app-side loss is still open: `workflow_dispatch` runs it and pull requests do
+  # not, so a known-flaky run cannot redden an unrelated change. Drop the `if` once it is
+  # fixed.
   #
   # GitHub's macOS arm64 pool is also capacity-constrained: a run can sit queued until the
   # runner is never acquired, and the job is then cancelled ("not acquired by Runner of
