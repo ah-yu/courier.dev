@@ -23,6 +23,7 @@ import {
 } from "../../../engine/src/index";
 import type { TestServer } from "./server";
 import { conflictCopyOf } from "./conflict";
+import { assertClientConsistent } from "./consistency";
 import type { SyncApi, PushFile, SyncActivityEvent } from "../../../engine/src/index";
 import type {
   SyncPushResponse,
@@ -377,6 +378,8 @@ export class TestClient {
   /** Full reconcile — what a fresh start / reconnect does. */
   async sync(): Promise<void> {
     await this.engine.initialSync();
+    await this.engine.whenIdle();
+    await assertClientConsistent(this);
   }
 
   /**
@@ -389,10 +392,14 @@ export class TestClient {
    */
   async bind(options: { priorityPaths?: readonly string[] } = {}): Promise<void> {
     await this.engine.initialSync({ firstBind: true, priorityPaths: options.priorityPaths });
+    await this.engine.whenIdle();
+    await assertClientConsistent(this);
   }
 
   async change(path: string): Promise<void> {
     await this.engine.handleLocalChange(path);
+    await this.engine.whenIdle();
+    await assertClientConsistent(this);
   }
 
   /**
@@ -401,14 +408,20 @@ export class TestClient {
    */
   async syncSettings(): Promise<void> {
     await this.engine.syncLocalSettings();
+    await this.engine.whenIdle();
+    await assertClientConsistent(this);
   }
 
   async rename(from: string, to: string): Promise<void> {
     await this.engine.handleLocalRename(from, to);
+    await this.engine.whenIdle();
+    await assertClientConsistent(this);
   }
 
   async removeAndSync(path: string): Promise<void> {
     await this.engine.handleLocalDelete(path);
+    await this.engine.whenIdle();
+    await assertClientConsistent(this);
   }
 
   /** Simulate the remote-change WebSocket notification. */

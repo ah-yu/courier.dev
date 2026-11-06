@@ -184,6 +184,15 @@ export interface EngineOptions {
    * listener that throws is logged and does not stop the sync that reported it.
    */
   onSyncActivity?: (event: SyncActivityEvent) => void;
+  /**
+   * Called when a job queued behind one of the engine's own writes fails.
+   *
+   * The host that fired the event gets a resolved promise — waiting there would wait for
+   * the write that is waiting for the handler — so this is where the failure surfaces.
+   * Without it a deferred push/pull failure would only reach the console, which
+   * invariant 5 forbids.
+   */
+  onError?: (error: unknown) => void;
   /** Called whenever synced state changes so hosts can persist it. */
   onSaveState?: (json: string) => void;
   /**
@@ -1027,7 +1036,8 @@ export class SyncEngine {
     const running = this.paths.run(paths, run, "event");
     if (deferred) {
       void running.catch((err: unknown) => {
-        console.error("Courier: a local event failed:", err);
+        if (this.opts.onError) this.opts.onError(err);
+        else console.error("Courier: a local event failed:", err);
       });
       return Promise.resolve();
     }

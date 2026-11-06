@@ -1,0 +1,11 @@
+﻿feat(engine): surface deferred event failures and assert client consistency
+
+- `SyncEngine` gains `onError`: a job queued behind the engine's own write is
+  reported there instead of only to the console, so a failed push/pull from a
+  deferred event stays visible (invariant 5). `SyncHost` routes it through its
+  own failure path (log, and stop on an auth failure).
+- The L1 `TestClient` asserts the settled-client invariants after every
+  successful sync/bind/change/rename/removeAndSync/settings pass: the chain
+  that owns a path holds the bytes the state records, and a tombstone owns no
+  file. The check (`harness/consistency.ts`) fails the case that caused the
+  divergence instead of a later assertion.
