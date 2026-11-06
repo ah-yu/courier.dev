@@ -6151,25 +6151,6 @@ describe("SyncEngine — operation interleavings", () => {
     expect(api.chains.get(fileId)!.map((v) => v.action)).toEqual(["create", "modify", "delete"]);
   });
 
-  it("binds with the merge rule when an event arrives before the first sync", async () => {
-    const first = await makeEngine();
-    first.adapter.files.set("gone.md", encoder.encode("mine"));
-    await first.engine.initialSync();
-    const fileId = first.engine.fileIdForPath("gone.md")!;
-    await first.api.remoteDelete(fileId);
-
-    // A fresh engine over the same vault: the note is still on disk, the server's head is
-    // a tombstone. An event that binds must merge (the local copy is the user's own), not
-    // apply the deletion — the difference between a bind pass and an ordinary one.
-    const second = engineOver(first.adapter, first.api, first.key);
-    await second.handleLocalChange("gone.md");
-    await second.whenIdle();
-
-    expect(first.adapter.files.get("gone.md")).toBeDefined();
-    const newId = second.fileIdForPath("gone.md")!;
-    expect(newId).not.toBe(fileId);
-    expect(first.api.chains.get(newId)!.map((v) => v.action)).toEqual(["create"]);
-  });
   it("binds the vault before a rename that arrives before the first sync", async () => {
     const { engine, adapter, api } = await makeEngine();
     const oldPath = "note-2026-01-01-000000.conflict.md";

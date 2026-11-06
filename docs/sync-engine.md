@@ -145,7 +145,7 @@ The rules below are the ones the e2e suites exist to protect.
     pushed as a **new file with a new fileId**, and the tombstone is left out of the comparison entirely
     (its state entry is dropped). This is what stops "connect this vault" from deleting notes the remote
     had already deleted.
-  - **`apply-remote-delete`** — everything else (scheduled reconciles and websocket notifications). The
+  - **`apply-remote-delete`** — everything else (scheduled reconciles, user edits after the first pass has completed, and websocket notifications). The
     local copy is the version the tombstone removed, so the deletion **is applied**
     and peers' deletions keep propagating; if the local content diverged from that previous version the
     two are out of step and the engine resolves a **conflict** — the remote deletion stands and the local

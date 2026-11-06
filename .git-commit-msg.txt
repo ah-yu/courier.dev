@@ -1,0 +1,15 @@
+fix(engine): make the pass single-flight and the idle drain sound
+
+- Every `initialSync` call now shares one in-flight pass (`passPromise`): a
+  plain call joins a running bind, and a bind requested while a plain pass
+  runs waits for it and then binds. A second pass can no longer overwrite
+  `firstBind`/`tombstoneMerge`, the remote index or the create batch of the
+  pass already running.
+- `SyncHost.whenIdle()` re-checks the counters after its final drain and
+  removes only the engines it watched; a `stop()` that lands during the
+  drain leaves its engine for the next loop instead of being cleared.
+- Tests: the L1 bind-merge case now loads the persisted state and asserts
+  it names the tombstoned chain, and a companion case shows a plain pass
+  applying the same tombstone, so the pair pins the bind merge rule; the
+  vacuous L0 twin is removed.
+- Docs: `apply-remote-delete` keeps "user edits after the first pass".

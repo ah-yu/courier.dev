@@ -578,8 +578,8 @@ export class SyncEngine {
   private tombstoneMerge: TombstoneHandling = "apply-remote-delete";
   /** True during the single pass that binds the vault (see {@link initialSync}). */
   private firstBind = false;
-  /** The first bind in flight, shared by every event that arrives before it settles. */
-  private bindPromise: Promise<void> | null = null;
+  /** The pass in flight, shared by every call that arrives while it runs. */
+  private passPromise: Promise<void> | null = null;
   private initialized = false;
   /** Paths reported through `onFileTooLarge` in the current pass (one event each). */
   private tooLargeReported = new Set<string>();
@@ -1582,23 +1582,21 @@ export class SyncEngine {
       priorityPaths?: readonly string[];
     } = {},
   ): Promise<void> {
-    // Before the first successful pass every call is the bind, and there is exactly one
-    // of it: an event that arrives while the host's bind is in flight shares that pass
-    // instead of starting a second one, which would race `firstBind`/`tombstoneMerge`,
-    // the remote index and the create batch. The bind's merge rule is what keeps a
-    // connect from deleting notes the server already deleted.
-    // Any call made while a bind is in flight joins it: a plain `initialSync()` started
-    // by an e2e harness must not run a second reconcile that overwrites the bind's
-    // `firstBind`/`tombstoneMerge` fields mid-pass.
-    if (!this.initialized && this.bindPromise !== null) return await this.bindPromise;
-    if (!this.initialized && options.firstBind === true) {
-      const bind = this.runInitialSync(options);
-      this.bindPromise = bind.finally(() => {
-        this.bindPromise = null;
-      });
-      return await this.bindPromise;
+    // One pass at a time. A call while a pass is in flight joins it (a bind only joins a
+    // bind; a bind requested while a plain pass runs waits for it and then binds), so a
+    // second pass can never overwrite `firstBind`/`tombstoneMerge`, the remote index or
+    // the create batch of the pass already running. The bind's merge rule is what keeps
+    // a connect from deleting notes the server already deleted.
+    if (this.passPromise !== null) {
+      if (options.firstBind !== true) return await this.passPromise;
+      await this.passPromise;
     }
-    return await this.runInitialSync(options);
+    const run = this.runInitialSync(options);
+    const tracked = run.finally(() => {
+      if (this.passPromise === tracked) this.passPromise = null;
+    });
+    this.passPromise = tracked;
+    return await tracked;
   }
 
   /** The pass itself; `initialSync` owns the first-bind gate and the single flight. */

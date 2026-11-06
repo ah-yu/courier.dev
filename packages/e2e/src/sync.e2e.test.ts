@@ -786,7 +786,10 @@ describe("sync e2e — two clients through a real server", () => {
     // tombstone and the file is on disk. An event that arrives before the first sync
     // must bind (merge: the local copy is the user's own), not apply the deletion.
     const restarted = await newClient(vault.id, "device-a", a.dir);
-    restarted.engine.loadState(a.state.json ?? "{}");
+    const state = a.state.json;
+    expect(state, "the first client never persisted a state").toBeDefined();
+    restarted.engine.loadState(state!);
+    expect(restarted.engine.fileIdForPath("gone.md")).toBe(fileId);
     restarted.write("gone.md", "mine");
     await restarted.engine.handleLocalChange("gone.md");
     await restarted.engine.whenIdle();
@@ -795,6 +798,33 @@ describe("sync e2e — two clients through a real server", () => {
     const newId = restarted.engine.fileIdForPath("gone.md")!;
     expect(newId).not.toBe(fileId);
     expect((await fileVersions(server, vault.id, newId)).map((v) => v.action)).toEqual(["create"]);
+  });
+  it("applies the remote tombstone on a plain pass (the contrast to a bind)", async () => {
+    const vault = await newVault("plain-pass-tombstone");
+    const a = await newClient(vault.id, "device-a");
+    a.write("gone.md", "mine");
+    await a.sync();
+    const fileId = a.engine.fileIdForPath("gone.md")!;
+
+    const peer = await newClient(vault.id, "device-b");
+    await peer.sync();
+    peer.write("gone.md", "theirs");
+    await peer.change("gone.md");
+    peer.remove("gone.md");
+    await peer.removeAndSync("gone.md");
+
+    const restarted = await newClient(vault.id, "device-a", a.dir);
+    restarted.engine.loadState(a.state.json!);
+    await restarted.engine.initialSync();
+    await restarted.engine.whenIdle();
+
+    expect(restarted.read("gone.md")).toBeNull();
+    expect(restarted.engine.fileIdForPath("gone.md")).toBeNull();
+    expect((await fileVersions(server, vault.id, fileId)).map((v) => v.action)).toEqual([
+      "create",
+      "modify",
+      "delete",
+    ]);
   });
   /**
    * The race no client can see by looking harder: a device decides from a chain and

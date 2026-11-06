@@ -547,28 +547,39 @@ export class SyncHost {
     for (;;) {
       // Every engine this host stopped stays under watch for the whole loop: an
       // OpQueue job enqueued before `stop()` can still call into it, and the deferred
-      // job that follows is not counted by `background`. The set is cleared only on
-      // the return path, so no engine is forgotten while it still has work.
+      // job that follows is not counted by `background`.
       const engines =
         this.engineInstance !== null
           ? [...this.drainingEngines, this.engineInstance]
           : [...this.drainingEngines];
+      const draining = this.drainingEngines.size;
       for (const engine of engines) await engine.whenIdle();
       const idle =
         this.background === 0 &&
         !this.reconciling &&
         this.ops.running === 0 &&
         this.ops.queued === 0;
-      if (idle) {
-        // A deferred job can be queued by an OpQueue job that just finished; drain
-        // once more before the lease is released.
-        for (const engine of engines) await engine.whenIdle();
-        this.drainingEngines.clear();
+      if (!idle) {
+        await new Promise<void>((resolve) => {
+          this.platform.after(50, resolve);
+        });
+        continue;
+      }
+      // The counters are zero; drain once more in case an OpQueue job that finished
+      // while they were read queued a deferred engine job, then re-read both.
+      for (const engine of engines) await engine.whenIdle();
+      if (
+        this.background === 0 &&
+        !this.reconciling &&
+        this.ops.running === 0 &&
+        this.ops.queued === 0 &&
+        this.drainingEngines.size === draining
+      ) {
+        // Remove exactly the engines this pass watched: a `stop()` that ran during
+        // the drain added a new one, and the loop starts over for it.
+        for (const engine of engines) this.drainingEngines.delete(engine);
         return;
       }
-      await new Promise<void>((resolve) => {
-        this.platform.after(50, resolve);
-      });
     }
   }
 
