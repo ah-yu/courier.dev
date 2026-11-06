@@ -15,6 +15,7 @@ import { FsAdapter } from "../../../cli/src/fs-adapter";
 import { createCliSyncApi } from "../../../cli/src/api";
 import {
   SyncEngine,
+  isSyncablePath,
   normalizeScope,
   type FileTypeSync,
   type SettingsAppliedEvent,
@@ -202,6 +203,8 @@ export class TestClient {
     /** Label this client states on its pushes — a plain string, nothing registered. */
     readonly deviceName: string,
     readonly adapter: CountingFsAdapter,
+    /** The scope this client syncs (the engine's own predicate). */
+    readonly scope: SyncScope,
     readonly engine: SyncEngine,
     /** Shared with the engine's `onSaveState` — what a host would persist. */
     readonly state: { json: string | null },
@@ -211,6 +214,11 @@ export class TestClient {
     private readonly api: SwitchableApi,
     private readonly ownsDir: boolean,
   ) {}
+
+  /** Whether this client syncs `path` (the engine's own scope predicate). */
+  isSyncable(path: string): boolean {
+    return isSyncablePath(path, this.scope);
+  }
 
   /** Every push the engine made, with its file count and content bytes. */
   get pushCalls(): ReadonlyArray<{ files: number; contentBytes: number }> {
@@ -552,6 +560,7 @@ export async function createTestClient(options: CreateClientOptions): Promise<Te
     dir,
     deviceName,
     adapter,
+    scope,
     engine,
     // The same object the engine's `onSaveState` writes into.
     state,

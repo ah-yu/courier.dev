@@ -54,12 +54,15 @@ invisible from here.
 
 **Every `TestClient` helper asserts the settled-client invariants** after it returns
 (`src/harness/consistency.ts`, from `sync`/`bind`/`change`/`rename`/`removeAndSync`/`syncSettings`; `remotePushed` is not checked, because a notification may be delivered concurrently or from inside a write):
-for each chain that owns a path, the bytes on disk hash to the sync point the state records (a live
-empty file included), a tombstone owns no file, and no two live chains claim one path. Two
-consequences for test authors: a case that writes without reporting it must report it before the
-next helper call (the harness fails the case with "the state and the disk disagree"), and the check
-re-hashes every tracked file per helper call, so many unreported edits are cheaper as raw
-`client.write()` calls plus one `change()` than as many helper calls.
+for each chain that owns a path **and is inside this device's scope**, the bytes on disk hash to the
+sync point the state records, and no two live chains claim one path. Two exemptions: an entry whose
+path is out of scope is skipped (the engine deliberately leaves it alone), and an entry with the
+empty content hash is skipped because a tombstone and a live empty file cannot be told apart from the
+state alone — the L0 matrix has the chain action and checks both. Two consequences for test authors: a
+case that writes without reporting it must report it before the next helper call (the harness fails the
+case with "the state and the disk disagree"), and the check re-hashes every tracked file per helper
+call, so many unreported edits are cheaper as raw `client.write()` calls plus one `change()` than as
+many helper calls.
 
 ## L2: the real plugin, Obsidian stubbed
 

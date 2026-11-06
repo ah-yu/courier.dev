@@ -6100,18 +6100,19 @@ async function expectConsistent(
     string,
     { lastKnownContentHash: string; plainPath: string }
   >;
-  const emptyHash = await sha256Text("");
   const chainHashes = new Set<string>();
   for (const chain of api.chains.values()) {
     for (const version of chain) chainHashes.add(version.contentHash);
   }
   for (const [fileId, entry] of Object.entries(state)) {
-    expect(engine.fileIdForPath(entry.plainPath), `${entry.plainPath} maps back`).toBe(fileId);
     const bytes = adapter.files.get(entry.plainPath);
-    if (entry.lastKnownContentHash === emptyHash) {
+    // The chain action tells a tombstone from a live empty file (both have the empty
+    // content hash); without it the check would reject a correct empty file.
+    if (api.chains.get(fileId)?.at(-1)?.action === "delete") {
       expect(bytes, `a tombstone at ${entry.plainPath} has no file`).toBeUndefined();
       continue;
     }
+    expect(engine.fileIdForPath(entry.plainPath), `${entry.plainPath} maps back`).toBe(fileId);
     expect(bytes, `the state names ${entry.plainPath} and the file is there`).toBeDefined();
     expect(await sha256Hex(bytes!), `state and disk agree at ${entry.plainPath}`).toBe(
       entry.lastKnownContentHash,
@@ -6153,6 +6154,29 @@ describe("SyncEngine — operation interleavings", () => {
     expect(api.chains.get(fileId)!.map((v) => v.action)).toEqual(["create", "modify", "delete"]);
   });
 
+  it("keeps a live empty file (the empty hash is not a tombstone by itself)", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("blank.md", encoder.encode(""));
+    await engine.initialSync();
+    await engine.whenIdle();
+
+    // The chain action says "live"; the state records the empty hash and a stamp, and the
+    // disk still holds the empty file.
+    await expectConsistent(engine, adapter, api);
+    expect(adapter.files.has("blank.md")).toBe(true);
+  });
+
+  it("records a local delete as a tombstone with no file", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("gone.md", encoder.encode("body"));
+    await engine.initialSync();
+    adapter.files.delete("gone.md");
+    await engine.handleLocalDelete("gone.md");
+    await engine.whenIdle();
+
+    await expectConsistent(engine, adapter, api);
+    expect(adapter.files.has("gone.md")).toBe(false);
+  });
   it("runs one bind when a second bind is requested while the first is in flight", async () => {
     const { engine, adapter, api } = await makeEngine();
     adapter.files.set("n.md", encoder.encode("v1"));
