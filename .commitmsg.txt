@@ -1,8 +1,0 @@
-﻿fix(engine): re-check the pass after waiting, and keep the rebind merge
-
-- A bind that waited for a running pass re-checks `passPromise` in a loop
-  before starting, so two callers blocked on the same pass cannot start two
-  passes. The caller's `firstBind` is honoured as-is: a rebind still merges
-  (the executable spec, `5b. remote tombstone + local file when the peer
-  comes back`), which the earlier `&& !initialized` guard broke.
-- The L1 bind-merge test asserts the persisted state is a string.
