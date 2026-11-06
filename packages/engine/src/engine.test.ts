@@ -6151,6 +6151,23 @@ describe("SyncEngine — operation interleavings", () => {
     expect(api.chains.get(fileId)!.map((v) => v.action)).toEqual(["create", "modify", "delete"]);
   });
 
+  it("runs one bind when a second bind is requested while the first is in flight", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("n.md", encoder.encode("v1"));
+    const held = holdFirstPush(api);
+
+    const first = engine.initialSync({ firstBind: true });
+    await held.reached;
+    // The second bind must join the first: a second pass would scan the file before the
+    // first bind recorded it and push a second chain for the same note.
+    const second = engine.initialSync({ firstBind: true });
+    held.release();
+    await Promise.all([first, second]);
+    await engine.whenIdle();
+
+    expect(api.chains.size).toBe(1);
+    expect([...api.chains.values()].flat().map((version) => version.action)).toEqual(["create"]);
+  });
   it("binds the vault before a rename that arrives before the first sync", async () => {
     const { engine, adapter, api } = await makeEngine();
     const oldPath = "note-2026-01-01-000000.conflict.md";
