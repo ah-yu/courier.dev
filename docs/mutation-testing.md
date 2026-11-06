@@ -174,11 +174,11 @@ check, or a 1 ms boundary:
   - **Sweep pruning (10)**: the three loop bodies as `BlockStatement {}` (`:117`, `:210`, `:233`),
     the three `ConditionalExpression` → `false` (`:118`, `:211`, `:234`), the three delete calls
     they contain, and `pendingDeletes.delete` in its own sweep (`:262`). Pruning is memory hygiene:
-    `hasSelfWrite`, `consumeSelfWrite`, `matchesSelfWriteStamp`, `consumeSelfDelete`,
+    `hasSelfWrite`, `isSelfWrite`, `matchesSelfWriteStamp`, `consumeSelfDelete`,
     `consumeSelfRename` and the pending-delete match all check the deadline when they read. The
     three delete calls are the `NoCoverage` mutants the new sweep tests now execute (see above).
   - **Per-read expiry deletes (3)**: `selfWrites.delete(path)` inside `hasSelfWrite` (`:139`),
-    `consumeSelfWrite` (`:163`) and `matchesSelfWriteStamp` (`:190`) — memory only, for the same
+    `matchesSelfWriteStamp` (`:163`) and `isSelfWrite` (`:194`) — memory only, for the same
     reason.
   - **`expiresAt === undefined` → `false`** (1, `:223`): equivalent — the next comparison is
     `undefined > now`, which is false too.

@@ -75,6 +75,20 @@ The rules below are the ones the e2e suites exist to protect.
     remote copy through `onSettingsApplied` (its reload card), and a local win needs no message because
     the device's file did not change. Covered by the `config-folder conflict` cases in `engine.test.ts`,
     `settings-sync.e2e.test.ts` and `plugin.e2e.test.ts`.
+  - **Content this engine wrote itself is not a divergence, so nothing is parked for it.** A write's bytes
+    are on disk _before_ its sync point is recorded — the write and the adoption are one turn apart, not one
+    operation — so a decision that lands in that window (a notification for the peer's next version, a
+    pass's re-read) finds new local bytes against the old sync point while the head has moved on, which is
+    exactly the shape `decideFile` answers "conflict" for. `handleConflict` therefore asks the self-event log
+    whether those bytes are a write this engine performed (`isSelfWrite`; the record is also written by a
+    restore, so a restore's bytes are covered too) and, when they are, applies the remote head **without**
+    parking a copy or raising the event: there is nothing the user wrote to keep. This is the shape a note
+    saved twice leaves behind (Obsidian saves a note again when the file it embeds finishes landing), and
+    reading it as a divergence parked a conflict copy of the note the engine had just pulled. The
+    config-folder branch is unchanged and still settles by modification time — the suppression only covers
+    the copy that would be parked. Covered by the `does not park a conflict copy of the bytes a pull is
+    still recording` case in `engine.test.ts` and the `does not park a copy of the note a pull is still
+    recording` case in `sync.e2e.test.ts`.
   - The consequences are deliberate: the first pusher wins a two-sided edit, the losing content exists
     only on the device that detected the conflict (those files never sync — the peer would otherwise
     conflict again), and the device that detects a conflict sees the note change under it. Recovery is
@@ -111,6 +125,33 @@ The rules below are the ones the e2e suites exist to protect.
   with it). `decideIncremental` and `handleFilePushed` read the file immediately before deciding and
   need neither check. Covered by `decide.test.ts` and the `a decision that meets this device's own
   content on the head` and `a reconcile racing an incremental event` cases in `engine.test.ts`.
+
+- **A pull re-applies a version an incremental operation adopted while its write was in flight, instead of
+  recording its own older head.** The write and the adoption are one turn apart, so a notification can
+  adopt the peer's _next_ version while this pull's bytes are still on their way. `pullRemote` compares the
+  sync point it started from with the one it finds after the write; when an operation moved it to a
+  different version, the pull resolves that version from the chain (not from `RemoteIndex`, which a pass
+  clears and rebuilds while notifications are in flight) and **re-applies it through `pullRemote`** — at
+  the path that version records, with the ordinary guards. Adopting its own older head instead would move
+  the sync point onto bytes the device no longer has, and the next edit would conflict with the version the
+  peer had already applied. The re-apply is deliberately narrow: it re-checks the target's bytes before it
+  fetches them, so a save that landed before that check is left to the next pass instead of being
+  overwritten, and it re-reads the state after its chain request — a version that moved again is resolved
+  again, up to `MAX_REAPPLY_ATTEMPTS`. The gap between the check and the write is the same one every pull
+  has, not a new one.
+  When it cannot re-apply — the chain request fails, the newer version is a tombstone, or the bound is
+  reached — it records the version whose bytes are on disk (the one it wrote, or the state's own), so the
+  next pass pulls the newer version (or applies the deletion) from a fresh chain. That is deliberately a
+  transient step back rather than a mismatch: a state newer than the disk makes the next pass push those
+  older bytes as a revert, and after a deletion an untracked path becomes a brand-new chain.
+  Covered by the `does not park a conflict copy of the bytes a pull is still recording`,
+  `puts back the version a notification adopted before this pull's bytes landed`,
+  `removes the old path a pull re-created after the peer moved the file`, `keeps the chain when a
+  deletion lands while a pull's write is in flight`, `leaves a user edit that lands during the repair to
+  the next pass`, `records the version on disk when the chain cannot be fetched during the repair` and
+  `re-resolves the version when a notification lands during the re-apply` cases in `engine.test.ts`, and
+  by the `does not park a copy of the note a pull is still recording` and `puts back the version a
+  notification adopted before the pull's bytes landed` cases in `sync.e2e.test.ts`.
 
 ## Tombstones and binding
 

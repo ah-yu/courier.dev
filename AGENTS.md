@@ -174,8 +174,9 @@ protocol or a security hole. Read the linked section before changing one.
    `packages/engine/src/engine.ts` is the single reference implementation. See
    [sync-engine.md](docs/sync-engine.md#identity-one-path-one-chain).
 2. **Conflicts: remote wins, local is parked.** The loser pushes nothing; identical bytes are
-   never a conflict. Config-folder paths are the exception: newer mtime wins, silently, with no
-   copy. Names are `{stem}-{YYYY-MM-DD-HHmmss}[-n].conflict{ext}` and conflict copies never
+   never a conflict — nor are bytes this engine itself just wrote. Config-folder paths are the
+   exception: newer mtime wins, silently, with no copy. Names are
+   `{stem}-{YYYY-MM-DD-HHmmss}[-n].conflict{ext}` and conflict copies never
    sync. See [sync-engine.md](docs/sync-engine.md#conflicts) and
    [sync-scope.md](docs/sync-scope.md#conflict-copies).
 3. **A `delete` head is read two ways.** The first bind merges (local-only files become new

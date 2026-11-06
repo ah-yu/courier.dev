@@ -1969,6 +1969,341 @@ describe("SyncEngine — a push the chain has moved past", () => {
       expect(new TextDecoder().decode(adapter.files.get("n.md"))).toBe("same");
       expect(syncPointOf(engine, fileId)).toBe(versionId);
     });
+
+    /**
+     * The same rule, for the window a pull's **write** opens: the bytes are on disk
+     * before the sync point is recorded, so a decision that lands in between reads them
+     * as a divergence from the head it is about to apply.
+     *
+     * This is the shape a note saved twice by Obsidian leaves behind — the app saves a
+     * note again when the attachment it embeds finishes landing, so the peer's next
+     * version can arrive while this device is still recording the previous one. It parked
+     * a conflict copy of the note the engine had just pulled, and the pull that was still
+     * in flight then moved the sync point *back* under the notification.
+     */
+    it("does not park a conflict copy of the bytes a pull is still recording", async () => {
+      const conflicts: ConflictResolvedEvent[] = [];
+      const { engine, adapter, api } = await makeEngine(undefined, (event) =>
+        conflicts.push(event),
+      );
+      adapter.files.set("n.md", encoder.encode("v1"));
+      await engine.initialSync();
+      const fileId = api.pushed.find((p) => p.action === "create")!.fileId;
+
+      // The peer's first save is on the chain; a pass's index sees it.
+      await api.remoteEdit(fileId, "v2");
+
+      adapter.onWrite = async (path) => {
+        if (path !== "n.md") return;
+        adapter.onWrite = null;
+        // The adapter has landed the pull's bytes and the engine has not recorded their
+        // sync point yet — the notify-only turn the peer's second save arrives in.
+        await api.remoteEdit(fileId, "v3");
+        await engine.handleFilePushed(fileId, (await api.latestVersionId(fileId))!);
+      };
+
+      await engine.initialSync();
+      adapter.onWrite = null;
+
+      // Nothing the user wrote was overwritten, so nothing is parked; the note ends on
+      // the peer's newest version, and so does the sync point.
+      expect(conflicts).toEqual([]);
+      expect([...adapter.files.keys()]).toEqual(["n.md"]);
+      expect(new TextDecoder().decode(adapter.files.get("n.md"))).toBe("v3");
+      expect(syncPointOf(engine, fileId)).toBe(await api.latestVersionId(fileId));
+    });
+
+    /**
+     * The other ordering of the same window: this pull's own bytes land **after** the
+     * notification's pull has already written the peer's next version. The disk then
+     * holds this pull's older bytes while the state holds the newer version, and the
+     * engine has to put the newer bytes back — simply declining to adopt would leave the
+     * next pass to push the older bytes as a revert of the peer's version.
+     */
+    it("puts back the version a notification adopted before this pull's bytes landed", async () => {
+      const conflicts: ConflictResolvedEvent[] = [];
+      const { engine, adapter, api } = await makeEngine(undefined, (event) =>
+        conflicts.push(event),
+      );
+      adapter.files.set("n.md", encoder.encode("v1"));
+      await engine.initialSync();
+      const fileId = api.pushed.find((p) => p.action === "create")!.fileId;
+      await api.remoteEdit(fileId, "v2");
+
+      // Hold the pass's write *before* it lands: the peer's second save is applied, and
+      // its bytes written, while this pull is still waiting to write v2.
+      const writeFile = adapter.writeFile.bind(adapter);
+      let injected = false;
+      adapter.writeFile = async (path, bytes) => {
+        if (path === "n.md" && !injected) {
+          injected = true;
+          adapter.writeFile = writeFile;
+          await api.remoteEdit(fileId, "v3");
+          await engine.handleFilePushed(fileId, (await api.latestVersionId(fileId))!);
+        }
+        await writeFile(path, bytes);
+      };
+
+      await engine.initialSync();
+      adapter.writeFile = writeFile;
+
+      expect(conflicts).toEqual([]);
+      expect(new TextDecoder().decode(adapter.files.get("n.md"))).toBe("v3");
+      expect(syncPointOf(engine, fileId)).toBe(await api.latestVersionId(fileId));
+    });
+
+    /**
+     * The same window with the peer's version at another path: the notification follows a
+     * rename, and the in-flight pull then re-creates the old path with its own bytes.
+     * Those bytes must be removed, or the next pass reads them as a new file and forks a
+     * second chain for the same note.
+     */
+    it("removes the old path a pull re-created after the peer moved the file", async () => {
+      const { engine, adapter, api, key } = await makeEngine();
+      adapter.files.set("n.md", encoder.encode("v1"));
+      await engine.initialSync();
+      const fileId = api.pushed.find((p) => p.action === "create")!.fileId;
+      await api.remoteEdit(fileId, "v2");
+
+      const writeFile = adapter.writeFile.bind(adapter);
+      let injected = false;
+      adapter.writeFile = async (path, bytes) => {
+        if (path === "n.md" && !injected) {
+          injected = true;
+          adapter.writeFile = writeFile;
+          // The peer renames and edits: the notification's pull follows the move and
+          // applies v3 at m.md, while this pull is still holding v2's write.
+          await api.remoteRename(fileId, await encryptString(key, "m.md"));
+          await api.remoteEdit(fileId, "v3");
+          await engine.handleFilePushed(fileId, (await api.latestVersionId(fileId))!);
+        }
+        await writeFile(path, bytes);
+      };
+
+      await engine.initialSync();
+      adapter.writeFile = writeFile;
+
+      expect([...adapter.files.keys()]).toEqual(["m.md"]);
+      expect(new TextDecoder().decode(adapter.files.get("m.md"))).toBe("v3");
+      expect(syncPointOf(engine, fileId)).toBe(await api.latestVersionId(fileId));
+      expect(engine.fileIdForPath("m.md")).toBe(fileId);
+      expect(engine.fileIdForPath("n.md")).toBeNull();
+    });
+
+    /**
+     * The repair's guard: while it fetches the version to re-apply, the user saves. The
+     * re-apply must not write over that edit (it only ever replaces this pull's own
+     * bytes), must not move the sync point back to the version it wrote, and the next
+     * pass pushes the edit on top of the peer's version.
+     */
+    it("leaves a user edit that lands during the repair to the next pass", async () => {
+      const { engine, adapter, api } = await makeEngine();
+      adapter.files.set("n.md", encoder.encode("v1"));
+      await engine.initialSync();
+      const fileId = api.pushed.find((p) => p.action === "create")!.fileId;
+      await api.remoteEdit(fileId, "v2");
+
+      const writeFile = adapter.writeFile.bind(adapter);
+      let injected = false;
+      let outerWriteLanded = false;
+      adapter.writeFile = async (path, bytes) => {
+        if (path === "n.md" && !injected) {
+          injected = true;
+          adapter.writeFile = writeFile;
+          await api.remoteEdit(fileId, "v3");
+          await engine.handleFilePushed(fileId, (await api.latestVersionId(fileId))!);
+        }
+        await writeFile(path, bytes);
+        if (path === "n.md") outerWriteLanded = true;
+      };
+
+      // The repair's chain request is the first pull after the outer write landed.
+      const originalPull = api.pull.bind(api);
+      let typed = false;
+      api.pull = async (vaultId, fileIds) => {
+        const response = await originalPull(vaultId, fileIds);
+        if (outerWriteLanded && !typed) {
+          typed = true;
+          adapter.files.set("n.md", encoder.encode("typed during the repair"));
+        }
+        return response;
+      };
+
+      await engine.initialSync();
+      api.pull = originalPull;
+      adapter.writeFile = writeFile;
+
+      expect(new TextDecoder().decode(adapter.files.get("n.md"))).toBe("typed during the repair");
+      expect(adapter.files.has(conflictFilePath("n.md"))).toBe(false);
+      expect(syncPointOf(engine, fileId)).toBe(await api.latestVersionId(fileId));
+
+      // The next pass pushes the edit on top of the peer's version, not from a stale base.
+      await engine.initialSync();
+      expect(new TextDecoder().decode(adapter.files.get("n.md"))).toBe("typed during the repair");
+      expect(api.chains.get(fileId)!.map((v) => v.action)).toEqual([
+        "create",
+        "modify",
+        "modify",
+        "modify",
+      ]);
+    });
+
+    /**
+     * A further adoption *during* the repair: the re-apply resolves v3 and starts to
+     * write it, and a v4 notification lands first. The expected-version check has to
+     * notice and resolve v4 instead of recording v3 over it, and the disk and the sync
+     * point must end on the same version.
+     */
+    it("re-resolves the version when a notification lands during the re-apply", async () => {
+      const { engine, adapter, api } = await makeEngine();
+      adapter.files.set("n.md", encoder.encode("v1"));
+      await engine.initialSync();
+      const fileId = api.pushed.find((p) => p.action === "create")!.fileId;
+      await api.remoteEdit(fileId, "v2");
+
+      // Write #1 is the pull's own write: the v3 notification lands before it, so the
+      // re-apply has work to do. Write #2 is that re-apply of v3: v4 lands right after it
+      // and before the engine has checked what the state now holds.
+      const writeFile = adapter.writeFile.bind(adapter);
+      let calls = 0;
+      const wrapper = async (path: string, bytes: Uint8Array): Promise<void> => {
+        const isNote = path === "n.md";
+        if (isNote) calls++;
+        if (isNote && calls === 1) {
+          adapter.writeFile = writeFile;
+          await api.remoteEdit(fileId, "v3");
+          await engine.handleFilePushed(fileId, (await api.latestVersionId(fileId))!);
+          adapter.writeFile = wrapper;
+        }
+        await writeFile(path, bytes);
+        if (isNote && calls === 2) {
+          adapter.writeFile = writeFile;
+          await api.remoteEdit(fileId, "v4");
+          await engine.handleFilePushed(fileId, (await api.latestVersionId(fileId))!);
+          adapter.writeFile = wrapper;
+        }
+      };
+      adapter.writeFile = wrapper;
+
+      await engine.initialSync();
+      adapter.writeFile = writeFile;
+
+      expect(adapter.files.has(conflictFilePath("n.md"))).toBe(false);
+      expect(new TextDecoder().decode(adapter.files.get("n.md"))).toBe("v4");
+      expect(syncPointOf(engine, fileId)).toBe(await api.latestVersionId(fileId));
+      expect(api.chains.get(fileId)!.map((v) => v.action)).toEqual([
+        "create",
+        "modify",
+        "modify",
+        "modify",
+      ]);
+    });
+
+    /**
+     * The fallback when the repair cannot fetch the chain: it records the version whose
+     * bytes are on disk (a transient step back), so the next pass pulls the peer's newer
+     * version instead of pushing these older bytes as a revert.
+     */
+    it("records the version on disk when the chain cannot be fetched during the repair", async () => {
+      const { engine, adapter, api } = await makeEngine();
+      adapter.files.set("n.md", encoder.encode("v1"));
+      await engine.initialSync();
+      const fileId = api.pushed.find((p) => p.action === "create")!.fileId;
+      await api.remoteEdit(fileId, "v2");
+      const liveVersion = (await api.latestVersionId(fileId))!;
+
+      const writeFile = adapter.writeFile.bind(adapter);
+      let injected = false;
+      let outerWriteLanded = false;
+      adapter.writeFile = async (path, bytes) => {
+        if (path === "n.md" && !injected) {
+          injected = true;
+          adapter.writeFile = writeFile;
+          await api.remoteEdit(fileId, "v3");
+          await engine.handleFilePushed(fileId, (await api.latestVersionId(fileId))!);
+        }
+        await writeFile(path, bytes);
+        if (path === "n.md") outerWriteLanded = true;
+      };
+
+      // The repair's chain request is the first pull after the outer write landed; it
+      // fails, and the pull has to keep the state with the bytes that are here.
+      const originalPull = api.pull.bind(api);
+      let failed = false;
+      api.pull = async (vaultId, fileIds) => {
+        if (outerWriteLanded && !failed) {
+          failed = true;
+          throw new Error("offline");
+        }
+        return await originalPull(vaultId, fileIds);
+      };
+
+      await engine.initialSync();
+      api.pull = originalPull;
+      adapter.writeFile = writeFile;
+
+      expect(adapter.files.has(conflictFilePath("n.md"))).toBe(false);
+      expect(new TextDecoder().decode(adapter.files.get("n.md"))).toBe("v2");
+      expect(syncPointOf(engine, fileId)).toBe(liveVersion);
+
+      // The next pass pulls the peer's newer version forward.
+      await engine.initialSync();
+      expect(new TextDecoder().decode(adapter.files.get("n.md"))).toBe("v3");
+      expect(syncPointOf(engine, fileId)).toBe(await api.latestVersionId(fileId));
+    });
+
+    /**
+     * A deletion landing in the same window: the tombstone's pull removes the state and
+     * the file while this pull's bytes are still on their way, and the write puts the
+     * live version back on disk. The state has to come back with it — leaving the path
+     * untracked would make the next pass create a *new* chain for a file the peer
+     * deleted — and the next pass then applies the deletion to the chain it already has.
+     */
+    it("keeps the chain when a deletion lands while a pull's write is in flight", async () => {
+      const activities: SyncActivityEvent[] = [];
+      const { engine, adapter, api } = await makeEngine(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        (event) => activities.push(event),
+      );
+      adapter.files.set("n.md", encoder.encode("v1"));
+      await engine.initialSync();
+      const fileId = api.pushed.find((p) => p.action === "create")!.fileId;
+      await api.remoteEdit(fileId, "v2");
+      const liveVersion = (await api.latestVersionId(fileId))!;
+
+      const writeFile = adapter.writeFile.bind(adapter);
+      let injected = false;
+      adapter.writeFile = async (path, bytes) => {
+        if (path === "n.md" && !injected) {
+          injected = true;
+          adapter.writeFile = writeFile;
+          const deleted = await api.remoteDelete(fileId);
+          await engine.handleFilePushed(fileId, deleted);
+        }
+        await writeFile(path, bytes);
+      };
+
+      await engine.initialSync();
+      adapter.writeFile = writeFile;
+
+      // The live version's bytes are back, on the chain this device already knows — and
+      // the recovery is not announced: the deletion's pull already reported the path, and
+      // the version is not the server's head.
+      expect(new TextDecoder().decode(adapter.files.get("n.md"))).toBe("v2");
+      expect(engine.fileIdForPath("n.md")).toBe(fileId);
+      expect([...api.chains.keys()]).toEqual([fileId]);
+      expect(activities.filter((event) => event.versionId === liveVersion)).toEqual([]);
+
+      // The next pass applies the deletion — one chain, never a second one for the path.
+      await engine.initialSync();
+      expect(adapter.files.has("n.md")).toBe(false);
+      expect(engine.fileIdForPath("n.md")).toBeNull();
+      expect([...api.chains.keys()]).toEqual([fileId]);
+    });
   });
 
   it("keeps the later of two edits when both of its own pushes are in flight at once", async () => {

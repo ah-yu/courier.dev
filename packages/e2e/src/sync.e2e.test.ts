@@ -325,6 +325,118 @@ describe("sync e2e — two clients through a real server", () => {
     expect(a.read("shared.md")).toBe("edited on A");
   });
 
+  /**
+   * The window a pull's own write opens, end to end: the bytes are on disk before the
+   * sync point is recorded, so a decision that lands in between used to read them as a
+   * divergence from the head it was about to apply.
+   *
+   * The shape is a note Obsidian saves twice — dragging an attachment in inserts the
+   * link, and the app saves the note again when the file finishes landing — and the
+   * window is deterministic here because the adapter's write is held open across the
+   * peer's notification, which is exactly the gap the real write leaves between "the
+   * bytes are visible" and "the promise resolved".
+   */
+  it("does not park a copy of the note a pull is still recording", async () => {
+    const vault = await newVault("pull-write-window");
+    const a = await newClient(vault.id, "device-a");
+    const b = await newClient(vault.id, "device-b");
+
+    b.write("note.md", "v1");
+    await b.sync();
+    await a.sync();
+    const fileId = b.engine.fileIdForPath("note.md")!;
+
+    // A's first save is on the chain; B's pass will pull it.
+    a.write("note.md", "v2");
+    await a.change("note.md");
+    b.resetCounters();
+
+    // Hold B's write open: the pass has landed v2's bytes and has not recorded their
+    // sync point yet. The peer's second save arrives as a notification right here.
+    const writeFile = b.adapter.writeFile.bind(b.adapter);
+    let injected = false;
+    b.adapter.writeFile = async (path, bytes) => {
+      await writeFile(path, bytes);
+      if (path !== "note.md" || injected) return;
+      injected = true;
+      b.adapter.writeFile = writeFile;
+      a.write("note.md", "v3");
+      await a.change("note.md");
+      const head = (await fileVersions(server, vault.id, fileId)).at(-1)!;
+      await b.remotePushed(fileId, head.versionId);
+    };
+
+    await b.sync();
+
+    // Nothing the user wrote was overwritten, so nothing is parked, and the note and
+    // the sync point both end on the peer's newest version — the pull that was still
+    // in flight must not move the point back under the notification.
+    expect(await b.conflictFiles()).toEqual([]);
+    expect(b.read("note.md")).toBe("v3");
+    const head = (await fileVersions(server, vault.id, fileId)).at(-1)!;
+    const state = JSON.parse(b.state.json!) as Record<string, { lastKnownVersionId: string }>;
+    expect(state[fileId]?.lastKnownVersionId).toBe(head.versionId);
+    // …and the passive device pushed nothing: a revert or a duplicate would keep both
+    // assertions above green while corrupting the chain.
+    expect(b.pushCalls).toEqual([]);
+    expect((await fileVersions(server, vault.id, fileId)).map((v) => v.action)).toEqual([
+      "create",
+      "modify",
+      "modify",
+    ]);
+  });
+
+  /**
+   * The other ordering of the same window: the notification's pull writes the peer's
+   * next version first, and this pull's older bytes land after it. The engine has to put
+   * the newer version back — declining to record the older one would leave the next pass
+   * to push those bytes as a revert of the peer's version.
+   */
+  it("puts back the version a notification adopted before the pull's bytes landed", async () => {
+    const vault = await newVault("pull-write-late");
+    const a = await newClient(vault.id, "device-a");
+    const b = await newClient(vault.id, "device-b");
+
+    b.write("note.md", "v1");
+    await b.sync();
+    await a.sync();
+    const fileId = b.engine.fileIdForPath("note.md")!;
+
+    a.write("note.md", "v2");
+    await a.change("note.md");
+    b.resetCounters();
+
+    const writeFile = b.adapter.writeFile.bind(b.adapter);
+    let injected = false;
+    b.adapter.writeFile = async (path, bytes) => {
+      if (path === "note.md" && !injected) {
+        injected = true;
+        b.adapter.writeFile = writeFile;
+        // The notification's pull writes v3 and records it; the pass's v2 lands after.
+        a.write("note.md", "v3");
+        await a.change("note.md");
+        const head = (await fileVersions(server, vault.id, fileId)).at(-1)!;
+        await b.remotePushed(fileId, head.versionId);
+      }
+      await writeFile(path, bytes);
+    };
+
+    await b.sync();
+    b.adapter.writeFile = writeFile;
+
+    expect(await b.conflictFiles()).toEqual([]);
+    expect(b.read("note.md")).toBe("v3");
+    const head = (await fileVersions(server, vault.id, fileId)).at(-1)!;
+    const state = JSON.parse(b.state.json!) as Record<string, { lastKnownVersionId: string }>;
+    expect(state[fileId]?.lastKnownVersionId).toBe(head.versionId);
+    expect(b.pushCalls).toEqual([]);
+    expect((await fileVersions(server, vault.id, fileId)).map((v) => v.action)).toEqual([
+      "create",
+      "modify",
+      "modify",
+    ]);
+  });
+
   it("resolves a conflict even when the client has no persisted state", async () => {
     const vault = await newVault("conflict-without-state");
     const a = await newClient(vault.id, "device-a");
