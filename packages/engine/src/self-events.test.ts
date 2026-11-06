@@ -74,9 +74,9 @@ describe("SelfEventLog — self writes", () => {
     const log = new SelfEventLog({ now: fakeClock().now });
     log.recordSelfWrite("notes/a.md", "hash-of-what-we-wrote");
 
-    expect(log.consumeSelfWrite("notes/a.md", "hash-of-what-we-wrote")).toBe(true);
-    expect(log.consumeSelfWrite("notes/a.md", "hash-of-a-user-edit")).toBe(false);
-    expect(log.consumeSelfWrite("notes/other.md", "hash-of-what-we-wrote")).toBe(false);
+    expect(log.isSelfWrite("notes/a.md", "hash-of-what-we-wrote")).toBe(true);
+    expect(log.isSelfWrite("notes/a.md", "hash-of-a-user-edit")).toBe(false);
+    expect(log.isSelfWrite("notes/other.md", "hash-of-what-we-wrote")).toBe(false);
   });
 
   it("keeps matching a second event for the same write (one write, two events)", () => {
@@ -85,8 +85,8 @@ describe("SelfEventLog — self writes", () => {
     const log = new SelfEventLog({ now: fakeClock().now });
     log.recordSelfWrite("notes/a.md", "h");
 
-    expect(log.consumeSelfWrite("notes/a.md", "h")).toBe(true);
-    expect(log.consumeSelfWrite("notes/a.md", "h")).toBe(true);
+    expect(log.isSelfWrite("notes/a.md", "h")).toBe(true);
+    expect(log.isSelfWrite("notes/a.md", "h")).toBe(true);
   });
 
   it("forgets the record once its window closes", () => {
@@ -96,7 +96,7 @@ describe("SelfEventLog — self writes", () => {
 
     clock.advance(10_001);
 
-    expect(log.consumeSelfWrite("notes/a.md", "h")).toBe(false);
+    expect(log.isSelfWrite("notes/a.md", "h")).toBe(false);
   });
 
   it("keeps a live record when another path is written", () => {
@@ -109,8 +109,8 @@ describe("SelfEventLog — self writes", () => {
     clock.advance(1_000);
     log.recordSelfWrite("notes/b.md", "hb");
 
-    expect(log.consumeSelfWrite("notes/a.md", "ha")).toBe(true);
-    expect(log.consumeSelfWrite("notes/b.md", "hb")).toBe(true);
+    expect(log.isSelfWrite("notes/a.md", "ha")).toBe(true);
+    expect(log.isSelfWrite("notes/b.md", "hb")).toBe(true);
   });
 
   it("matches a streamed write by its stamp, and stops when the file moves", () => {
@@ -139,7 +139,7 @@ describe("SelfEventLog — self writes", () => {
     log.recordSelfWrite("notes/a.md", "h");
 
     expect(log.matchesSelfWriteStamp("notes/a.md", { sizeBytes: 1, mtimeMs: 1 })).toBe(false);
-    expect(log.consumeSelfWrite("notes/a.md", "h")).toBe(true);
+    expect(log.isSelfWrite("notes/a.md", "h")).toBe(true);
   });
 
   it("answers no for a path it never recorded and for a write whose window closed", () => {
@@ -171,8 +171,8 @@ describe("SelfEventLog — self writes", () => {
     log.recordSelfWrite("notes/b.md", "hb");
 
     expect(log.hasSelfWrite("notes/a.md")).toBe(false);
-    expect(log.consumeSelfWrite("notes/a.md", "ha")).toBe(false);
-    expect(log.consumeSelfWrite("notes/b.md", "hb")).toBe(true);
+    expect(log.isSelfWrite("notes/a.md", "ha")).toBe(false);
+    expect(log.isSelfWrite("notes/b.md", "hb")).toBe(true);
   });
 });
 

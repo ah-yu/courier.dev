@@ -430,6 +430,20 @@ interface PreparedPush {
 const MAX_PUSH_BATCH_BYTES = 8 * 1024 * 1024;
 
 /**
+ * How many times one pull may re-apply a version that superseded its write.
+ *
+ * A pull's write and its sync point are one turn apart, so a notification can settle the
+ * peer's next version while the bytes are on their way (see `repairSupersededPull`).
+ * Re-applying that version needs a fetch and a write of its own, and a third operation
+ * can move the path again inside those awaits. Two attempts cover the realistic races;
+ * past that the path is contention, and the pull records the version whose bytes are on
+ * disk so the next pass pulls the newer one — a transient step back, never a state that
+ * names a version the disk does not hold (the next pass would push those bytes as a
+ * revert).
+ */
+const MAX_REAPPLY_ATTEMPTS = 2;
+
+/**
  * How long the excluded folders' file listing is reused.
  *
  * The listing exists only to recognise a file that was moved into an excluded folder
@@ -948,9 +962,9 @@ export class SyncEngine {
    * match still decides when a record exists — a genuine edit inside the window has
    * different bytes.
    */
-  private async consumeSelfWrite(path: string, bytes: Uint8Array): Promise<boolean> {
+  private async isOwnWrite(path: string, bytes: Uint8Array): Promise<boolean> {
     if (!this.selfEvents.hasSelfWrite(path)) return false;
-    return this.selfEvents.consumeSelfWrite(path, await sha256Hex(bytes));
+    return this.selfEvents.isSelfWrite(path, await sha256Hex(bytes));
   }
 
   /**
@@ -2854,17 +2868,36 @@ export class SyncEngine {
     const localBytes = localExists ? await adapter.readFile(plainPath) : null;
     if (localExists && !localBytes) return true;
 
+    // **Content this engine wrote is never a divergence.** A pull's bytes are visible on
+    // disk before its sync point is recorded (the write and the adoption are one turn
+    // apart, not one operation), so a decision that lands in that window — a notification
+    // for the peer's next version, a pass's re-read — sees the engine's own new bytes
+    // while the state still holds the old point, and reads them as the user's edit
+    // against a newer head. That is the shape a note saved twice produces (Obsidian saves
+    // a note again when the file it embeds finishes landing), and parking it left a
+    // conflict copy of the note the engine had just pulled, with the note itself then
+    // rolled back to the older version. The remote side still wins here; there is simply
+    // nothing of the user's to keep.
+    //
+    // `hasSelfWrite` first: hashing a 50 MiB attachment to answer a question the log can
+    // refuse for free would be paid on every genuine binary conflict.
+    const localIsSelfWrite =
+      localBytes !== null &&
+      this.selfEvents.hasSelfWrite(plainPath) &&
+      this.selfEvents.isSelfWrite(plainPath, await sha256Hex(localBytes));
+
     const applied = await this.pullRemote(fileId, plainPath, head, null, deviceName);
     if (!applied) return false;
 
-    const conflictPath =
-      localBytes === null ? null : await this.parkConflictFile(plainPath, localBytes);
-    this.opts.onConflictResolved?.({
-      fileId,
-      plainPath,
-      conflictPath,
-      remoteAction: head.action === "delete" ? "delete" : "write",
-    });
+    if (localBytes !== null && !localIsSelfWrite) {
+      const conflictPath = await this.parkConflictFile(plainPath, localBytes);
+      this.opts.onConflictResolved?.({
+        fileId,
+        plainPath,
+        conflictPath,
+        remoteAction: head.action === "delete" ? "delete" : "write",
+      });
+    }
     return true;
   }
 
@@ -3246,6 +3279,21 @@ export class SyncEngine {
     head: VersionChainEntry,
     localContentHash: string | null = null,
     deviceName: string | null = null,
+    /** How many times this pull has already re-applied a superseding version. */
+    reapply = 0,
+    /**
+     * The version the caller expects the device to hold when this pull is a re-apply
+     * (see `repairSupersededPull`). `null` for an ordinary pull: its state is *supposed*
+     * to be behind the head.
+     */
+    expectedVersionId: string | null = null,
+    /**
+     * The content the caller saw on disk before asking for a re-apply. A re-apply fetches
+     * its bytes over the network, so the disk is checked again right before the write:
+     * a user save that landed meanwhile is left for the next pass instead of being
+     * overwritten. `null` for an ordinary pull, which keeps its one-read cost.
+     */
+    expectedLocalHash: string | null = null,
   ): Promise<boolean> {
     // A delete head means "apply the remote delete locally".
     if (head.action === "delete") {
@@ -3271,6 +3319,11 @@ export class SyncEngine {
       });
       return true;
     }
+
+    // Whether this version is already this device's sync point *before* the write below.
+    // A second pull of the same head — or the re-apply of one — applies nothing new, so
+    // it must not report the same version twice.
+    const alreadyHeld = this.state[fileId]?.lastKnownVersionId === head.versionId;
 
     // A version records the path it was created at, so a remote rename/move is
     // visible here even though this client never saw a `rename` notification.
@@ -3316,8 +3369,200 @@ export class SyncEngine {
     // A large version is written through the adapter's streaming sink when it has
     // one, so the plaintext never exists as one buffer; a small one, or a host
     // without a sink, still takes the whole-file path.
+    //
+    // A re-apply fetched its bytes over the network, so the disk is checked once more
+    // right before the write: a user save that landed during the fetch is left for the
+    // next pass instead of being overwritten. An ordinary pull skips this — its decision
+    // already re-read the file, and reading a large attachment once more before every
+    // pull is the cost the stamp cache exists to save.
+    if (expectedLocalHash !== null && (await this.currentLocalHash(target)) !== expectedLocalHash) {
+      return true;
+    }
+    // The point this device holds *before* the write is what the check below compares
+    // against: the write is an await, so another operation can settle a different
+    // version of this chain while the bytes are on their way.
+    const versionBeforeWrite = this.state[fileId]?.lastKnownVersionId ?? null;
     const written = await this.writeRemoteVersion(target, head);
     if (!written) return false;
+
+    // The state names another version than the bytes just written. Three ways that
+    // happens: it moved *during* this write, a re-apply's caller expected it to name the
+    // version it asked for and it moved before the write even started
+    // (`expectedVersionId`), or a deletion won and left no entry at all. Either way,
+    // recording `head` now would move the sync point backwards under it — or, after a
+    // deletion, put a chain back that the peer removed.
+    const versionAfterWrite = this.state[fileId]?.lastKnownVersionId ?? null;
+    const superseded =
+      versionAfterWrite !== head.versionId &&
+      ((versionAfterWrite === null && versionBeforeWrite !== null) ||
+        (versionAfterWrite !== null &&
+          (versionAfterWrite !== versionBeforeWrite ||
+            (expectedVersionId !== null && versionAfterWrite !== expectedVersionId))));
+    if (superseded) {
+      return await this.repairSupersededPull(
+        fileId,
+        target,
+        head,
+        deviceName,
+        reapply,
+        alreadyHeld,
+      );
+    }
+    return await this.adoptApplied(fileId, target, head, moved, deviceName, alreadyHeld);
+  }
+
+  /**
+   * The state names a version other than the bytes this pull just wrote.
+   *
+   * The write is an await, so a notification (or a local event) can settle the peer's
+   * *next* version while these bytes are on their way; the state then holds a version
+   * this pull was not decided from. Recording `head` here would move the sync point
+   * backwards under it, and the next edit would conflict with a version the peer had
+   * already applied. The answer is to make the disk agree with the state.
+   *
+   * Three rules keep that safe:
+   *
+   * - **Never overwrite bytes this pull did not write.** The newer version already on
+   *   disk means there is nothing to do; anything else is a user's edit (or a third
+   *   operation's write) that the next pass decides about. Only this pull's own bytes
+   *   are replaced, which is what keeps a re-apply from destroying an edit that landed
+   *   during the fetch.
+   * - **Resolve the state's version from the chain, not the remote index.** A pass clears
+   *   and rebuilds that index while notifications are in flight, so it can be empty or a
+   *   head behind exactly here. This is one request, on a path that already lost a race.
+   *   The fetch is an await, so the state is read again afterwards: if it moved once
+   *   more, the newest version is resolved instead of writing a version already stale.
+   * - **Re-apply through {@link pullRemote}**, so the version is written at the path it
+   *   records (a peer move), with the ordinary guards. The re-apply is bounded: after
+   *   {@link MAX_REAPPLY_ATTEMPTS} the path is contention, and the pull stops rather than
+   *   moving the sync point backwards over a version the device holds.
+   *
+   * Two answers keep the state and the disk together when the newer version cannot be
+   * re-applied: a deletion that won the race records the live version whose bytes are
+   * here (so the next pass applies the tombstone to a path it still tracks), and a chain
+   * the request could not resolve records the same head (so the next pass pulls the newer
+   * version instead of pushing these bytes as a revert).
+   */
+  private async repairSupersededPull(
+    fileId: string,
+    target: string,
+    head: VersionChainEntry,
+    deviceName: string | null,
+    reapply: number,
+    alreadyHeld: boolean,
+  ): Promise<boolean> {
+    for (let attempt = reapply; attempt < MAX_REAPPLY_ATTEMPTS; attempt++) {
+      const versionId = this.state[fileId]?.lastKnownVersionId ?? null;
+
+      // A `delete` won the race: its pull removed the state entry while this live
+      // version's bytes were on their way, and the write has just put them back on disk.
+      // Record the version whose bytes are here — without re-announcing it (the deletion's
+      // pull already reported the path) and without putting the chain back into the
+      // identity index, whose server head is a tombstone (see `RemoteIndex.forget`).
+      if (versionId === null) {
+        const stamp = await this.opts.adapter.statFile(target);
+        this.state[fileId] = {
+          lastKnownVersionId: head.versionId,
+          lastKnownContentHash: head.contentHash,
+          plainPath: target,
+          ...(stamp === null ? {} : { stamp }),
+        };
+        this.pathToFileId.set(target, fileId);
+        return true;
+      }
+
+      // The state names the bytes that are on disk: nothing to repair.
+      if (versionId === head.versionId) {
+        return await this.adoptApplied(fileId, target, head, false, deviceName, alreadyHeld);
+      }
+
+      let current: VersionChainEntry | undefined;
+      try {
+        current = (await this.pullChain(fileId)).find((v) => v.versionId === versionId);
+      } catch {
+        current = undefined;
+      }
+      if (current === undefined || current.action === "delete") {
+        return await this.adoptWrittenHead(fileId, target, head, deviceName, alreadyHeld);
+      }
+      // The fetch was an await: resolve the newest version rather than write this one.
+      if ((this.state[fileId]?.lastKnownVersionId ?? null) !== versionId) continue;
+
+      // The newer version lives at another path: a peer moved the file, and the operation
+      // that adopted it already applied it there. The bytes this pull wrote at the old
+      // path are stale — remove them (only while they are this pull's own), or the next
+      // pass reads them as a brand-new file and forks a second chain for the same note.
+      const currentPath = await this.decryptPath(current);
+      if (currentPath !== null && currentPath !== target && this.isSyncable(currentPath)) {
+        const diskHash = await this.currentLocalHash(target);
+        if (diskHash === head.contentHash) {
+          this.recordSelfDelete(target);
+          await this.opts.adapter.deleteFile(target);
+          // The path is gone, so the identity must not keep claiming it: the delete event
+          // is consumed by `recordSelfDelete`, so nothing else would clear the mapping.
+          if (this.pathToFileId.get(target) === fileId) this.pathToFileId.delete(target);
+        }
+        return true;
+      }
+
+      const diskHash = await this.currentLocalHash(target);
+      if (diskHash === current.contentHash) return true;
+      if (diskHash !== head.contentHash) return true;
+
+      return await this.pullRemote(
+        fileId,
+        target,
+        current,
+        null,
+        deviceName,
+        attempt + 1,
+        current.versionId,
+        head.contentHash,
+      );
+    }
+    // The path kept moving under every attempt. Do not chase it further, and do not leave
+    // the state naming one version while the disk holds another: the next pass cannot tell
+    // a stale disk from a divergent edit, and would push these older bytes as a revert.
+    // Recording the version whose bytes are on disk is the transient step back the next
+    // pass heals by pulling the newer one.
+    return await this.adoptWrittenHead(fileId, target, head, deviceName, alreadyHeld);
+  }
+
+  /**
+   * Adopt `head` while the disk still holds its bytes.
+   *
+   * Used only where the newer answer could not be re-applied — a deletion that won the
+   * race, or a chain the request could not resolve. The state then names the bytes that
+   * are on disk, and the next pass applies the newer version (or the deletion) from a
+   * fresh chain, instead of pushing these bytes as a revert or leaving the path untracked.
+   */
+  private async adoptWrittenHead(
+    fileId: string,
+    target: string,
+    head: VersionChainEntry,
+    deviceName: string | null,
+    alreadyHeld: boolean,
+  ): Promise<boolean> {
+    const diskHash = await this.currentLocalHash(target);
+    if (diskHash !== head.contentHash) return true;
+    return await this.adoptApplied(fileId, target, head, false, deviceName, alreadyHeld);
+  }
+
+  /**
+   * Record `applied` as this chain's sync point at `target`, and report it.
+   *
+   * The report is skipped when the device already held this version before the write: a
+   * second pull of one head (or the re-apply of one) applied nothing new, and reporting
+   * it again would give the CLI's activity log a duplicate row.
+   */
+  private async adoptApplied(
+    fileId: string,
+    target: string,
+    applied: VersionChainEntry,
+    moved: boolean,
+    deviceName: string | null,
+    alreadyHeld: boolean,
+  ): Promise<boolean> {
     // The new sync point is recorded **in the same turn as the write**, before any
     // further `await`: a host can deliver more than one event for one write (Obsidian
     // reports a `create` and a `modify`), and an event that lands between the write and
@@ -3325,19 +3570,21 @@ export class SyncEngine {
     // resolves as a conflict against the very version that was just pulled, parking a
     // copy of the new content beside the note. The stamp is filled in afterwards,
     // because it costs a stat and nothing depends on it being there yet.
-    this.adoptRemoteIdentity(fileId, target, head);
+    this.adoptRemoteIdentity(fileId, target, applied);
     this.rememberStamp(target, await this.opts.adapter.statFile(target));
-    this.reportSettingsApplied(target, moved ? "rename" : "write");
-    this.reportActivity({
-      direction: "in",
-      outcome: "applied",
-      fileId,
-      versionId: head.versionId,
-      plainPath: target,
-      action: head.action,
-      sizeBytes: head.sizeBytes,
-      deviceName,
-    });
+    if (!alreadyHeld) {
+      this.reportSettingsApplied(target, moved ? "rename" : "write");
+      this.reportActivity({
+        direction: "in",
+        outcome: "applied",
+        fileId,
+        versionId: applied.versionId,
+        plainPath: target,
+        action: applied.action,
+        sizeBytes: applied.sizeBytes,
+        deviceName,
+      });
+    }
     return true;
   }
 
@@ -3613,7 +3860,7 @@ export class SyncEngine {
     // handler runs before the engine's own state update lands (the write and that
     // update are separate async hops). Treating the echo as a user edit is what
     // produced a phantom conflict, a duplicate restore and a duplicate fileId.
-    if (await this.consumeSelfWrite(path, bytes)) return;
+    if (await this.isOwnWrite(path, bytes)) return;
 
     let fileId = this.pathToFileId.get(path);
 

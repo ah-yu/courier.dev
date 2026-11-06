@@ -130,7 +130,7 @@ export class SelfEventLog {
    * A caller that is about to match a vault event can ask this before hashing the
    * bytes: a genuine user edit has no record, and hashing a 40 MiB file only to learn
    * that is the cost this answers. The content match itself still happens in
-   * {@link consumeSelfWrite}.
+   * {@link isSelfWrite}.
    */
   hasSelfWrite(path: string): boolean {
     const entry = this.selfWrites.get(path);
@@ -182,8 +182,12 @@ export class SelfEventLog {
    * content hash is what keeps the longer-lived record honest: a genuine edit has
    * different bytes and is handled normally, and the sweep in {@link recordSelfWrite}
    * drops the record when its window closes.
+   *
+   * The name says "is", not "consume": the record has to survive for the second event
+   * and for a decision that is not an event at all (the conflict path, which asks
+   * whether the bytes it is about to park are the engine's own).
    */
-  consumeSelfWrite(path: string, contentHash: string): boolean {
+  isSelfWrite(path: string, contentHash: string): boolean {
     const entry = this.selfWrites.get(path);
     if (!entry) return false;
     if (entry.expiresAt <= this.now()) {
