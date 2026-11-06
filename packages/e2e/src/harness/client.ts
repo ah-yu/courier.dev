@@ -425,17 +425,10 @@ export class TestClient {
   }
 
   /** Simulate the remote-change WebSocket notification. */
-  async remotePushed(
-    fileId: string,
-    versionId: string,
-    options: { settle?: boolean } = {},
-  ): Promise<void> {
+  async remotePushed(fileId: string, versionId: string): Promise<void> {
+    // No settled-consistency check here: a notification may be delivered concurrently
+    // (or from inside a write), so it is not a barrier.
     await this.engine.handleFilePushed(fileId, versionId);
-    // A case that delivers the notification from inside the engine's own write must not
-    // wait here: the queue would wait for the write that is waiting for this call.
-    if (options.settle === false) return;
-    await this.engine.whenIdle();
-    await assertClientConsistent(this);
   }
 
   // ── The connection ──

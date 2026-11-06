@@ -3,45 +3,34 @@ import { sha256Hex } from "../../../engine/src/index";
 /**
  * The invariants every **settled** client must hold, read from its own files.
  *
- * Run after each successful `sync`/`bind`/`change`/`rename`/`removeAndSync`/`remotePushed`:
+ * Run after each successful `sync`/`bind`/`change`/`rename`/`removeAndSync`/`syncSettings`:
  * a pass or an event that settled leaves the state and the disk agreeing, and no path
- * owned by two live chains. A divergence here — a state that names bytes the disk does
- * not hold, a tombstone over a file, two chains on one path — is exactly the class of bug
- * the serialized engine exists to prevent, so it is worth failing the case that caused it
- * instead of the next assertion in the test.
- *
- * A **tombstone** is a sync point with the empty content hash *and* no `stamp` (a delete
- * version has no file to stamp); a live entry carries one wherever the engine could stat
- * the file (an adoption records the stamp it saw), so `stamp` alone cannot classify it and
- * an empty unstamped entry is treated as a tombstone.
+ * owned by two live chains. A divergence here is exactly the class of bug the serialized
+ * engine exists to prevent, so it is worth failing the case that caused it instead of the
+ * next assertion in the test.
  *
  * The check reads the state *after* the operation, so a case that writes a file without
  * reporting it (a legitimate L1 scene: L1 has no vault events) must report it before the
  * next helper call, or the helper fails the case.
+ *
+ * **Empty-hash entries are skipped.** The empty content hash is both a tombstone's sync
+ * point and a live empty file's, and the state records no chain action to tell them
+ * apart (the L0 matrix, which has the chain, checks tombstones and empty files). A live
+ * entry whose path was reused by a new chain is likewise skipped: the new chain's own
+ * entry is checked, and the map below catches two live owners.
  */
 export async function assertClientConsistent(client: ConsistentClient): Promise<void> {
   const state = JSON.parse(client.state.json ?? "{}") as Record<string, StateEntry>;
   const emptyHash = await sha256Hex(new Uint8Array(0));
   const livePaths = new Map<string, string>();
   for (const [fileId, entry] of Object.entries(state)) {
-    const tombstone = entry.stamp === undefined && entry.lastKnownContentHash === emptyHash;
-    if (!tombstone) {
-      const other = livePaths.get(entry.plainPath);
-      if (other !== undefined && other !== fileId) {
-        throw new Error(`two live chains own ${entry.plainPath}: ${other} and ${fileId}`);
-      }
-      livePaths.set(entry.plainPath, fileId);
+    if (entry.lastKnownContentHash === emptyHash) continue;
+    const other = livePaths.get(entry.plainPath);
+    if (other !== undefined && other !== fileId) {
+      throw new Error(`two live chains own ${entry.plainPath}: ${other} and ${fileId}`);
     }
-    const ownsPath = client.engine.fileIdForPath(entry.plainPath) === fileId;
-    if (tombstone) {
-      // Its recorded path may be reused by a new chain (a bind merge), so a tombstone only
-      // fails while this chain still owns the path and a file is there.
-      if (ownsPath && client.readBytes(entry.plainPath) !== null) {
-        throw new Error(`a tombstone at ${entry.plainPath} still has a file`);
-      }
-      continue;
-    }
-    if (!ownsPath) continue; // the path was reused by another chain; its entry is checked
+    livePaths.set(entry.plainPath, fileId);
+    if (client.engine.fileIdForPath(entry.plainPath) !== fileId) continue;
     const bytes = client.readBytes(entry.plainPath);
     if (bytes === null) throw new Error(`the state names ${entry.plainPath} but no file is there`);
     if ((await sha256Hex(bytes)) !== entry.lastKnownContentHash) {
@@ -54,7 +43,6 @@ export async function assertClientConsistent(client: ConsistentClient): Promise<
 interface StateEntry {
   lastKnownContentHash: string;
   plainPath: string;
-  /** Absent on a tombstone: a delete sync point has no file to stamp (see `state.ts`). */
   stamp?: unknown;
 }
 

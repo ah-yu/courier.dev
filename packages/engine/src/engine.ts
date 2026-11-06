@@ -3709,9 +3709,11 @@ export class SyncEngine {
     // `statFile`, not `readFile`: only "is a file there?" is being answered, and a
     // move of a large attachment would otherwise read both sides of it whole just to
     // follow a path.
-    const remoteStamp = await this.opts.adapter.statFile(remotePath);
-    if (remoteStamp !== null) {
-      this.adoptRemoteIdentity(fileId, remotePath, head, remoteStamp);
+    if (await this.opts.adapter.statFile(remotePath)) {
+      // No stamp: the bytes here were never read or hashed, and a stamp may only be
+      // recorded with the hash of the bytes at that stamp (a missing stamp costs one
+      // re-read, and a failed pull then retries instead of looking synced).
+      this.adoptRemoteIdentity(fileId, remotePath, head);
       return { path: remotePath, moved: false };
     }
 

@@ -4,7 +4,7 @@ import { assertClientConsistent } from "./consistency";
 
 const encoder = new TextEncoder();
 
-/** A sync point for a live file, with or without the stamp a settled pull records. */
+/** A sync point for a live non-empty file. */
 async function live(path: string, text: string, stamped = true) {
   const bytes = encoder.encode(text);
   return {
@@ -12,11 +12,6 @@ async function live(path: string, text: string, stamped = true) {
     lastKnownContentHash: await sha256Hex(bytes),
     ...(stamped ? { stamp: { sizeBytes: bytes.byteLength, mtimeMs: 1 } } : {}),
   };
-}
-
-/** A delete sync point: the empty content hash and no stamp. */
-async function tombstone(path: string) {
-  return { plainPath: path, lastKnownContentHash: await sha256Hex(new Uint8Array(0)) };
 }
 
 function client(
@@ -46,35 +41,22 @@ describe("assertClientConsistent", () => {
     );
   });
 
-  it("checks a live empty file like any other, including its absence", async () => {
-    const state = { f1: await live("blank.md", "") };
-    await expect(
-      assertClientConsistent(
-        client(state, { "blank.md": encoder.encode("") }, { "blank.md": "f1" }),
-      ),
-    ).resolves.toBeUndefined();
-    await expect(assertClientConsistent(client(state, {}, { "blank.md": "f1" }))).rejects.toThrow(
-      /no file is there/,
-    );
-  });
-
-  it("fails when a tombstone still owns a file", async () => {
-    const state = { f1: await tombstone("gone.md") };
-    await expect(
-      assertClientConsistent(
-        client(state, { "gone.md": encoder.encode("body") }, { "gone.md": "f1" }),
-      ),
-    ).rejects.toThrow(/tombstone at gone\.md still has a file/);
-  });
-
-  it("passes a tombstone with no file, even after its path was reused", async () => {
+  it("skips empty-hash entries (tombstone or live empty file)", async () => {
+    // The state records no chain action, so the harness cannot tell them apart; the L0
+    // matrix checks both with the chain in hand.
+    const emptyHash = await sha256Hex(new Uint8Array(0));
     const state = {
-      f1: await tombstone("phoenix.md"),
-      f2: await live("phoenix.md", "new body"),
+      tomb: { plainPath: "gone.md", lastKnownContentHash: emptyHash },
+      blank: { plainPath: "blank.md", lastKnownContentHash: emptyHash },
     };
     await expect(
       assertClientConsistent(
-        client(state, { "phoenix.md": encoder.encode("new body") }, { "phoenix.md": "f2" }),
+        client(state, { "gone.md": encoder.encode("body") }, { "gone.md": "tomb" }),
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      assertClientConsistent(
+        client(state, { "blank.md": encoder.encode("") }, { "blank.md": "blank" }),
       ),
     ).resolves.toBeUndefined();
   });
@@ -101,5 +83,14 @@ describe("assertClientConsistent", () => {
     await expect(assertClientConsistent(client(state, {}, { "adopted.md": "f1" }))).rejects.toThrow(
       /no file is there/,
     );
+  });
+
+  it("skips a live entry whose path another chain now owns", async () => {
+    const state = { old: await live("reused.md", "old body") };
+    await expect(
+      assertClientConsistent(
+        client(state, { "reused.md": encoder.encode("new body") }, { "reused.md": "fresh" }),
+      ),
+    ).resolves.toBeUndefined();
   });
 });
