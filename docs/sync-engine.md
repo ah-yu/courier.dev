@@ -75,20 +75,17 @@ The rules below are the ones the e2e suites exist to protect.
     remote copy through `onSettingsApplied` (its reload card), and a local win needs no message because
     the device's file did not change. Covered by the `config-folder conflict` cases in `engine.test.ts`,
     `settings-sync.e2e.test.ts` and `plugin.e2e.test.ts`.
-  - **Content this engine wrote itself is not a divergence, so nothing is parked for it.** A write's bytes
-    are on disk _before_ its sync point is recorded — the write and the adoption are one turn apart, not one
-    operation — so a decision that lands in that window (a notification for the peer's next version, a
-    pass's re-read) finds new local bytes against the old sync point while the head has moved on, which is
-    exactly the shape `decideFile` answers "conflict" for. `handleConflict` therefore asks the self-event log
-    whether those bytes are a write this engine performed (`isSelfWrite`; the record is also written by a
-    restore, so a restore's bytes are covered too) and, when they are, applies the remote head **without**
-    parking a copy or raising the event: there is nothing the user wrote to keep. This is the shape a note
-    saved twice leaves behind (Obsidian saves a note again when the file it embeds finishes landing), and
-    reading it as a divergence parked a conflict copy of the note the engine had just pulled. The
-    config-folder branch is unchanged and still settles by modification time — the suppression only covers
-    the copy that would be parked. Covered by the `does not park a conflict copy of the bytes a pull is
-    still recording` case in `engine.test.ts` and the `does not park a copy of the note a pull is still
-    recording` case in `sync.e2e.test.ts`.
+  - **Content this engine wrote itself is never a divergence, because the window is gone.** A pull's
+    write and its sync point are one job in the path's queue, so no other decision can run between them:
+    a notification or a pass for the same path either ran before the pull (and its snapshot is checked
+    against `ReconcilePass.stateAtStart`) or waits behind it. The conflict decision therefore never sees
+    the engine's own freshly written bytes against an older sync point. This is the shape a note saved
+    twice used to leave behind (Obsidian saves a note again when the file it embeds finishes landing),
+    and reading it as a divergence parked a conflict copy of the note the engine had just pulled. The
+    self-event log still suppresses the vault event an engine write fires (see
+    [Self-events](#self-events)); the config-folder branch still settles by modification time. Covered by
+    the `does not park a copy of the note a pull is still recording` case in `sync.e2e.test.ts` and the
+    `a notification for the peer's next version during a pull` cases in `engine.test.ts`.
   - The consequences are deliberate: the first pusher wins a two-sided edit, the losing content exists
     only on the device that detected the conflict (those files never sync — the peer would otherwise
     conflict again), and the device that detects a conflict sees the note change under it. Recovery is
@@ -300,16 +297,17 @@ file now lives at.
     event at all, so the only thing that can see it is the bind pass the next `start()` runs. An edit of
     a known file is pushed as a `modify`, a new file as a `create` — both as before — while the delete
     and rename variants are exactly the cases this rule's fixes cover.
-  - **A reconcile is not serialised against incremental events, and does not need to be.** It decides
-    from the snapshot it took when it started (listing, hashes, chains), while the vault keeps firing
-    events — so the reconcile **skips any path an event is handling** (`inFlightPaths`, set by
-    `handleLocalChange`/`handleLocalDelete`/`handleLocalRename`, also around `restoreFile`) and
-    re-reads a file before it writes or deletes it, deciding again from the bytes
-    actually on disk when they moved. That is what keeps a pass from pushing a second
-    `modify`/`rename`/tombstone for a file an event already owns, and from pulling over an edit that
-    landed mid-pass instead of handling the conflict it is. Deliberately not a lock: nothing ever waits,
-    so a host whose adapter awaits the event its own write fires (the tests' `FakeAdapter` does) cannot
-    deadlock.
+  - **A reconcile is serialised against incremental events through the path queue.** It decides from
+    the snapshot it took when it started (listing, hashes, chains), while the vault keeps firing
+    events — so its per-file work is a job in that path's queue, and an event's job for the same path
+    either ran before it (the pass then sees a sync point that moved and **skips** the file, see
+    `ReconcilePass.stateAtStart`) or waits behind it. A delete the pass was about to publish is skipped
+    when an event is queued behind its job (`PathQueue.hasQueued`). The pass also re-reads a file before
+    it writes or deletes it, deciding again from the bytes actually on disk when they moved. That is what
+    keeps a pass from pushing a second `modify`/`rename`/tombstone for a file an event already owns, and
+    from pulling over an edit that landed mid-pass instead of handling the conflict it is. The wait is
+    always before the job runs — a job never waits while holding a path — so a host whose adapter awaits
+    the event its own write fires (the tests' `FakeAdapter` does) cannot deadlock.
   - **A push says what it was decided from, and the server checks it.** Each pushed file
     carries `baseVersionId` — the chain head the decision was taken from, `null` for a file the
     client believes is new — and the server refuses the push (`status: "stale_base"` +
@@ -553,9 +551,10 @@ file now lives at.
     `postBindReconcileAfterMs` (default 5 s), runs one ordinary reconcile behind it: the event source is
     wired only after the bind returns, so an edit made during a slow bind would otherwise wait for the
     periodic pass. `0` makes it unconditional, `Infinity` disables it.
-  - Covered by `priority.test.ts`, `work-pool.test.ts`, `path-claims.test.ts`, the
-    `SyncEngine — the order a pass works in`, `SyncEngine — how much a pass runs at once` and
-    `SyncEngine — two chains naming one path` cases in `engine.test.ts`, the priority/catch-up cases in
+  - Covered by `priority.test.ts`, `work-pool.test.ts`, `path-queue.test.ts`, the
+    `SyncEngine — the order a pass works in`, `SyncEngine — how much a pass runs at once`,
+    `SyncEngine — two chains naming one path` and `SyncEngine — operation interleavings` cases in
+    `engine.test.ts`, the priority/catch-up cases in
     `host.test.ts` and the plugin's `host.test.ts`, the `getVaultSyncIndex` mapping in
     `sync-handlers.test.ts`, the head/previousLive SQL in `file-versions.test.ts`, and the cold-start case
     in `sync.e2e.test.ts` / `plugin.e2e.test.ts` (mobile).

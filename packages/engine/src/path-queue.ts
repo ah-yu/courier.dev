@@ -15,11 +15,13 @@
  * The engine's inner work (`pullRemote`, `handleConflict`, `pushFile`) is called directly
  * from inside the job for that reason.
  */
+export type PathJobOrigin = "event" | "pass" | "batch";
+
 export class PathQueue {
   /** path → the tail of the jobs queued for it (always a promise that cannot reject). */
   private readonly tails = new Map<string, Promise<void>>();
-  /** path → how many jobs are queued for it and have not started yet. */
-  private readonly queued = new Map<string, number>();
+  /** path → queued jobs per origin, so a pass can tell an event from a sibling task. */
+  private readonly queued = new Map<string, Map<PathJobOrigin, number>>();
 
   /** How many paths currently have a job queued or running (diagnostics and tests). */
   get size(): number {
@@ -33,8 +35,12 @@ export class PathQueue {
    * was deciding is queued behind it, so its decision is already stale and belongs to
    * that event's job instead.
    */
-  hasQueued(path: string): boolean {
-    return (this.queued.get(path) ?? 0) > 0;
+  hasQueued(path: string, origin?: PathJobOrigin): boolean {
+    const byOrigin = this.queued.get(path);
+    if (!byOrigin) return false;
+    if (origin !== undefined) return (byOrigin.get(origin) ?? 0) > 0;
+    for (const count of byOrigin.values()) if (count > 0) return true;
+    return false;
   }
 
   /**
@@ -54,18 +60,29 @@ export class PathQueue {
    * result (or its rejection). The paths are held until the job settles, including when it
    * throws.
    */
-  run<T>(paths: readonly string[], job: () => Promise<T> | T): Promise<T> {
+  run<T>(
+    paths: readonly string[],
+    job: () => Promise<T> | T,
+    origin: PathJobOrigin = "pass",
+  ): Promise<T> {
     // The order does not matter (the wait is before the run, never while holding
     // another path); a stable set keeps the tail map deterministic enough to read.
     const keys = [...new Set(paths)];
-    for (const key of keys) this.queued.set(key, (this.queued.get(key) ?? 0) + 1);
+    for (const key of keys) {
+      const byOrigin = this.queued.get(key) ?? new Map<PathJobOrigin, number>();
+      byOrigin.set(origin, (byOrigin.get(origin) ?? 0) + 1);
+      this.queued.set(key, byOrigin);
+    }
     const previous = keys.map((key) => this.tails.get(key) ?? RESOLVED);
     const start = Promise.all(previous).then(() => {
       // This job has started: what remains in `queued` is the work behind it.
       for (const key of keys) {
-        const remaining = (this.queued.get(key) ?? 1) - 1;
-        if (remaining > 0) this.queued.set(key, remaining);
-        else this.queued.delete(key);
+        const byOrigin = this.queued.get(key);
+        if (!byOrigin) continue;
+        const remaining = (byOrigin.get(origin) ?? 1) - 1;
+        if (remaining > 0) byOrigin.set(origin, remaining);
+        else byOrigin.delete(origin);
+        if (byOrigin.size === 0) this.queued.delete(key);
       }
       return job();
     });

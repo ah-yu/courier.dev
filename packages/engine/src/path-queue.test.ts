@@ -106,7 +106,7 @@ describe("PathQueue", () => {
     expect(queue.size).toBe(0);
   });
 
-  it("reports a job queued behind the one running", async () => {
+  it("reports a job queued behind the one running, per origin", async () => {
     const queue = new PathQueue();
     const held = gate();
     let queuedBehind: boolean | null = null;
@@ -119,13 +119,33 @@ describe("PathQueue", () => {
     // a is running; nothing is behind it yet.
     expect(queue.hasQueued("n.md")).toBe(false);
 
+    // A sibling pass task is queued behind a's job, but it is not an event: the pass's
+    // delete branch must not skip a tombstone for a job no newer than its snapshot.
     const b = queue.run(["n.md"], async () => {});
     expect(queue.hasQueued("n.md")).toBe(true);
+    expect(queue.hasQueued("n.md", "event")).toBe(false);
+    expect(queue.hasQueued("n.md", "pass")).toBe(true);
 
     held.open();
     await Promise.all([a, b]);
     expect(queuedBehind).toBe(true);
     await settle();
     expect(queue.hasQueued("n.md")).toBe(false);
+  });
+
+  it("waits for a job that queues another before going idle", async () => {
+    const queue = new PathQueue();
+    let inner = false;
+
+    const outer = queue.run(["a.md"], async () => {
+      // The drain must re-read the tails: this job queues a second one.
+      await queue.run(["b.md"], async () => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        inner = true;
+      });
+    });
+    await queue.whenIdle();
+    expect(inner).toBe(true);
+    await outer;
   });
 });

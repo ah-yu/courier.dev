@@ -48,7 +48,7 @@
   chains stay put and the next pass resumes from them.
   A tracked file moved into an excluded folder has to stay that chain, and there are two shapes to
   handle. When the host reports a rename (`Obsidian` does, with both paths), `handleLocalRename`
-  records the new path with both paths marked in-flight (and drops the chain from the remote index)
+  records the new path in that path's job (and drops the chain from the remote index)
   **without pushing**, so the vacancy at the old path cannot become a tombstone; moving it back in
   resumes the same chain as a `rename`. When the move arrives as "removed here, created there" (an
   external tool, the CLI's `fs.watch`, a plugin that was not running), the created half is dropped by

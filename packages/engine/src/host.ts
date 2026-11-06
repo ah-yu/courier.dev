@@ -343,6 +343,15 @@ export function isVaultGone(err: unknown): boolean {
 
 export class SyncHost {
   private engineInstance: SyncEngine | null = null;
+  /**
+   * The engine a stopped host is still draining.
+   *
+   * A stopped host cannot cancel work already inside the engine, and a deferred event job
+   * (queued while the engine writes) is not counted by `background`. Releasing the vault
+   * lease before that queue drains would let the next host start on top of a write that is
+   * still coming.
+   */
+  private drainingEngine: SyncEngine | null = null;
   private ws: SyncWebSocket | null = null;
   private stopEvents: (() => void) | null = null;
   private reconcileTimer: TimerHandle | null = null;
@@ -535,7 +544,15 @@ export class SyncHost {
    * what the lease exists to prevent.
    */
   async whenIdle(): Promise<void> {
-    while (this.background > 0 || this.reconciling || this.ops.running > 0 || this.ops.queued > 0) {
+    for (;;) {
+      const engine = this.drainingEngine ?? this.engineInstance;
+      if (engine !== null) await engine.whenIdle();
+      const idle =
+        this.background === 0 &&
+        !this.reconciling &&
+        this.ops.running === 0 &&
+        this.ops.queued === 0;
+      if (idle) return;
       await new Promise<void>((resolve) => {
         this.platform.after(50, resolve);
       });
@@ -574,6 +591,7 @@ export class SyncHost {
     // The socket is gone, so a push started from a stale api must not claim a
     // session the server no longer has open.
     this.opts.api.setSessionId?.(null);
+    this.drainingEngine = this.engineInstance;
     this.engineInstance = null;
   }
 

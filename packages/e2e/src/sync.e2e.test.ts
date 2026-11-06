@@ -413,7 +413,8 @@ describe("sync e2e — two clients through a real server", () => {
       if (path === "note.md" && !injected) {
         injected = true;
         b.adapter.writeFile = writeFile;
-        // The notification's pull writes v3 and records it; the pass's v2 lands after.
+        // The notification's apply queues behind the pull's job: the pull writes v2 and
+        // records it, then the notification applies v3.
         a.write("note.md", "v3");
         await a.change("note.md");
         const head = (await fileVersions(server, vault.id, fileId)).at(-1)!;
