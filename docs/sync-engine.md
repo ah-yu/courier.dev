@@ -542,8 +542,10 @@ file now lives at.
     back _inside_ the adapter call that performs the write; waiting for the event's job there would wait
     for the write that is waiting for the handler. `SyncEngine` marks the paths it is writing and, when an
     event arrives for one of them, queues its job and returns — the write finishes, then the job runs (and
-    persists its own state). That is why the engine still never deadlocks a host whose adapter awaits its
-    own event.
+    persists its own state). A failure in such a job surfaces through `EngineOptions.onError(error, paths)`,
+    which `SyncHost` routes to its own failure path (`fail`: a log line naming the paths, and a stop on an
+    auth failure); the adapter that fired the event has no place for the rejection. That is why the engine
+    still never deadlocks a host whose adapter awaits its own event.
   - `RemoteIndex` keeps a `fileId → hash` reverse map (its per-`remember` sweep was O(N²) over the vault)
     and a `hash → {fileId}` set (shared content: when the owning chain moves or is forgotten, the lookup
     goes to the chain that still holds those bytes), and `adoptRemoteIdentity` drops only the recorded

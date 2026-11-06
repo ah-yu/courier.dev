@@ -703,6 +703,24 @@ describe("SyncHost", () => {
     expect(second[0]!.action).toBe("delete");
   });
 
+  it("routes a queued event's failure through the host's failure path", async () => {
+    const onAuthFailure = vi.fn();
+    const { host } = await newHost({ onAuthFailure });
+    track(host);
+    await host.start();
+    // The binding the engine calls when a deferred job fails: one line to `fail`, which
+    // logs the paths and stops the host on an auth failure.
+    const engine = host.engine as unknown as {
+      opts: { onError?: (error: unknown, paths: readonly string[]) => void };
+    };
+    engine.opts.onError!(apiError(401, "UNAUTHORIZED"), ["notes/a.md"]);
+    expect(hostLog).toHaveBeenCalledWith(
+      expect.stringContaining("a queued local event for notes/a.md"),
+      expect.any(Error),
+    );
+    expect(onAuthFailure).toHaveBeenCalledWith("revoked");
+    expect(host.engine).toBeNull();
+  });
   /**
    * A revoked key (or a vault deleted on the server) used to be reported by the CLI
    * while its watcher and interval kept running against a credential that could

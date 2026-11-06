@@ -642,6 +642,9 @@ export class SyncHost {
       onSyncActivity: this.opts.onSyncActivity,
       onProgress: this.opts.onProgress,
       onRateLimited: this.opts.onRateLimited,
+      // A deferred event's push/pull has no other surface; the host's failure path logs
+      // it and stops on an auth failure, like every other background failure.
+      onError: (err, paths) => this.fail(`a queued local event for ${paths.join(", ")}`, err),
       // A pass that outlived its host must not write the state it read back over what a
       // restarted host has already saved. The engine cannot be cancelled between files,
       // so the write is what is dropped.

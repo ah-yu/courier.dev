@@ -52,6 +52,15 @@ must then tell the engine itself (`await client.change(path)`), where real Obsid
 `vault.on("modify")`. That single difference is the whole gap to L2 — a defect in the event wiring is
 invisible from here.
 
+**Every `TestClient` helper asserts the settled-client invariants** after it returns
+(`src/harness/consistency.ts`, from `sync`/`bind`/`change`/`rename`/`removeAndSync`/`syncSettings`; `remotePushed` is not checked, because a notification may be delivered concurrently or from inside a write):
+for each chain that owns a path, the bytes on disk hash to the sync point the state records (a live
+empty file included), a tombstone owns no file, and no two live chains claim one path. Two
+consequences for test authors: a case that writes without reporting it must report it before the
+next helper call (the harness fails the case with "the state and the disk disagree"), and the check
+re-hashes every tracked file per helper call, so many unreported edits are cheaper as raw
+`client.write()` calls plus one `change()` than as many helper calls.
+
 ## L2: the real plugin, Obsidian stubbed
 
 Same server and engine, but the client is the real `CourierPlugin`, with `obsidian` aliased to

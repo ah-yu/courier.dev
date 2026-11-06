@@ -647,6 +647,7 @@ async function makeEngine(
   onSyncActivity?: (event: SyncActivityEvent) => void,
   onProgress?: (progress: SyncProgress) => void,
   onRateLimited?: (event: { waitMs: number }) => void,
+  onError?: (error: unknown, paths: readonly string[]) => void,
 ) {
   const key = await deriveEncryptionKey(
     "password",
@@ -667,6 +668,7 @@ async function makeEngine(
     onSyncActivity,
     onProgress,
     onRateLimited,
+    onError,
     onSaveState,
   });
   return { engine, adapter, api, key };
@@ -6210,6 +6212,45 @@ describe("SyncEngine — operation interleavings", () => {
     await expectConsistent(engine, adapter, api);
     expect(api.chains.size).toBe(1);
     expect(engine.fileIdForPath("n.md")).toBeTruthy();
+  });
+  it("reports a deferred event's push failure through onError", async () => {
+    const failures: Array<{ error: unknown; paths: readonly string[] }> = [];
+    const { engine, adapter, api } = await makeEngine(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (error, paths) => failures.push({ error, paths }),
+    );
+    adapter.files.set("n.md", encoder.encode("v1"));
+    await engine.initialSync();
+    const fileId = await syncedFileId(api);
+    await api.remoteEdit(fileId, "v2");
+
+    // A user edit that lands right after the pull's write: the event is fired from inside
+    // the adapter call, so its job is deferred (it must not wait for the write), and its
+    // push fails. The adapter has no place for that rejection, so `onError` must get it.
+    adapter.onWrite = async (path) => {
+      if (path !== "n.md") return;
+      adapter.onWrite = null;
+      adapter.files.set("n.md", encoder.encode("local edit"));
+      api.onPush = async () => {
+        throw new Error("network down");
+      };
+      void engine.handleLocalChange("n.md");
+    };
+    await engine.initialSync();
+    await engine.whenIdle();
+    adapter.onWrite = null;
+    api.onPush = null;
+
+    expect(failures).toHaveLength(1);
+    expect(String(failures[0].error)).toContain("network down");
+    expect(failures[0].paths).toEqual(["n.md"]);
   });
   it("settles one version when a pass and a notification run at the same time", async () => {
     const { engine, adapter, api } = await makeEngine();

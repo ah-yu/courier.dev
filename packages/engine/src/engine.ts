@@ -184,6 +184,15 @@ export interface EngineOptions {
    * listener that throws is logged and does not stop the sync that reported it.
    */
   onSyncActivity?: (event: SyncActivityEvent) => void;
+  /**
+   * Called when a job queued behind one of the engine's own writes fails.
+   *
+   * The host that fired the event gets a resolved promise — waiting there would wait for
+   * the write that is waiting for the handler — so this is where the failure surfaces.
+   * Without it a deferred push/pull failure would only reach the console, which
+   * invariant 5 forbids.
+   */
+  onError?: (error: unknown, paths: readonly string[]) => void;
   /** Called whenever synced state changes so hosts can persist it. */
   onSaveState?: (json: string) => void;
   /**
@@ -1027,7 +1036,8 @@ export class SyncEngine {
     const running = this.paths.run(paths, run, "event");
     if (deferred) {
       void running.catch((err: unknown) => {
-        console.error("Courier: a local event failed:", err);
+        if (this.opts.onError) this.opts.onError(err, paths);
+        else console.error("Courier: a local event failed:", err);
       });
       return Promise.resolve();
     }
@@ -1211,7 +1221,7 @@ export class SyncEngine {
       // push was applied and only its response was lost, or a peer converged on the
       // same content. Nothing to write — take the head as the sync point.
       if (head && head.contentHash === prepared.contentHash) {
-        this.adoptRemoteIdentity(fileId, plainPath, head);
+        this.adoptRemoteIdentity(fileId, plainPath, head, prepared.stamp ?? null);
         // The head is this very version (the server stores the client's versionId), so
         // the push did land and only its response was lost. A peer that merely converged
         // on the same bytes has a different versionId and is not reported as this
@@ -3700,6 +3710,9 @@ export class SyncEngine {
     // move of a large attachment would otherwise read both sides of it whole just to
     // follow a path.
     if (await this.opts.adapter.statFile(remotePath)) {
+      // No stamp: the bytes here were never read or hashed, and a stamp may only be
+      // recorded with the hash of the bytes at that stamp (a missing stamp costs one
+      // re-read, and a failed pull then retries instead of looking synced).
       this.adoptRemoteIdentity(fileId, remotePath, head);
       return { path: remotePath, moved: false };
     }
