@@ -18,11 +18,13 @@ function client(
   state: Record<string, unknown>,
   files: Record<string, Uint8Array>,
   owners: Record<string, string>,
+  isSyncable: (path: string) => boolean = () => true,
 ) {
   return {
     state: { json: JSON.stringify(state) },
     readBytes: (path: string) => files[path] ?? null,
     engine: { fileIdForPath: (path: string) => owners[path] ?? null },
+    isSyncable,
   };
 }
 
@@ -85,6 +87,26 @@ describe("assertClientConsistent", () => {
     );
   });
 
+  it("fails when the bytes at the path hash to another value", async () => {
+    const state = { f1: await live("a.md", "body") };
+    await expect(
+      assertClientConsistent(client(state, { "a.md": encoder.encode("other") }, { "a.md": "f1" })),
+    ).rejects.toThrow(/state and the disk disagree/);
+  });
+
+  it("skips a path this client's scope does not sync", async () => {
+    const state = { f1: await live("private/a.md", "body") };
+    await expect(
+      assertClientConsistent(
+        client(
+          state,
+          { "private/a.md": encoder.encode("edited while excluded") },
+          { "private/a.md": "f1" },
+          (path) => !path.startsWith("private/"),
+        ),
+      ),
+    ).resolves.toBeUndefined();
+  });
   it("skips a live entry whose path another chain now owns", async () => {
     const state = { old: await live("reused.md", "old body") };
     await expect(
