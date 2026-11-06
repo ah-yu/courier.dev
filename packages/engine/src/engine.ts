@@ -192,7 +192,7 @@ export interface EngineOptions {
    * Without it a deferred push/pull failure would only reach the console, which
    * invariant 5 forbids.
    */
-  onError?: (error: unknown) => void;
+  onError?: (error: unknown, paths: readonly string[]) => void;
   /** Called whenever synced state changes so hosts can persist it. */
   onSaveState?: (json: string) => void;
   /**
@@ -1036,7 +1036,7 @@ export class SyncEngine {
     const running = this.paths.run(paths, run, "event");
     if (deferred) {
       void running.catch((err: unknown) => {
-        if (this.opts.onError) this.opts.onError(err);
+        if (this.opts.onError) this.opts.onError(err, paths);
         else console.error("Courier: a local event failed:", err);
       });
       return Promise.resolve();
