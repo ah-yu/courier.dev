@@ -53,7 +53,7 @@ must then tell the engine itself (`await client.change(path)`), where real Obsid
 invisible from here.
 
 **Every `TestClient` helper asserts the settled-client invariants** after it returns
-(`src/harness/consistency.ts`, from `sync`/`bind`/`change`/`rename`/`removeAndSync`/`syncSettings`):
+(`src/harness/consistency.ts`, from `sync`/`bind`/`change`/`rename`/`removeAndSync`/`syncSettings`/`remotePushed`):
 for each chain that owns a path, the bytes on disk hash to the sync point the state records (a live
 empty file included), a tombstone owns no file, and no two live chains claim one path. Two
 consequences for test authors: a case that writes without reporting it must report it before the

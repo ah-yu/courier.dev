@@ -363,7 +363,7 @@ describe("sync e2e — two clients through a real server", () => {
       a.write("note.md", "v3");
       await a.change("note.md");
       const head = (await fileVersions(server, vault.id, fileId)).at(-1)!;
-      await b.remotePushed(fileId, head.versionId);
+      await b.remotePushed(fileId, head.versionId, { settle: false });
     };
 
     await b.sync();
@@ -418,7 +418,7 @@ describe("sync e2e — two clients through a real server", () => {
         a.write("note.md", "v3");
         await a.change("note.md");
         const head = (await fileVersions(server, vault.id, fileId)).at(-1)!;
-        await b.remotePushed(fileId, head.versionId);
+        await b.remotePushed(fileId, head.versionId, { settle: false });
       }
       await writeFile(path, bytes);
     };
