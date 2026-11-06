@@ -190,9 +190,10 @@ protocol or a security hole. Read the linked section before changing one.
    [sync-engine.md](docs/sync-engine.md#offline-changes-and-reconciliation).
 5. **There is no offline queue; the reconcile pass is the retry.** A failed push or pull must be
    visible (never resolved as "nothing to do"). Hosts reconcile on a **re**connect, never on the
-   first connect, and never two at once. The engine never waits on a path: no locks, only
-   in-flight marking, so a host whose adapter awaits its own event cannot deadlock. See
-   [sync-engine.md](docs/sync-engine.md#offline-changes-and-reconciliation).
+   first connect, and never two at once. The engine serialises per path instead of locking: every
+   operation on a path is a job in that path's queue, and an event fired from inside the engine's
+   own write is queued rather than waited for, so a host whose adapter awaits its own event cannot
+   deadlock. See [sync-engine.md](docs/sync-engine.md#offline-changes-and-reconciliation).
 6. **Engine-initiated writes, deletes and moves are never re-synced as user actions.**
    `SelfEventLog` records each one (and each pushed version before the request goes out) and the
    matching vault/WebSocket event is consumed. See
@@ -219,7 +220,7 @@ protocol or a security hole. Read the linked section before changing one.
     stay in this device's scope when the restored file is in it. See [sync-engine.md](docs/sync-engine.md#restore).
 11. **Cost is bounded.** A stamp is only recorded with the hash of the bytes at that stamp (and
     a missing stamp costs one re-read). Creates are batched (100 files / 8 MiB); a pass orders
-    work by priority, runs through `WorkPool`, claims paths through `PathClaims`, bounds
+    work by priority, runs through `WorkPool`, serialises paths through `PathQueue`, bounds
     event-driven work through `OpQueue`, and coalesces a burst of `file_pushed` notifications into
     batched chain pulls (200 per request). See
     [sync-engine.md](docs/sync-engine.md#cost-stamps-and-re-reads) and

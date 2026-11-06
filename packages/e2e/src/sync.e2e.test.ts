@@ -367,6 +367,7 @@ describe("sync e2e — two clients through a real server", () => {
     };
 
     await b.sync();
+    await b.engine.whenIdle();
 
     // Nothing the user wrote was overwritten, so nothing is parked, and the note and
     // the sync point both end on the peer's newest version — the pull that was still
@@ -423,6 +424,7 @@ describe("sync e2e — two clients through a real server", () => {
 
     await b.sync();
     b.adapter.writeFile = writeFile;
+    await b.engine.whenIdle();
 
     expect(await b.conflictFiles()).toEqual([]);
     expect(b.read("note.md")).toBe("v3");
@@ -967,15 +969,12 @@ describe("sync e2e — two clients through a real server", () => {
       a.write("n.md", "a".repeat(4 * 1024 * 1024));
       let laterEdit: Promise<void> | undefined;
       a.beforeNextPush(async () => {
-        // Runs inside the first push, after it read and encrypted the earlier bytes but
-        // before its request goes out: this is where the later edit is made. Its push is
-        // **awaited** so the order the case is about — the later edit lands first, the
-        // earlier push is refused — is not a race. It used to be one in practice: the
-        // 4 MiB push was slow enough to lose the head race by itself, until the blob store
-        // stopped flushing per blob, after which this case failed about one run in four.
+        // Runs inside the first push, before its request goes out. The later edit's
+        // handler queues behind this push's job (one job per path), so it is started,
+        // not awaited: waiting here would wait for the push that is waiting for this
+        // hook.
         a.write("n.md", "edited second");
         laterEdit = a.change("n.md");
-        await laterEdit;
       });
       await a.change("n.md");
       await laterEdit;
