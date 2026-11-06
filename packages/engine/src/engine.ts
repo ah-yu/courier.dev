@@ -1587,11 +1587,17 @@ export class SyncEngine {
     // second pass can never overwrite `firstBind`/`tombstoneMerge`, the remote index or
     // the create batch of the pass already running. The bind's merge rule is what keeps
     // a connect from deleting notes the server already deleted.
-    if (this.passPromise !== null) {
+    while (this.passPromise !== null) {
       if (options.firstBind !== true) return await this.passPromise;
       await this.passPromise;
     }
-    const run = this.runInitialSync(options);
+    // A bind merges wherever the caller asks for one: a reconnect or a rebind is a merge
+    // too (see `5b. remote tombstone + local file when the peer comes back` — the local
+    // copy comes back as a new file). Only the pass itself is single-flight here.
+    const run = this.runInitialSync({
+      ...options,
+      firstBind: options.firstBind === true,
+    });
     const tracked = run.finally(() => {
       if (this.passPromise === tracked) this.passPromise = null;
     });

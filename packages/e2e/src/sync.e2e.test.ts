@@ -787,7 +787,7 @@ describe("sync e2e — two clients through a real server", () => {
     // must bind (merge: the local copy is the user's own), not apply the deletion.
     const restarted = await newClient(vault.id, "device-a", a.dir);
     const state = a.state.json;
-    expect(state, "the first client never persisted a state").toBeDefined();
+    expect(state, "the first client never persisted a state").toBeTruthy();
     restarted.engine.loadState(state!);
     expect(restarted.engine.fileIdForPath("gone.md")).toBe(fileId);
     restarted.write("gone.md", "mine");
