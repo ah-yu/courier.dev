@@ -11,8 +11,9 @@ import { sha256Hex } from "../../../engine/src/index";
  * instead of the next assertion in the test.
  *
  * A **tombstone** is a sync point with the empty content hash *and* no `stamp` (a delete
- * version has no file to stamp); a live entry may legitimately lack a stamp (an adopted
- * version, a file the adapter could not stat), so `stamp` alone cannot classify it.
+ * version has no file to stamp); a live entry carries one wherever the engine could stat
+ * the file (an adoption records the stamp it saw), so `stamp` alone cannot classify it and
+ * an empty unstamped entry is treated as a tombstone.
  *
  * The check reads the state *after* the operation, so a case that writes a file without
  * reporting it (a legitimate L1 scene: L1 has no vault events) must report it before the

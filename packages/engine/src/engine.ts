@@ -1221,7 +1221,7 @@ export class SyncEngine {
       // push was applied and only its response was lost, or a peer converged on the
       // same content. Nothing to write — take the head as the sync point.
       if (head && head.contentHash === prepared.contentHash) {
-        this.adoptRemoteIdentity(fileId, plainPath, head);
+        this.adoptRemoteIdentity(fileId, plainPath, head, prepared.stamp ?? null);
         // The head is this very version (the server stores the client's versionId), so
         // the push did land and only its response was lost. A peer that merely converged
         // on the same bytes has a different versionId and is not reported as this
@@ -3709,8 +3709,9 @@ export class SyncEngine {
     // `statFile`, not `readFile`: only "is a file there?" is being answered, and a
     // move of a large attachment would otherwise read both sides of it whole just to
     // follow a path.
-    if (await this.opts.adapter.statFile(remotePath)) {
-      this.adoptRemoteIdentity(fileId, remotePath, head);
+    const remoteStamp = await this.opts.adapter.statFile(remotePath);
+    if (remoteStamp !== null) {
+      this.adoptRemoteIdentity(fileId, remotePath, head, remoteStamp);
       return { path: remotePath, moved: false };
     }
 
