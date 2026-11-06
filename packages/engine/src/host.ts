@@ -351,7 +351,7 @@ export class SyncHost {
    * lease before that queue drains would let the next host start on top of a write that is
    * still coming.
    */
-  private drainingEngine: SyncEngine | null = null;
+  private readonly drainingEngines = new Set<SyncEngine>();
   private ws: SyncWebSocket | null = null;
   private stopEvents: (() => void) | null = null;
   private reconcileTimer: TimerHandle | null = null;
@@ -545,13 +545,19 @@ export class SyncHost {
    */
   async whenIdle(): Promise<void> {
     for (;;) {
-      const engine = this.drainingEngine ?? this.engineInstance;
-      if (engine !== null) await engine.whenIdle();
+      // Every engine this host stopped, not just the latest: a restart or a second
+      // `stop()` must not lose an engine that is still draining.
+      for (const engine of this.drainingEngines) {
+        await engine.whenIdle();
+        this.drainingEngines.delete(engine);
+      }
+      if (this.engineInstance !== null) await this.engineInstance.whenIdle();
       const idle =
         this.background === 0 &&
         !this.reconciling &&
         this.ops.running === 0 &&
-        this.ops.queued === 0;
+        this.ops.queued === 0 &&
+        this.drainingEngines.size === 0;
       if (idle) return;
       await new Promise<void>((resolve) => {
         this.platform.after(50, resolve);
@@ -591,7 +597,7 @@ export class SyncHost {
     // The socket is gone, so a push started from a stale api must not claim a
     // session the server no longer has open.
     this.opts.api.setSessionId?.(null);
-    this.drainingEngine = this.engineInstance;
+    if (this.engineInstance !== null) this.drainingEngines.add(this.engineInstance);
     this.engineInstance = null;
   }
 

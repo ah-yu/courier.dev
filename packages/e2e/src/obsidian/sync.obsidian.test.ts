@@ -297,7 +297,7 @@ async function instrumentVault(vault: string): Promise<void> {
 
 /**
  * The engine's own view from inside the renderer: its sync state, the
- * self-write/self-rename suppression records, its in-flight markers and the
+ * self-write/self-rename suppression records, the path queue and the
  * adapter's move log. Read directly (the fields are `private` in TypeScript
  * only) because a follower that silently drops a notification leaves no other
  * trace.

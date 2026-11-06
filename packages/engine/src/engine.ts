@@ -578,6 +578,8 @@ export class SyncEngine {
   private tombstoneMerge: TombstoneHandling = "apply-remote-delete";
   /** True during the single pass that binds the vault (see {@link initialSync}). */
   private firstBind = false;
+  /** The first bind in flight, shared by every event that arrives before it settles. */
+  private bindPromise: Promise<void> | null = null;
   private initialized = false;
   /** Paths reported through `onFileTooLarge` in the current pass (one event each). */
   private tooLargeReported = new Set<string>();
@@ -1580,6 +1582,27 @@ export class SyncEngine {
       priorityPaths?: readonly string[];
     } = {},
   ): Promise<void> {
+    // Before the first successful pass every call is the bind, and there is exactly one
+    // of it: an event that arrives while the host's bind is in flight shares that pass
+    // instead of starting a second one, which would race `firstBind`/`tombstoneMerge`,
+    // the remote index and the create batch. The bind's merge rule is what keeps a
+    // connect from deleting notes the server already deleted.
+    if (!this.initialized && options.firstBind === true) {
+      if (this.bindPromise !== null) return await this.bindPromise;
+      const bind = this.runInitialSync(options);
+      this.bindPromise = bind.finally(() => {
+        this.bindPromise = null;
+      });
+      return await this.bindPromise;
+    }
+    return await this.runInitialSync(options);
+  }
+
+  /** The pass itself; `initialSync` owns the first-bind gate and the single flight. */
+  private async runInitialSync(options: {
+    firstBind?: boolean;
+    priorityPaths?: readonly string[];
+  }): Promise<void> {
     this.firstBind = options.firstBind === true;
     this.tombstoneMerge = this.firstBind ? "bind-merge" : "apply-remote-delete";
     try {
@@ -3698,7 +3721,8 @@ export class SyncEngine {
     // the job that is waiting for it. Not when the event is the echo of a write this
     // engine is performing: that write is the bind's own work, and binding again would
     // wait for it.
-    if (!this.initialized && !this.writingPaths.has(path)) await this.initialSync();
+    if (!this.initialized && !this.writingPaths.has(path))
+      await this.initialSync({ firstBind: true });
     // A pull decided for this file can apply at the path the head records (a peer move),
     // so claim that path too when the chain already names one.
     const fileId = this.pathToFileId.get(path);
@@ -4042,7 +4066,7 @@ export class SyncEngine {
     // handled before the bind would push a create for content the server may already hold.
     // Not for the echo of a write this engine is performing (see `handleLocalChange`).
     if (!this.initialized && !this.writingPaths.has(oldPath) && !this.writingPaths.has(newPath)) {
-      await this.initialSync();
+      await this.initialSync({ firstBind: true });
     }
     // The engine following a peer's move fires this same event.
     if (this.consumeSelfRename(oldPath, newPath)) return;

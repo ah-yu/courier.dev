@@ -3489,7 +3489,7 @@ describe("SyncEngine — the sync scope", () => {
     await engine.handleLocalRename("note.md", "private/note.md");
 
     // The old path no longer belongs to this chain: a fresh note there is its own
-    // chain, and the move must not leave an in-flight marker that hides it from the
+    // chain, and the move must not leave a path job behind that hides it from the
     // next pass either.
     adapter.files.set("note.md", encoder.encode("something else"));
     await engine.initialSync();
@@ -6151,6 +6151,21 @@ describe("SyncEngine — operation interleavings", () => {
     expect(api.chains.get(fileId)!.map((v) => v.action)).toEqual(["create", "modify", "delete"]);
   });
 
+  it("binds the vault before a rename that arrives before the first sync", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    const oldPath = "note-2026-01-01-000000.conflict.md";
+    adapter.files.set(oldPath, encoder.encode("the old copy"));
+    adapter.files.set("kept.md", encoder.encode("kept"));
+
+    // No `initialSync` first: the rename's handler binds (with the bind merge rule),
+    // so the file it creates is not a second chain for content the server may hold.
+    await engine.handleLocalRename(oldPath, "kept.md");
+    await engine.whenIdle();
+
+    await expectConsistent(engine, adapter, api);
+    expect(engine.fileIdForPath("kept.md")).toBeTruthy();
+    expect(api.chains.size).toBe(1);
+  });
   it("turns an untracked rename into a create without waiting for its own job", async () => {
     const { engine, adapter, api } = await makeEngine();
     await engine.initialSync();
