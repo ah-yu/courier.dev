@@ -53,7 +53,7 @@ import {
   type OpWeight,
 } from "./op-queue";
 import { WorkPool } from "./work-pool";
-import { PathClaims } from "./path-claims";
+import { PathQueue } from "./path-queue";
 import { MAX_RATE_LIMIT_WAITS, isRateLimitError, rateLimitWaitMs, sleep } from "./rate-limit";
 import type { PushFile } from "./api";
 import type { SyncApi } from "./api";
@@ -324,6 +324,16 @@ interface ReconcilePass {
    * opened most recently. A preference only — the pass still decides every file.
    */
   priority: ReadonlyMap<string, number>;
+  /**
+   * Each chain's sync point when the pass began.
+   *
+   * Serialization orders the writes, not the snapshots: an event can adopt a newer
+   * version after this pass fetched its chain, and the pass's head is then older than
+   * the state. A job for such a file would pull its stale head over the event's bytes
+   * (a rollback), so it skips: the event settled the file, and the next pass decides
+   * from the fresh chain.
+   */
+  stateAtStart: ReadonlyMap<string, string | null>;
 }
 
 /**
@@ -428,20 +438,6 @@ interface PreparedPush {
  * notes, not to hold a vault's attachments at once.
  */
 const MAX_PUSH_BATCH_BYTES = 8 * 1024 * 1024;
-
-/**
- * How many times one pull may re-apply a version that superseded its write.
- *
- * A pull's write and its sync point are one turn apart, so a notification can settle the
- * peer's next version while the bytes are on their way (see `repairSupersededPull`).
- * Re-applying that version needs a fetch and a write of its own, and a third operation
- * can move the path again inside those awaits. Two attempts cover the realistic races;
- * past that the path is contention, and the pull records the version whose bytes are on
- * disk so the next pass pulls the newer one — a transient step back, never a state that
- * names a version the disk does not hold (the next pass would push those bytes as a
- * revert).
- */
-const MAX_REAPPLY_ATTEMPTS = 2;
 
 /**
  * How long the excluded folders' file listing is reused.
@@ -565,26 +561,25 @@ export class SyncEngine {
    */
   private readonly streamedCommits = new Map<string, Promise<FileStamp | null>>();
   /**
-   * Paths an incremental event is handling right now (path → nesting depth).
+   * One job queue per path: every operation that may read or write a path runs after the
+   * jobs already queued for it, so two operations on one path never interleave.
    *
-   * A reconcile decides from the snapshot it took when it started — the vault
-   * listing, the hashes of that moment, the chains as they were — and the vault
-   * keeps firing events while it runs. Both would then act on the same path, the
-   * reconcile from stale bytes: at best a duplicate `modify`/`rename`/`delete`
-   * version, at worst a pull overwriting an edit that landed after the snapshot.
-   * The reconcile therefore **skips** a path an event is already handling; the
-   * event brings that file to the right state on its own, and the next pass picks
-   * up whatever it left behind.
-   *
-   * Deliberately not a lock: nothing ever waits on it. A host whose adapter awaits
-   * the vault event its own write fires (the tests' `FakeAdapter` does) cannot
-   * deadlock, because the skipped side never blocks on the other.
+   * This is what makes the engine's multi-step changes (a pull's write and its sync
+   * point, a delete's state and index, a rename's two paths) invisible to another
+   * operation: the change is one job, and the next job on that path starts after it.
    */
-  private inFlightPaths = new Map<string, number>();
+  private readonly paths = new PathQueue();
+  /**
+   * Paths this engine is writing right now, so a vault event the write fires can be
+   * queued without waiting for it (see `schedule`).
+   */
+  private readonly writingPaths = new Set<string>();
   /** Tombstone rule for the reconcile currently running (see `TombstoneHandling`). */
   private tombstoneMerge: TombstoneHandling = "apply-remote-delete";
   /** True during the single pass that binds the vault (see {@link initialSync}). */
   private firstBind = false;
+  /** The pass in flight, shared by every call that arrives while it runs. */
+  private passPromise: Promise<void> | null = null;
   private initialized = false;
   /** Paths reported through `onFileTooLarge` in the current pass (one event each). */
   private tooLargeReported = new Set<string>();
@@ -866,70 +861,71 @@ export class SyncEngine {
     options: { targetPath?: string } = {},
   ): Promise<void> {
     const target = options.targetPath ?? this.pathForFileId(fileId) ?? plainPath;
-    // Marked before the target is inspected, not just before the write: the check
-    // and the write have to agree, and a reconcile deciding for this path in
-    // between would invalidate the "free" the check just returned.
-    const release = this.beginLocalOp(target);
-    try {
-      const status = await this.inspectRestoreTarget(fileId, target);
-      if (status.kind === "other-file") {
-        throw new RestoreBlockedError(
-          "occupied-by-other-file",
-          `${target} is already held by another file`,
-          status.holderFileId,
-        );
-      }
-      if (status.kind === "unattributed") {
-        throw new RestoreBlockedError(
-          "unattributed-local-file",
-          `${target} already has a local file that no synced chain claims`,
-        );
-      }
+    // One job over the target: the "is it free?" check and the write have to agree, and a
+    // reconcile or an event deciding for this path in between would invalidate the "free"
+    // the check just returned.
+    return await this.paths.run(
+      [target],
+      async () => {
+        const status = await this.inspectRestoreTarget(fileId, target);
+        if (status.kind === "other-file") {
+          throw new RestoreBlockedError(
+            "occupied-by-other-file",
+            `${target} is already held by another file`,
+            status.holderFileId,
+          );
+        }
+        if (status.kind === "unattributed") {
+          throw new RestoreBlockedError(
+            "unattributed-local-file",
+            `${target} already has a local file that no synced chain claims`,
+          );
+        }
 
-      const chain = await this.pullChain(fileId);
-      // A version's size says whether its bytes are chunked, and the chain is the only
-      // place this call can learn it: the caller names a content hash, not a size. A
-      // hash that is not in the chain cannot be restored — guessing the head's size
-      // would read the wrong framing and allocate the wrong buffer — and a pruned
-      // version the chain no longer holds is refused the same way.
-      const version = chain.find((entry) => entry.contentHash === contentHash);
-      if (version === undefined) {
-        throw new Error(`Version ${contentHash} is not in this file's history`);
-      }
-      const bytes = await this.fetchRemoteVersionBytes(
-        this.opts.vaultId,
-        contentHash,
-        version.sizeBytes,
-      );
-      if (!bytes) {
-        throw new Error(`Version content not found for ${contentHash}`);
-      }
-      // The head this restore is decided from is the chain's, not the state's: a
-      // chain that this device deleted (applied from a peer) has no state entry at
-      // all, and a restore is a new version on top of wherever the chain stands now.
-      // A peer pushing in between still gets refused rather than overwritten.
-      // The write below fires a vault event the host feeds straight back into
-      // `handleLocalChange`, and it can arrive before `pushFile` has recorded the
-      // new state and path (the push awaits a network round trip). Mark the write
-      // as our own first, or the event is mistaken for a user edit: a second
-      // `restore` push, and a brand-new fileId when the delete came from a peer.
-      await this.recordSelfWrite(target, bytes);
-      await this.opts.adapter.writeFile(target, bytes);
-      // The bytes are on disk now, so the version carries their real stamp instead of a
-      // "pushed just now" one: a peer compares that time when the file is a config-folder
-      // path, and the sync point gets the stamp a later pass needs to skip re-reading it.
-      await this.pushFile({
-        fileId,
-        plainPath: target,
-        action: "restore",
-        bytes,
-        baseVersionId: remoteHead(chain)?.versionId ?? null,
-        stamp: await this.opts.adapter.statFile(target),
-      });
-      this.persist();
-    } finally {
-      release();
-    }
+        const chain = await this.pullChain(fileId);
+        // A version's size says whether its bytes are chunked, and the chain is the only
+        // place this call can learn it: the caller names a content hash, not a size. A
+        // hash that is not in the chain cannot be restored — guessing the head's size
+        // would read the wrong framing and allocate the wrong buffer — and a pruned
+        // version the chain no longer holds is refused the same way.
+        const version = chain.find((entry) => entry.contentHash === contentHash);
+        if (version === undefined) {
+          throw new Error(`Version ${contentHash} is not in this file's history`);
+        }
+        const bytes = await this.fetchRemoteVersionBytes(
+          this.opts.vaultId,
+          contentHash,
+          version.sizeBytes,
+        );
+        if (!bytes) {
+          throw new Error(`Version content not found for ${contentHash}`);
+        }
+        // The head this restore is decided from is the chain's, not the state's: a
+        // chain that this device deleted (applied from a peer) has no state entry at
+        // all, and a restore is a new version on top of wherever the chain stands now.
+        // A peer pushing in between still gets refused rather than overwritten.
+        // The write below fires a vault event the host feeds straight back into
+        // `handleLocalChange`, and it can arrive before `pushFile` has recorded the
+        // new state and path (the push awaits a network round trip). Mark the write
+        // as our own first, or the event is mistaken for a user edit: a second
+        // `restore` push, and a brand-new fileId when the delete came from a peer.
+        await this.recordSelfWrite(target, bytes);
+        await this.writing([target], () => this.opts.adapter.writeFile(target, bytes));
+        // The bytes are on disk now, so the version carries their real stamp instead of a
+        // "pushed just now" one: a peer compares that time when the file is a config-folder
+        // path, and the sync point gets the stamp a later pass needs to skip re-reading it.
+        await this.pushFile({
+          fileId,
+          plainPath: target,
+          action: "restore",
+          bytes,
+          baseVersionId: remoteHead(chain)?.versionId ?? null,
+          stamp: await this.opts.adapter.statFile(target),
+        });
+        this.persist();
+      },
+      "event",
+    );
   }
 
   /**
@@ -1006,17 +1002,57 @@ export class SyncEngine {
   }
 
   /**
-   * Mark `path` as being handled by an incremental event, and return the release.
-   * See {@link inFlightPaths} for why the reconcile skips such paths instead of
-   * waiting for them.
+   * Queue one local event as a job, and answer when it has run.
+   *
+   * A host can feed the vault event of this engine's own write back *inside* the adapter
+   * call that performs it. Waiting for the job there would wait for the write that is
+   * waiting for the handler, so such a call queues the job and returns: the write
+   * finishes, then the job runs. Its failure is reported here because the caller that
+   * would have handled the rejection is the adapter, which has no place for it.
    */
-  private beginLocalOp(path: string): () => void {
-    this.inFlightPaths.set(path, (this.inFlightPaths.get(path) ?? 0) + 1);
-    return () => {
-      const remaining = (this.inFlightPaths.get(path) ?? 1) - 1;
-      if (remaining > 0) this.inFlightPaths.set(path, remaining);
-      else this.inFlightPaths.delete(path);
-    };
+  private schedule(paths: readonly string[], job: () => Promise<void>): Promise<void> {
+    const deferred = paths.some((path) => this.writingPaths.has(path));
+    // A deferred job's caller returns before it runs, so the job persists its own state:
+    // otherwise the state the event applied is only in memory, and a host that reloads
+    // from the store (or the tests' `state.json`) sees the version before it.
+    const run = deferred
+      ? async (): Promise<void> => {
+          try {
+            await job();
+          } finally {
+            this.persist();
+          }
+        }
+      : job;
+    const running = this.paths.run(paths, run, "event");
+    if (deferred) {
+      void running.catch((err: unknown) => {
+        console.error("Courier: a local event failed:", err);
+      });
+      return Promise.resolve();
+    }
+    return running;
+  }
+
+  /** Resolve once no queued job is running (tests, and a host draining before a stop). */
+  async whenIdle(): Promise<void> {
+    await this.paths.whenIdle();
+  }
+
+  /**
+   * Run one adapter write (or delete, or rename) with its paths marked as being written.
+   *
+   * A host may feed the vault event of the write back before the adapter call resolves;
+   * `schedule` sees the mark and queues the event without waiting for it, which is what
+   * keeps such a host from deadlocking (see `schedule`).
+   */
+  private async writing<T>(paths: readonly string[], run: () => Promise<T>): Promise<T> {
+    for (const path of paths) this.writingPaths.add(path);
+    try {
+      return await run();
+    } finally {
+      for (const path of paths) this.writingPaths.delete(path);
+    }
   }
 
   /**
@@ -1546,6 +1582,34 @@ export class SyncEngine {
       priorityPaths?: readonly string[];
     } = {},
   ): Promise<void> {
+    // One pass at a time. A call while a pass is in flight joins it (a bind only joins a
+    // bind; a bind requested while a plain pass runs waits for it and then binds), so a
+    // second pass can never overwrite `firstBind`/`tombstoneMerge`, the remote index or
+    // the create batch of the pass already running. The bind's merge rule is what keeps
+    // a connect from deleting notes the server already deleted.
+    while (this.passPromise !== null) {
+      if (options.firstBind !== true) return await this.passPromise;
+      await this.passPromise;
+    }
+    // A bind merges wherever the caller asks for one: a reconnect or a rebind is a merge
+    // too (see `5b. remote tombstone + local file when the peer comes back` — the local
+    // copy comes back as a new file). Only the pass itself is single-flight here.
+    const run = this.runInitialSync({
+      ...options,
+      firstBind: options.firstBind === true,
+    });
+    const tracked = run.finally(() => {
+      if (this.passPromise === tracked) this.passPromise = null;
+    });
+    this.passPromise = tracked;
+    return await tracked;
+  }
+
+  /** The pass itself; `initialSync` owns the first-bind gate and the single flight. */
+  private async runInitialSync(options: {
+    firstBind?: boolean;
+    priorityPaths?: readonly string[];
+  }): Promise<void> {
     this.firstBind = options.firstBind === true;
     this.tombstoneMerge = this.firstBind ? "bind-merge" : "apply-remote-delete";
     try {
@@ -1576,8 +1640,8 @@ export class SyncEngine {
    * which local settings files are the user's own, and an early poll would run a
    * non-bind `initialSync()` in its place.
    *
-   * A file an event is already handling is skipped by `handleLocalChange`'s own
-   * in-flight marker, and a listing that lags a write cannot become a deletion here
+   * A file an event is already handling is serialised through the path queue, and a
+   * listing that lags a write cannot become a deletion here
    * either: the tombstone branch re-reads the file first.
    */
   async syncLocalSettings(): Promise<void> {
@@ -1586,7 +1650,7 @@ export class SyncEngine {
     if (!this.initialized) return;
     if (!syncsAnySettings(this.scope)) return;
     // A poll that overlaps a previous one would read the same bytes twice and push
-    // twice; against a reconcile it is harmless (the in-flight markers cover that).
+    // twice; against a reconcile it is harmless (the path queue covers that).
     if (this.settingsPollRunning) return;
     this.settingsPollRunning = true;
     this.beginPass();
@@ -1655,6 +1719,13 @@ export class SyncEngine {
     // The host's list is a preference; normalize it once for the whole pass.
     const priority = priorityRanks(normalizePriorityPaths(priorityPaths));
     this.beginPass();
+    // The sync points this pass starts from, read before its first await: an event that
+    // adopts a newer version at any point during the pass (even while it lists or hashes)
+    // makes this pass's chain stale for that file, and its job must skip rather than pull
+    // the stale head over the event's bytes (see `ReconcilePass.stateAtStart`).
+    const stateAtStart = new Map(
+      Object.entries(this.state).map(([fileId, entry]) => [fileId, entry.lastKnownVersionId]),
+    );
     // The adapter lists what exists; the scope decides what this device syncs.
     const localPaths = (await adapter.listSyncableFiles()).filter((p) => this.isSyncable(p));
     const visiblePaths = localPaths.filter((p) => !isConflictFile(p));
@@ -1830,6 +1901,7 @@ export class SyncEngine {
       overCapPaths,
       localStamps,
       priority,
+      stateAtStart,
     });
     // Raised only now: the pass has done everything it still could (see `reconcileLoop`).
     // A refusal is an `Error` in practice; the wrap keeps a host that threw something else
@@ -1855,7 +1927,7 @@ export class SyncEngine {
    * time); each one is a different fileId, so the state they mutate is disjoint. The
    * ordering is the user's paths first (see `orderFileIds`), not the server's answer
    * order. Two different chains can still name one path while a peer's move is in flight,
-   * so the tasks that may write the same path take turns through {@link PathClaims};
+   * so the tasks that may write the same path take turns through the engine's path queue;
    * everything else runs concurrently.
    *
    * Its whole snapshot arrives as one {@link ReconcilePass}: seven positional arguments
@@ -1870,22 +1942,24 @@ export class SyncEngine {
     this.beginProgress(ordered.length);
     const pool = new WorkPool(this.passLimits);
     // Two chains can name one path while a peer's move is in flight; the tasks that
-    // may write the same path take turns (see `PathClaims`). Everything else still
-    // runs concurrently.
-    const claims = new PathClaims();
+    // may write the same path take turns through the engine's path queue. Everything
+    // else still runs concurrently.
     let firstFailure: unknown = null;
 
     // Every task is a different fileId, so the state mutations they make are disjoint;
     // the pool only decides how many may be in flight, and runs a large file alone.
     // Paths, unlike fileIds, are not disjoint for a moment after a peer's move — which
-    // is what the claims serialise.
+    // is what the queue serialises.
     await Promise.all(
       ordered.map((fileId) =>
         pool.run(this.weightForFile(fileId, pass), async () => {
           const claim = this.resolvePaths(fileId, pass).claimed;
-          await claims.acquire(claim);
           try {
-            const failure = await this.reconcileOne(fileId, pass);
+            const failure = await this.paths.run(
+              claim,
+              () => this.reconcileOne(fileId, pass),
+              "pass",
+            );
             if (failure !== null) firstFailure ??= failure;
           } catch (err) {
             // An unexpected failure (an adapter that cannot read a path, say) is
@@ -1894,7 +1968,6 @@ export class SyncEngine {
             // task has settled.
             firstFailure ??= err;
           } finally {
-            claims.release(claim);
             this.advanceProgress();
           }
         }),
@@ -2055,7 +2128,7 @@ export class SyncEngine {
    * Split out of `reconcileLoop` so the per-file work can run through a `WorkPool`: the
    * decisions inside are per-fileId and the state it mutates is keyed by fileId/path, so
    * several of these can run together. Its caller serialises the ones whose paths
-   * overlap ({@link PathClaims}). A failure is **returned** rather than thrown — the
+   * overlap (the engine's path queue). A failure is **returned** rather than thrown — the
    * pool's caller collects the first one and the rest of the pass still runs, exactly as
    * the serial loop did.
    */
@@ -2064,6 +2137,15 @@ export class SyncEngine {
     const { skippedPaths, localStamps } = pass;
     const { adapter } = this.opts;
     let failure: unknown = null;
+
+    // An event settled this file after the pass fetched its chain: its job owns the
+    // file, and this pass's head may be older than the state it left behind (see
+    // `ReconcilePass.stateAtStart`). The next pass decides from the fresh chain.
+    if (
+      (this.state[fileId]?.lastKnownVersionId ?? null) !== (pass.stateAtStart.get(fileId) ?? null)
+    ) {
+      return null;
+    }
 
     const chain = chainByFileId.get(fileId) ?? [];
     const head = remoteHead(chain);
@@ -2134,15 +2216,8 @@ export class SyncEngine {
       }
     }
 
-    // An event that started while this pass was working owns the file now; the
-    // event itself brings it to the right state (see `inFlightPaths`). The head's path
-    // counts too: a pull applies (and may write) there when the peer moved the file.
-    if (
-      (plainPath !== null && this.inFlightPaths.has(plainPath)) ||
-      (recordedPath !== null && this.inFlightPaths.has(recordedPath))
-    ) {
-      return null;
-    }
+    // No event can be handling this path now: this job holds it, and an event's job for
+    // the same path either ran before it or waits behind it (see `PathQueue`).
 
     switch (decision.action) {
       case "synced": {
@@ -2285,6 +2360,11 @@ export class SyncEngine {
           // file is there, the next reconcile makes the same call again. A stat is
           // enough — the file's bytes are not part of "is it gone?".
           if (await adapter.statFile(plainPath)) break;
+          // An event queued behind this job (the user moved or recreated the file while
+          // this pass was deciding) owns the path: its job runs after this one and its
+          // decision is newer, so a tombstone pushed now would be decided from a snapshot
+          // the event has already invalidated.
+          if (this.paths.hasQueued(plainPath, "event")) break;
           // A move into a path outside the scope can land while this pass is deciding:
           // the chain now records the new path and nothing was deleted. The pass read
           // `plainPath` from a snapshot that is no longer true, so leave it to the next
@@ -2416,7 +2496,7 @@ export class SyncEngine {
    * records the new path, while the file — and this device's identity mapping — is still
    * at the old one. `plainPath` is where a task reads and writes; `recordedPath` is what
    * a pull may move the file to. `claimed` is the union, which is what two tasks with an
-   * overlapping path claim ({@link PathClaims}).
+   * overlapping path claim (the engine's path queue).
    */
   private resolvePaths(
     fileId: string,
@@ -2497,6 +2577,40 @@ export class SyncEngine {
     remote: RemoteIndex,
     localStamps: Map<string, FileStamp>,
     priority: ReadonlyMap<string, number>,
+  ): Promise<unknown> {
+    // Both sources are candidates: the hashes the scan took (a file a chain or a state
+    // entry claims, or one the move-repair fallback hashed) and the paths the scan only
+    // stamped. The latter is the common case on a first bind — the create reads each of
+    // them once, where the scan used to have read it too.
+    const candidates = [...localHashes.keys(), ...untrackedPaths];
+    const ordered = orderByPriority(
+      candidates.map((path, position) => ({
+        key: path,
+        paths: [path],
+        mtimeMs: localStamps.get(path)?.mtimeMs ?? 0,
+        // Every file here is untracked by definition; the tie-break is stated so a
+        // reader does not have to infer it from the call site.
+        locallyTracked: false,
+        position,
+      })),
+      priority,
+    );
+    // The whole batch is one job over its paths: an event on a file this batch is
+    // creating waits for it (and is applied after the create), so the batch cannot fork
+    // a second chain for a path an event already owns.
+    return await this.paths.run(
+      ordered,
+      () => this.createUntrackedFilesLocked(ordered, localHashes, remote, localStamps),
+      "batch",
+    );
+  }
+
+  /** The work of {@link createUntrackedFiles}, running inside its paths' job. */
+  private async createUntrackedFilesLocked(
+    ordered: readonly string[],
+    localHashes: Map<string, string>,
+    remote: RemoteIndex,
+    localStamps: Map<string, FileStamp>,
   ): Promise<unknown> {
     let batch: PreparedPush[] = [];
     let batchBytes = 0;
@@ -2597,35 +2711,12 @@ export class SyncEngine {
       return rateLimitedOut;
     };
 
-    // The same order the tracked half used: a note the user just created or opened is
-    // created on the server before the rest of a bind. Its stamp is the file's own
-    // modification time, the only recency signal an untracked file has.
-    //
-    // Both sources are candidates: the hashes the scan took (a file a chain or a state
-    // entry claims, or one the move-repair fallback hashed) and the paths the scan only
-    // stamped. The latter is the common case on a first bind — the create reads each of
-    // them once, where the scan used to have read it too.
-    const candidates = [...localHashes.keys(), ...untrackedPaths];
-    const ordered = orderByPriority(
-      candidates.map((path, position) => ({
-        key: path,
-        paths: [path],
-        mtimeMs: localStamps.get(path)?.mtimeMs ?? 0,
-        // Every file here is untracked by definition; the tie-break is stated so a
-        // reader does not have to infer it from the call site.
-        locallyTracked: false,
-        position,
-      })),
-      priority,
-    );
-
+    // The order is the pass's (a note the user just created or opened first); it was
+    // computed by the caller, which also queued this job for every candidate path.
     try {
       for (const path of ordered) {
         if (rateLimitedOut) break;
         if (this.pathToFileId.has(path) || remote.fileIdAt(path) !== null) continue;
-        // A brand-new file whose `create` event is still in flight belongs to that
-        // event: pushing it here is the second chain this pass must not create.
-        if (this.inFlightPaths.has(path)) continue;
         const read = await this.readWithStamp(path);
         if (!read) continue;
         // The pass may already have hashed this file. Reuse that hash only while the bytes
@@ -2868,36 +2959,17 @@ export class SyncEngine {
     const localBytes = localExists ? await adapter.readFile(plainPath) : null;
     if (localExists && !localBytes) return true;
 
-    // **Content this engine wrote is never a divergence.** A pull's bytes are visible on
-    // disk before its sync point is recorded (the write and the adoption are one turn
-    // apart, not one operation), so a decision that lands in that window — a notification
-    // for the peer's next version, a pass's re-read — sees the engine's own new bytes
-    // while the state still holds the old point, and reads them as the user's edit
-    // against a newer head. That is the shape a note saved twice produces (Obsidian saves
-    // a note again when the file it embeds finishes landing), and parking it left a
-    // conflict copy of the note the engine had just pulled, with the note itself then
-    // rolled back to the older version. The remote side still wins here; there is simply
-    // nothing of the user's to keep.
-    //
-    // `hasSelfWrite` first: hashing a 50 MiB attachment to answer a question the log can
-    // refuse for free would be paid on every genuine binary conflict.
-    const localIsSelfWrite =
-      localBytes !== null &&
-      this.selfEvents.hasSelfWrite(plainPath) &&
-      this.selfEvents.isSelfWrite(plainPath, await sha256Hex(localBytes));
-
     const applied = await this.pullRemote(fileId, plainPath, head, null, deviceName);
     if (!applied) return false;
 
-    if (localBytes !== null && !localIsSelfWrite) {
-      const conflictPath = await this.parkConflictFile(plainPath, localBytes);
-      this.opts.onConflictResolved?.({
-        fileId,
-        plainPath,
-        conflictPath,
-        remoteAction: head.action === "delete" ? "delete" : "write",
-      });
-    }
+    const conflictPath =
+      localBytes === null ? null : await this.parkConflictFile(plainPath, localBytes);
+    this.opts.onConflictResolved?.({
+      fileId,
+      plainPath,
+      conflictPath,
+      remoteAction: head.action === "delete" ? "delete" : "write",
+    });
     return true;
   }
 
@@ -3073,7 +3145,7 @@ export class SyncEngine {
     // The writer records the hash of what it is about to write, so the vault event the
     // write fires is recognised as this engine's own (see `recordSelfWrite`).
     await this.recordSelfWrite(target, bytes);
-    await this.opts.adapter.writeFile(target, bytes);
+    await this.writing([target], () => this.opts.adapter.writeFile(target, bytes));
     return true;
   }
 
@@ -3131,7 +3203,7 @@ export class SyncEngine {
       // stamp is added below, once the committed file can be stat'ed; until then the
       // hash record is the fallback (it costs a read, but it is correct).
       this.recordSelfWriteHash(target, head.contentHash);
-      await writer.close();
+      await this.writing([target], () => writer.close());
       committed = true;
       let stamp: FileStamp | null = null;
       try {
@@ -3279,26 +3351,11 @@ export class SyncEngine {
     head: VersionChainEntry,
     localContentHash: string | null = null,
     deviceName: string | null = null,
-    /** How many times this pull has already re-applied a superseding version. */
-    reapply = 0,
-    /**
-     * The version the caller expects the device to hold when this pull is a re-apply
-     * (see `repairSupersededPull`). `null` for an ordinary pull: its state is *supposed*
-     * to be behind the head.
-     */
-    expectedVersionId: string | null = null,
-    /**
-     * The content the caller saw on disk before asking for a re-apply. A re-apply fetches
-     * its bytes over the network, so the disk is checked again right before the write:
-     * a user save that landed meanwhile is left for the next pass instead of being
-     * overwritten. `null` for an ordinary pull, which keeps its one-read cost.
-     */
-    expectedLocalHash: string | null = null,
   ): Promise<boolean> {
     // A delete head means "apply the remote delete locally".
     if (head.action === "delete") {
       this.recordSelfDelete(plainPath);
-      await this.opts.adapter.deleteFile(plainPath);
+      await this.writing([plainPath], () => this.opts.adapter.deleteFile(plainPath));
       delete this.state[fileId];
       this.pathToFileId.delete(plainPath);
       // The chain has no live path any more. Keeping the index entry would make a file
@@ -3321,7 +3378,7 @@ export class SyncEngine {
     }
 
     // Whether this version is already this device's sync point *before* the write below.
-    // A second pull of the same head — or the re-apply of one — applies nothing new, so
+    // A second pull of the same head applies nothing new, so
     // it must not report the same version twice.
     const alreadyHeld = this.state[fileId]?.lastKnownVersionId === head.versionId;
 
@@ -3369,190 +3426,16 @@ export class SyncEngine {
     // A large version is written through the adapter's streaming sink when it has
     // one, so the plaintext never exists as one buffer; a small one, or a host
     // without a sink, still takes the whole-file path.
-    //
-    // A re-apply fetched its bytes over the network, so the disk is checked once more
-    // right before the write: a user save that landed during the fetch is left for the
-    // next pass instead of being overwritten. An ordinary pull skips this — its decision
-    // already re-read the file, and reading a large attachment once more before every
-    // pull is the cost the stamp cache exists to save.
-    if (expectedLocalHash !== null && (await this.currentLocalHash(target)) !== expectedLocalHash) {
-      return true;
-    }
-    // The point this device holds *before* the write is what the check below compares
-    // against: the write is an await, so another operation can settle a different
-    // version of this chain while the bytes are on their way.
-    const versionBeforeWrite = this.state[fileId]?.lastKnownVersionId ?? null;
     const written = await this.writeRemoteVersion(target, head);
     if (!written) return false;
-
-    // The state names another version than the bytes just written. Three ways that
-    // happens: it moved *during* this write, a re-apply's caller expected it to name the
-    // version it asked for and it moved before the write even started
-    // (`expectedVersionId`), or a deletion won and left no entry at all. Either way,
-    // recording `head` now would move the sync point backwards under it — or, after a
-    // deletion, put a chain back that the peer removed.
-    const versionAfterWrite = this.state[fileId]?.lastKnownVersionId ?? null;
-    const superseded =
-      versionAfterWrite !== head.versionId &&
-      ((versionAfterWrite === null && versionBeforeWrite !== null) ||
-        (versionAfterWrite !== null &&
-          (versionAfterWrite !== versionBeforeWrite ||
-            (expectedVersionId !== null && versionAfterWrite !== expectedVersionId))));
-    if (superseded) {
-      return await this.repairSupersededPull(
-        fileId,
-        target,
-        head,
-        deviceName,
-        reapply,
-        alreadyHeld,
-      );
-    }
     return await this.adoptApplied(fileId, target, head, moved, deviceName, alreadyHeld);
-  }
-
-  /**
-   * The state names a version other than the bytes this pull just wrote.
-   *
-   * The write is an await, so a notification (or a local event) can settle the peer's
-   * *next* version while these bytes are on their way; the state then holds a version
-   * this pull was not decided from. Recording `head` here would move the sync point
-   * backwards under it, and the next edit would conflict with a version the peer had
-   * already applied. The answer is to make the disk agree with the state.
-   *
-   * Three rules keep that safe:
-   *
-   * - **Never overwrite bytes this pull did not write.** The newer version already on
-   *   disk means there is nothing to do; anything else is a user's edit (or a third
-   *   operation's write) that the next pass decides about. Only this pull's own bytes
-   *   are replaced, which is what keeps a re-apply from destroying an edit that landed
-   *   during the fetch.
-   * - **Resolve the state's version from the chain, not the remote index.** A pass clears
-   *   and rebuilds that index while notifications are in flight, so it can be empty or a
-   *   head behind exactly here. This is one request, on a path that already lost a race.
-   *   The fetch is an await, so the state is read again afterwards: if it moved once
-   *   more, the newest version is resolved instead of writing a version already stale.
-   * - **Re-apply through {@link pullRemote}**, so the version is written at the path it
-   *   records (a peer move), with the ordinary guards. The re-apply is bounded: after
-   *   {@link MAX_REAPPLY_ATTEMPTS} the path is contention, and the pull stops rather than
-   *   moving the sync point backwards over a version the device holds.
-   *
-   * Two answers keep the state and the disk together when the newer version cannot be
-   * re-applied: a deletion that won the race records the live version whose bytes are
-   * here (so the next pass applies the tombstone to a path it still tracks), and a chain
-   * the request could not resolve records the same head (so the next pass pulls the newer
-   * version instead of pushing these bytes as a revert).
-   */
-  private async repairSupersededPull(
-    fileId: string,
-    target: string,
-    head: VersionChainEntry,
-    deviceName: string | null,
-    reapply: number,
-    alreadyHeld: boolean,
-  ): Promise<boolean> {
-    for (let attempt = reapply; attempt < MAX_REAPPLY_ATTEMPTS; attempt++) {
-      const versionId = this.state[fileId]?.lastKnownVersionId ?? null;
-
-      // A `delete` won the race: its pull removed the state entry while this live
-      // version's bytes were on their way, and the write has just put them back on disk.
-      // Record the version whose bytes are here — without re-announcing it (the deletion's
-      // pull already reported the path) and without putting the chain back into the
-      // identity index, whose server head is a tombstone (see `RemoteIndex.forget`).
-      if (versionId === null) {
-        const stamp = await this.opts.adapter.statFile(target);
-        this.state[fileId] = {
-          lastKnownVersionId: head.versionId,
-          lastKnownContentHash: head.contentHash,
-          plainPath: target,
-          ...(stamp === null ? {} : { stamp }),
-        };
-        this.pathToFileId.set(target, fileId);
-        return true;
-      }
-
-      // The state names the bytes that are on disk: nothing to repair.
-      if (versionId === head.versionId) {
-        return await this.adoptApplied(fileId, target, head, false, deviceName, alreadyHeld);
-      }
-
-      let current: VersionChainEntry | undefined;
-      try {
-        current = (await this.pullChain(fileId)).find((v) => v.versionId === versionId);
-      } catch {
-        current = undefined;
-      }
-      if (current === undefined || current.action === "delete") {
-        return await this.adoptWrittenHead(fileId, target, head, deviceName, alreadyHeld);
-      }
-      // The fetch was an await: resolve the newest version rather than write this one.
-      if ((this.state[fileId]?.lastKnownVersionId ?? null) !== versionId) continue;
-
-      // The newer version lives at another path: a peer moved the file, and the operation
-      // that adopted it already applied it there. The bytes this pull wrote at the old
-      // path are stale — remove them (only while they are this pull's own), or the next
-      // pass reads them as a brand-new file and forks a second chain for the same note.
-      const currentPath = await this.decryptPath(current);
-      if (currentPath !== null && currentPath !== target && this.isSyncable(currentPath)) {
-        const diskHash = await this.currentLocalHash(target);
-        if (diskHash === head.contentHash) {
-          this.recordSelfDelete(target);
-          await this.opts.adapter.deleteFile(target);
-          // The path is gone, so the identity must not keep claiming it: the delete event
-          // is consumed by `recordSelfDelete`, so nothing else would clear the mapping.
-          if (this.pathToFileId.get(target) === fileId) this.pathToFileId.delete(target);
-        }
-        return true;
-      }
-
-      const diskHash = await this.currentLocalHash(target);
-      if (diskHash === current.contentHash) return true;
-      if (diskHash !== head.contentHash) return true;
-
-      return await this.pullRemote(
-        fileId,
-        target,
-        current,
-        null,
-        deviceName,
-        attempt + 1,
-        current.versionId,
-        head.contentHash,
-      );
-    }
-    // The path kept moving under every attempt. Do not chase it further, and do not leave
-    // the state naming one version while the disk holds another: the next pass cannot tell
-    // a stale disk from a divergent edit, and would push these older bytes as a revert.
-    // Recording the version whose bytes are on disk is the transient step back the next
-    // pass heals by pulling the newer one.
-    return await this.adoptWrittenHead(fileId, target, head, deviceName, alreadyHeld);
-  }
-
-  /**
-   * Adopt `head` while the disk still holds its bytes.
-   *
-   * Used only where the newer answer could not be re-applied — a deletion that won the
-   * race, or a chain the request could not resolve. The state then names the bytes that
-   * are on disk, and the next pass applies the newer version (or the deletion) from a
-   * fresh chain, instead of pushing these bytes as a revert or leaving the path untracked.
-   */
-  private async adoptWrittenHead(
-    fileId: string,
-    target: string,
-    head: VersionChainEntry,
-    deviceName: string | null,
-    alreadyHeld: boolean,
-  ): Promise<boolean> {
-    const diskHash = await this.currentLocalHash(target);
-    if (diskHash !== head.contentHash) return true;
-    return await this.adoptApplied(fileId, target, head, false, deviceName, alreadyHeld);
   }
 
   /**
    * Record `applied` as this chain's sync point at `target`, and report it.
    *
    * The report is skipped when the device already held this version before the write: a
-   * second pull of one head (or the re-apply of one) applied nothing new, and reporting
+   * second pull of one head applied nothing new, and reporting
    * it again would give the CLI's activity log a duplicate row.
    */
   private async adoptApplied(
@@ -3629,8 +3512,6 @@ export class SyncEngine {
     for (const [path, hash] of localHashes) {
       if (hash !== syncedHash) continue;
       if (this.pathToFileId.has(path) || remote.fileIdAt(path) !== null) continue;
-      // A path an event is handling belongs to that event, not to this chain.
-      if (this.inFlightPaths.has(path)) continue;
       if (candidate !== null) return; // ambiguous — leave both sides alone
       candidate = path;
     }
@@ -3641,13 +3522,27 @@ export class SyncEngine {
       // the recorded path is what turns the move back into a `rename` when the folder
       // returns to scope. Dropping the chain here would make the old path a tombstone
       // for every peer.
-      this.recordLocalPathMove(oldPath, excluded);
+      await this.paths.run(
+        [oldPath],
+        async () => {
+          this.recordLocalPathMove(oldPath, excluded);
+        },
+        "pass",
+      );
       return;
     }
 
-    this.pathToFileId.delete(oldPath);
-    this.pathToFileId.set(candidate, fileId);
-    entry.plainPath = candidate;
+    // Claim the candidate inside its path job: an event that adopted or created it while
+    // this pass was scanning owns it, and the claim must not race that job. The content
+    // is checked again because the scan's hash is a snapshot.
+    await this.paths.run([oldPath, candidate], async () => {
+      if (this.pathToFileId.has(candidate) || remote.fileIdAt(candidate) !== null) return;
+      const bytes = await this.opts.adapter.readFile(candidate);
+      if (!bytes || (await sha256Hex(bytes)) !== syncedHash) return;
+      this.pathToFileId.delete(oldPath);
+      this.pathToFileId.set(candidate, fileId);
+      entry.plainPath = candidate;
+    });
   }
 
   /**
@@ -3677,7 +3572,6 @@ export class SyncEngine {
     for (const candidate of candidates) {
       // A file another chain claims (or this chain already records) is not the move.
       if (this.pathToFileId.has(candidate) || remote.fileIdAt(candidate) !== null) continue;
-      if (this.inFlightPaths.has(candidate)) continue;
       if (sizeHint !== undefined) {
         const stamp = await this.opts.adapter.statFile(candidate);
         if (stamp === null || stamp.sizeBytes !== sizeHint) continue;
@@ -3815,7 +3709,9 @@ export class SyncEngine {
     if (!localStamp) return { path: remotePath, moved: false };
 
     this.recordSelfRename(plainPath, remotePath);
-    await this.opts.adapter.renameFile(plainPath, remotePath);
+    await this.writing([plainPath, remotePath], () =>
+      this.opts.adapter.renameFile(plainPath, remotePath),
+    );
     this.pathToFileId.delete(plainPath);
     this.pathToFileId.set(remotePath, fileId);
     return { path: remotePath, moved: true };
@@ -3827,20 +3723,26 @@ export class SyncEngine {
     // Conflict files and anything outside this device's scope (a settings file
     // while the switch is off, a path in a dot-folder) are not this engine's.
     if (!this.isSyncable(path)) return;
-    const release = this.beginLocalOp(path);
-    try {
-      await this.applyLocalChange(path);
-    } finally {
-      release();
-    }
+    // The first bind runs **outside** the path queue: its per-file jobs queue on the
+    // paths they decide, so a bind started from inside this event's job would wait for
+    // the job that is waiting for it. Not when the event is the echo of a write this
+    // engine is performing: that write is the bind's own work, and binding again would
+    // wait for it.
+    if (!this.initialized && !this.writingPaths.has(path))
+      await this.initialSync({ firstBind: true });
+    // A pull decided for this file can apply at the path the head records (a peer move),
+    // so claim that path too when the chain already names one.
+    const fileId = this.pathToFileId.get(path);
+    const recorded = fileId ? this.remoteIndex.pathOf(fileId) : null;
+    const claim = recorded !== null && recorded !== path ? [path, recorded] : [path];
+    return this.schedule(claim, () => this.applyLocalChange(path));
   }
 
-  /** The work of {@link handleLocalChange}, running under its in-flight marker. */
+  /** The work of {@link handleLocalChange}, running inside its path job. */
   private async applyLocalChange(path: string): Promise<void> {
-    if (!this.initialized) {
-      await this.initialSync();
-      return;
-    }
+    // The bind covers every file it scans; a deferred event that runs before it finishes
+    // must not push an identity of its own.
+    if (!this.initialized) return;
     // The size cap is checked before the read, so an oversized file is never loaded.
     if (!(await this.withinLocalSizeCap(path))) return;
     // A streamed commit may have renamed the target already while its stamp is still
@@ -4086,15 +3988,10 @@ export class SyncEngine {
     // The engine applying a peer's delete fires this same event; it must not be
     // echoed back to the server as a second tombstone.
     if (this.consumeSelfDelete(path)) return;
-    const release = this.beginLocalOp(path);
-    try {
-      await this.applyLocalDelete(path);
-    } finally {
-      release();
-    }
+    return this.schedule([path], () => this.applyLocalDelete(path));
   }
 
-  /** The work of {@link handleLocalDelete}, running under its in-flight marker. */
+  /** The work of {@link handleLocalDelete}, running inside its path job. */
   private async applyLocalDelete(path: string): Promise<void> {
     const fileId = this.pathToFileId.get(path);
     if (!fileId) return;
@@ -4166,41 +4063,35 @@ export class SyncEngine {
     // the scope deletes nothing on either side. Checked before the self-rename rule: the
     // engine never moves a file out of scope itself, so an event here is the user's.
     if (!newSyncable) {
-      this.rememberMoveOutOfScope(oldPath, newPath);
-      return;
+      // One job over both paths: the state change must not race a pass or an event
+      // deciding for either of them.
+      return await this.schedule([oldPath, newPath], async () => {
+        this.rememberMoveOutOfScope(oldPath, newPath);
+      });
+    }
+    // The first bind runs outside the queue, exactly as `handleLocalChange` does: a rename
+    // handled before the bind would push a create for content the server may already hold.
+    // Not for the echo of a write this engine is performing (see `handleLocalChange`).
+    if (!this.initialized && !this.writingPaths.has(oldPath) && !this.writingPaths.has(newPath)) {
+      await this.initialSync({ firstBind: true });
     }
     // The engine following a peer's move fires this same event.
     if (this.consumeSelfRename(oldPath, newPath)) return;
     // Both paths are marked: a reconcile can meet this move as either "the old
     // path vanished" or "an unclaimed file appeared at the new one".
-    const releaseOld = this.beginLocalOp(oldPath);
-    const releaseNew = this.beginLocalOp(newPath);
-    try {
-      await this.applyLocalRename(oldPath, newPath);
-    } finally {
-      releaseNew();
-      releaseOld();
-    }
+    return this.schedule([oldPath, newPath], () => this.applyLocalRename(oldPath, newPath));
   }
 
   /**
    * Record and persist a move that leaves (or stays entirely outside) this device's
-   * sync scope, with both paths marked as in-flight while the state changes.
+   * sync scope.
    *
-   * The marker is the same one a syncable rename takes: a pass that started before the
-   * event can still be deciding a tombstone for the old path from its snapshot, and the
-   * re-check in its delete branch only closes part of that window. Here the run is
-   * short and awaits nothing, so marking costs nothing.
+   * The caller runs it inside the two paths' job, so a pass that started before the
+   * event cannot decide a tombstone for the old path from its snapshot while the state
+   * is being re-pointed.
    */
   private rememberMoveOutOfScope(oldPath: string, newPath: string): void {
-    const releaseOld = this.beginLocalOp(oldPath);
-    const releaseNew = this.beginLocalOp(newPath);
-    try {
-      if (this.recordLocalPathMove(oldPath, newPath)) this.persist();
-    } finally {
-      releaseNew();
-      releaseOld();
-    }
+    if (this.recordLocalPathMove(oldPath, newPath)) this.persist();
   }
 
   /**
@@ -4226,13 +4117,18 @@ export class SyncEngine {
     return true;
   }
 
-  /** The work of {@link handleLocalRename}, running under both in-flight markers. */
+  /** The work of {@link handleLocalRename}, running inside its two paths' job. */
   private async applyLocalRename(oldPath: string, newPath: string): Promise<void> {
     const fileId = this.pathToFileId.get(oldPath);
     if (!fileId) {
       // Untracked — treat as a plain create path.
       if (this.pathToFileId.has(newPath)) return;
-      await this.handleLocalChange(newPath);
+      // Uninitialised, this would push a create without the remote index; the bind
+      // (or the next pass) creates the file instead.
+      if (!this.initialized) return;
+      // Directly: this job already holds `newPath`, so scheduling the event would
+      // wait for the job that is waiting for it.
+      await this.applyLocalChange(newPath);
       return;
     }
     this.pathToFileId.delete(oldPath);
@@ -4340,7 +4236,7 @@ export class SyncEngine {
       // The apply touches up to two paths: the head's recorded path and the path this
       // device already holds the chain at (a rename being applied). Compute both before
       // running anything; if any path repeats inside the chunk, the whole chunk applies
-      // in order, one file at a time. That is the conservative version of `PathClaims`:
+      // in order, one file at a time. That is the conservative version of the path queue:
       // a peer's move can leave two chains naming one path for a moment, and the two
       // decisions must not interleave. With no shared path, four files at a time.
       const seenPaths = new Set<string>();
@@ -4395,6 +4291,28 @@ export class SyncEngine {
 
   /** Apply one notification from the chain its batch already fetched. */
   private async applyPushedChain(
+    fileId: string,
+    versionId: string,
+    deviceName: string | null,
+    chain: VersionChainEntry[],
+  ): Promise<void> {
+    const head = remoteHead(chain);
+    if (!head) return;
+    // The paths this apply may touch, read before it queues: the path this device holds
+    // the chain at, and the path the pushed version records (a peer's move). The job
+    // starts after the jobs already queued for them, so the apply is one turn.
+    const headPath = await this.decryptPath(head);
+    // Read the state after the decrypt: the claim must be the paths the job will touch,
+    // and the state may have moved while the head was being decrypted.
+    const statePath = this.state[fileId]?.plainPath ?? null;
+    const paths = [statePath, headPath].filter((path): path is string => path !== null);
+    return this.schedule(paths, () =>
+      this.applyPushedChainLocked(fileId, versionId, deviceName, chain),
+    );
+  }
+
+  /** The work of {@link applyPushedChain}, running inside its path job. */
+  private async applyPushedChainLocked(
     fileId: string,
     versionId: string,
     deviceName: string | null,

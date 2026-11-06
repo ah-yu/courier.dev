@@ -343,6 +343,15 @@ export function isVaultGone(err: unknown): boolean {
 
 export class SyncHost {
   private engineInstance: SyncEngine | null = null;
+  /**
+   * The engine a stopped host is still draining.
+   *
+   * A stopped host cannot cancel work already inside the engine, and a deferred event job
+   * (queued while the engine writes) is not counted by `background`. Releasing the vault
+   * lease before that queue drains would let the next host start on top of a write that is
+   * still coming.
+   */
+  private readonly drainingEngines = new Set<SyncEngine>();
   private ws: SyncWebSocket | null = null;
   private stopEvents: (() => void) | null = null;
   private reconcileTimer: TimerHandle | null = null;
@@ -535,10 +544,42 @@ export class SyncHost {
    * what the lease exists to prevent.
    */
   async whenIdle(): Promise<void> {
-    while (this.background > 0 || this.reconciling || this.ops.running > 0 || this.ops.queued > 0) {
-      await new Promise<void>((resolve) => {
-        this.platform.after(50, resolve);
-      });
+    for (;;) {
+      // Every engine this host stopped stays under watch for the whole loop: an
+      // OpQueue job enqueued before `stop()` can still call into it, and the deferred
+      // job that follows is not counted by `background`.
+      const engines =
+        this.engineInstance !== null
+          ? [...this.drainingEngines, this.engineInstance]
+          : [...this.drainingEngines];
+      const draining = this.drainingEngines.size;
+      for (const engine of engines) await engine.whenIdle();
+      const idle =
+        this.background === 0 &&
+        !this.reconciling &&
+        this.ops.running === 0 &&
+        this.ops.queued === 0;
+      if (!idle) {
+        await new Promise<void>((resolve) => {
+          this.platform.after(50, resolve);
+        });
+        continue;
+      }
+      // The counters are zero; drain once more in case an OpQueue job that finished
+      // while they were read queued a deferred engine job, then re-read both.
+      for (const engine of engines) await engine.whenIdle();
+      if (
+        this.background === 0 &&
+        !this.reconciling &&
+        this.ops.running === 0 &&
+        this.ops.queued === 0 &&
+        this.drainingEngines.size === draining
+      ) {
+        // Remove exactly the engines this pass watched: a `stop()` that ran during
+        // the drain added a new one, and the loop starts over for it.
+        for (const engine of engines) this.drainingEngines.delete(engine);
+        return;
+      }
     }
   }
 
@@ -574,6 +615,7 @@ export class SyncHost {
     // The socket is gone, so a push started from a stale api must not claim a
     // session the server no longer has open.
     this.opts.api.setSessionId?.(null);
+    if (this.engineInstance !== null) this.drainingEngines.add(this.engineInstance);
     this.engineInstance = null;
   }
 

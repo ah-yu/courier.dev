@@ -297,7 +297,7 @@ async function instrumentVault(vault: string): Promise<void> {
 
 /**
  * The engine's own view from inside the renderer: its sync state, the
- * self-write/self-rename suppression records, its in-flight markers and the
+ * self-write/self-rename suppression records, the path queue and the
  * adapter's move log. Read directly (the fields are `private` in TypeScript
  * only) because a follower that silently drops a notification leaves no other
  * trace.
@@ -320,7 +320,7 @@ async function engineInternals(vault: string): Promise<string> {
       initialized: engine.initialized,
       states: Object.values(engine.state).map((e) => e.plainPath + '@' + String(e.lastKnownVersionId).slice(0, 8)),
       selfWrites: keysOf(engine.selfEvents && engine.selfEvents.selfWrites).filter((p) => p.includes('courier-e2e')),
-      inFlight: keysOf(engine.inFlightPaths),
+      queue: engine.paths?.size ?? null,
       renames: (window.__courierRenames || []).filter((line) => line.includes('courier-e2e')),
     };
   `,

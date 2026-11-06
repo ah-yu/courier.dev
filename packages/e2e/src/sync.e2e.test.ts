@@ -367,6 +367,7 @@ describe("sync e2e — two clients through a real server", () => {
     };
 
     await b.sync();
+    await b.engine.whenIdle();
 
     // Nothing the user wrote was overwritten, so nothing is parked, and the note and
     // the sync point both end on the peer's newest version — the pull that was still
@@ -412,7 +413,8 @@ describe("sync e2e — two clients through a real server", () => {
       if (path === "note.md" && !injected) {
         injected = true;
         b.adapter.writeFile = writeFile;
-        // The notification's pull writes v3 and records it; the pass's v2 lands after.
+        // The notification's apply queues behind the pull's job: the pull writes v2 and
+        // records it, then the notification applies v3.
         a.write("note.md", "v3");
         await a.change("note.md");
         const head = (await fileVersions(server, vault.id, fileId)).at(-1)!;
@@ -423,6 +425,7 @@ describe("sync e2e — two clients through a real server", () => {
 
     await b.sync();
     b.adapter.writeFile = writeFile;
+    await b.engine.whenIdle();
 
     expect(await b.conflictFiles()).toEqual([]);
     expect(b.read("note.md")).toBe("v3");
@@ -764,6 +767,65 @@ describe("sync e2e — two clients through a real server", () => {
     });
   });
 
+  it("binds with the merge rule when an event arrives before the first sync", async () => {
+    const vault = await newVault("bind-merge-event");
+    const a = await newClient(vault.id, "device-a");
+    a.write("gone.md", "mine");
+    await a.sync();
+    const fileId = a.engine.fileIdForPath("gone.md")!;
+
+    // The peer deletes the note, so the server's head for that path is a tombstone.
+    const peer = await newClient(vault.id, "device-b");
+    await peer.sync();
+    peer.write("gone.md", "theirs");
+    await peer.change("gone.md");
+    peer.remove("gone.md");
+    await peer.removeAndSync("gone.md");
+
+    // A restarted client keeps the state that names the note; the server's head is a
+    // tombstone and the file is on disk. An event that arrives before the first sync
+    // must bind (merge: the local copy is the user's own), not apply the deletion.
+    const restarted = await newClient(vault.id, "device-a", a.dir);
+    const state = a.state.json;
+    expect(state, "the first client never persisted a state").toBeTruthy();
+    restarted.engine.loadState(state!);
+    expect(restarted.engine.fileIdForPath("gone.md")).toBe(fileId);
+    restarted.write("gone.md", "mine");
+    await restarted.engine.handleLocalChange("gone.md");
+    await restarted.engine.whenIdle();
+
+    expect(restarted.read("gone.md")).toBe("mine");
+    const newId = restarted.engine.fileIdForPath("gone.md")!;
+    expect(newId).not.toBe(fileId);
+    expect((await fileVersions(server, vault.id, newId)).map((v) => v.action)).toEqual(["create"]);
+  });
+  it("applies the remote tombstone on a plain pass (the contrast to a bind)", async () => {
+    const vault = await newVault("plain-pass-tombstone");
+    const a = await newClient(vault.id, "device-a");
+    a.write("gone.md", "mine");
+    await a.sync();
+    const fileId = a.engine.fileIdForPath("gone.md")!;
+
+    const peer = await newClient(vault.id, "device-b");
+    await peer.sync();
+    peer.write("gone.md", "theirs");
+    await peer.change("gone.md");
+    peer.remove("gone.md");
+    await peer.removeAndSync("gone.md");
+
+    const restarted = await newClient(vault.id, "device-a", a.dir);
+    restarted.engine.loadState(a.state.json!);
+    await restarted.engine.initialSync();
+    await restarted.engine.whenIdle();
+
+    expect(restarted.read("gone.md")).toBeNull();
+    expect(restarted.engine.fileIdForPath("gone.md")).toBeNull();
+    expect((await fileVersions(server, vault.id, fileId)).map((v) => v.action)).toEqual([
+      "create",
+      "modify",
+      "delete",
+    ]);
+  });
   /**
    * The race no client can see by looking harder: a device decides from a chain and
    * a peer pushes that same file before the decision's push arrives. Against the real
@@ -967,15 +1029,12 @@ describe("sync e2e — two clients through a real server", () => {
       a.write("n.md", "a".repeat(4 * 1024 * 1024));
       let laterEdit: Promise<void> | undefined;
       a.beforeNextPush(async () => {
-        // Runs inside the first push, after it read and encrypted the earlier bytes but
-        // before its request goes out: this is where the later edit is made. Its push is
-        // **awaited** so the order the case is about — the later edit lands first, the
-        // earlier push is refused — is not a race. It used to be one in practice: the
-        // 4 MiB push was slow enough to lose the head race by itself, until the blob store
-        // stopped flushing per blob, after which this case failed about one run in four.
+        // Runs inside the first push, before its request goes out. The later edit's
+        // handler queues behind this push's job (one job per path), so it is started,
+        // not awaited: waiting here would wait for the push that is waiting for this
+        // hook.
         a.write("n.md", "edited second");
         laterEdit = a.change("n.md");
-        await laterEdit;
       });
       await a.change("n.md");
       await laterEdit;

@@ -11,8 +11,8 @@ import { DEFAULT_OP_QUEUE_LIMITS, type OpQueueLimits, type OpWeight } from "./op
  * phone is the whole latency of the sync.
  *
  * Paths are not always disjoint even when fileIds are: a peer's move can leave two
- * chains naming one path for a moment. `SyncEngine` serialises those through
- * `PathClaims`; this pool only bounds how many may run.
+ * chains naming one path for a moment. `SyncEngine` serialises those through its
+ * `PathQueue`; this pool only bounds how many may run.
  *
  * This is the awaitable half of the same policy `OpQueue` implements for events:
  *

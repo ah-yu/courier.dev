@@ -75,20 +75,17 @@ The rules below are the ones the e2e suites exist to protect.
     remote copy through `onSettingsApplied` (its reload card), and a local win needs no message because
     the device's file did not change. Covered by the `config-folder conflict` cases in `engine.test.ts`,
     `settings-sync.e2e.test.ts` and `plugin.e2e.test.ts`.
-  - **Content this engine wrote itself is not a divergence, so nothing is parked for it.** A write's bytes
-    are on disk _before_ its sync point is recorded — the write and the adoption are one turn apart, not one
-    operation — so a decision that lands in that window (a notification for the peer's next version, a
-    pass's re-read) finds new local bytes against the old sync point while the head has moved on, which is
-    exactly the shape `decideFile` answers "conflict" for. `handleConflict` therefore asks the self-event log
-    whether those bytes are a write this engine performed (`isSelfWrite`; the record is also written by a
-    restore, so a restore's bytes are covered too) and, when they are, applies the remote head **without**
-    parking a copy or raising the event: there is nothing the user wrote to keep. This is the shape a note
-    saved twice leaves behind (Obsidian saves a note again when the file it embeds finishes landing), and
-    reading it as a divergence parked a conflict copy of the note the engine had just pulled. The
-    config-folder branch is unchanged and still settles by modification time — the suppression only covers
-    the copy that would be parked. Covered by the `does not park a conflict copy of the bytes a pull is
-    still recording` case in `engine.test.ts` and the `does not park a copy of the note a pull is still
-    recording` case in `sync.e2e.test.ts`.
+  - **Content this engine wrote itself is never a divergence, because the window is gone.** A pull's
+    write and its sync point are one job in the path's queue, so no other decision can run between them:
+    a notification or a pass for the same path either ran before the pull (and its snapshot is checked
+    against `ReconcilePass.stateAtStart`) or waits behind it. The conflict decision therefore never sees
+    the engine's own freshly written bytes against an older sync point. This is the shape a note saved
+    twice used to leave behind (Obsidian saves a note again when the file it embeds finishes landing),
+    and reading it as a divergence parked a conflict copy of the note the engine had just pulled. The
+    self-event log still suppresses the vault event an engine write fires (see
+    [Self-events](#self-events)); the config-folder branch still settles by modification time. Covered by
+    the `does not park a copy of the note a pull is still recording` case in `sync.e2e.test.ts` and the
+    `a notification for the peer's next version during a pull` cases in `engine.test.ts`.
   - The consequences are deliberate: the first pusher wins a two-sided edit, the losing content exists
     only on the device that detected the conflict (those files never sync — the peer would otherwise
     conflict again), and the device that detects a conflict sees the note change under it. Recovery is
@@ -126,44 +123,30 @@ The rules below are the ones the e2e suites exist to protect.
   need neither check. Covered by `decide.test.ts` and the `a decision that meets this device's own
   content on the head` and `a reconcile racing an incremental event` cases in `engine.test.ts`.
 
-- **A pull re-applies a version an incremental operation adopted while its write was in flight, instead of
-  recording its own older head.** The write and the adoption are one turn apart, so a notification can
-  adopt the peer's _next_ version while this pull's bytes are still on their way. `pullRemote` compares the
-  sync point it started from with the one it finds after the write; when an operation moved it to a
-  different version, the pull resolves that version from the chain (not from `RemoteIndex`, which a pass
-  clears and rebuilds while notifications are in flight) and **re-applies it through `pullRemote`** — at
-  the path that version records, with the ordinary guards. Adopting its own older head instead would move
-  the sync point onto bytes the device no longer has, and the next edit would conflict with the version the
-  peer had already applied. The re-apply is deliberately narrow: it re-checks the target's bytes before it
-  fetches them, so a save that landed before that check is left to the next pass instead of being
-  overwritten, and it re-reads the state after its chain request — a version that moved again is resolved
-  again, up to `MAX_REAPPLY_ATTEMPTS`. The gap between the check and the write is the same one every pull
-  has, not a new one.
-  When it cannot re-apply — the chain request fails, the newer version is a tombstone, or the bound is
-  reached — it records the version whose bytes are on disk (the one it wrote, or the state's own), so the
-  next pass pulls the newer version (or applies the deletion) from a fresh chain. That is deliberately a
-  transient step back rather than a mismatch: a state newer than the disk makes the next pass push those
-  older bytes as a revert, and after a deletion an untracked path becomes a brand-new chain.
-  Covered by the `does not park a conflict copy of the bytes a pull is still recording`,
-  `puts back the version a notification adopted before this pull's bytes landed`,
-  `removes the old path a pull re-created after the peer moved the file`, `keeps the chain when a
-  deletion lands while a pull's write is in flight`, `leaves a user edit that lands during the repair to
-  the next pass`, `records the version on disk when the chain cannot be fetched during the repair` and
-  `re-resolves the version when a notification lands during the re-apply` cases in `engine.test.ts`, and
-  by the `does not park a copy of the note a pull is still recording` and `puts back the version a
-  notification adopted before the pull's bytes landed` cases in `sync.e2e.test.ts`.
+- **A pull is one job, and the pass does not act on a snapshot an event has invalidated.** Every operation
+  that reads or writes a path runs as a job in that path's queue (`PathQueue`), so a pull's write and its
+  sync point are never observable half-done: the next job on the path starts after the adoption. The queue
+  orders the writes, not the snapshots — a pass fetches its chain at the start, and an event can adopt a
+  newer version while the pass is still working. The pass therefore records each chain's sync point when it
+  begins (`ReconcilePass.stateAtStart`) and **skips** a file whose sync point changed since; a delete it was
+  about to publish is also skipped when an event is queued behind its job (`PathQueue.hasQueued`), because
+  that event's decision is newer than the pass's snapshot. The next pass decides from the fresh chain.
+  Covered by the `a reconcile racing an incremental event` cases in `engine.test.ts` and the
+  `does not park a copy of the note a pull is still recording` / `puts back the version a notification
+  adopted before the pull's bytes landed` cases in `sync.e2e.test.ts`.
 
 ## Tombstones and binding
 
 - **A `delete` head is read two ways, and the pass decides which.** `decideFile` takes a
   `TombstoneHandling` mode and a `locallyTracked` flag:
   - **`bind-merge`** — the single pass that binds a vault (`initialSync({ firstBind: true })`, sent by
-    `EngineHost.start()` and the CLI's one-shot run). The server has no live version of that file, so a
-    local copy is "only local": it is pushed as a **new file with a new fileId**, and the tombstone is
-    left out of the comparison entirely (its state entry is dropped). This is what stops "connect this
-    vault" from deleting notes the remote had already deleted.
-  - **`apply-remote-delete`** — everything else (scheduled reconciles, user edits, websocket
-    notifications). The local copy is the version the tombstone removed, so the deletion **is applied**
+    `EngineHost.start()`, the CLI's one-shot run, a caller-requested rebind, and a local event that
+    arrives before the first pass has completed). The server has no live version of that file, so a local copy is "only local": it is
+    pushed as a **new file with a new fileId**, and the tombstone is left out of the comparison entirely
+    (its state entry is dropped). This is what stops "connect this vault" from deleting notes the remote
+    had already deleted.
+  - **`apply-remote-delete`** — everything else (scheduled reconciles, user edits after the first pass has completed, and websocket notifications). The
+    local copy is the version the tombstone removed, so the deletion **is applied**
     and peers' deletions keep propagating; if the local content diverged from that previous version the
     two are out of step and the engine resolves a **conflict** — the remote deletion stands and the local
     content is parked (see the rule above).
@@ -315,16 +298,17 @@ file now lives at.
     event at all, so the only thing that can see it is the bind pass the next `start()` runs. An edit of
     a known file is pushed as a `modify`, a new file as a `create` — both as before — while the delete
     and rename variants are exactly the cases this rule's fixes cover.
-  - **A reconcile is not serialised against incremental events, and does not need to be.** It decides
-    from the snapshot it took when it started (listing, hashes, chains), while the vault keeps firing
-    events — so the reconcile **skips any path an event is handling** (`inFlightPaths`, set by
-    `handleLocalChange`/`handleLocalDelete`/`handleLocalRename`, also around `restoreFile`) and
-    re-reads a file before it writes or deletes it, deciding again from the bytes
-    actually on disk when they moved. That is what keeps a pass from pushing a second
-    `modify`/`rename`/tombstone for a file an event already owns, and from pulling over an edit that
-    landed mid-pass instead of handling the conflict it is. Deliberately not a lock: nothing ever waits,
-    so a host whose adapter awaits the event its own write fires (the tests' `FakeAdapter` does) cannot
-    deadlock.
+  - **A reconcile is serialised against incremental events through the path queue.** It decides from
+    the snapshot it took when it started (listing, hashes, chains), while the vault keeps firing
+    events — so its per-file work is a job in that path's queue, and an event's job for the same path
+    either ran before it (the pass then sees a sync point that moved and **skips** the file, see
+    `ReconcilePass.stateAtStart`) or waits behind it. A delete the pass was about to publish is skipped
+    when an event is queued behind its job (`PathQueue.hasQueued`). The pass also re-reads a file before
+    it writes or deletes it, deciding again from the bytes actually on disk when they moved. That is what
+    keeps a pass from pushing a second `modify`/`rename`/tombstone for a file an event already owns, and
+    from pulling over an edit that landed mid-pass instead of handling the conflict it is. The wait is
+    always before the job runs — a job never waits while holding a path — so a host whose adapter awaits
+    the event its own write fires (the tests' `FakeAdapter` does) cannot deadlock.
   - **A push says what it was decided from, and the server checks it.** Each pushed file
     carries `baseVersionId` — the chain head the decision was taken from, `null` for a file the
     client believes is new — and the server refuses the push (`status: "stale_base"` +
@@ -543,14 +527,23 @@ file now lives at.
     the pass, so one refused file no longer ends the rest of the work. `WorkPool` is not a path lock —
     nothing waits on another slot. The **local scan** uses the same pool: `stat` per path (plus a read
     only where a chain can claim the file), four at a time, instead of one serial await per file.
-  - **A path can belong to two chains for a moment, and `PathClaims` makes those tasks take turns.** A
-    peer's rename (or delete) is recorded on the server while this device's file is still at the old path,
-    and another device can have created a new chain there. Both tasks would decide from the same bytes;
+  - **Every operation on a path is a job in that path's queue, and two jobs on one path never interleave.**
+    A peer's rename (or delete) is recorded on the server while this device's file is still at the old path,
+    and another device can have created a new chain there; both tasks would decide from the same bytes, and
     the remote-only one would read the other chain's file as a divergence and park a conflict copy of
-    content that never conflicted. A task claims `plainPath` ∪ the path the head records and waits for a
-    free set; the tracked chain is ordered first, so the chain whose file is on disk settles the path
-    before the remote-only one is decided. The claim is pass-local — it never waits on an engine
-    operation, so the no-lock rule above stands.
+    content that never conflicted. `PathQueue` serialises them: a job names the paths it may touch (a
+    rename names both), starts after the jobs already queued for them, and holds them until it ends. The
+    pass's per-file work, a notification's apply, a local change/delete/rename, a restore, the create
+    batch and the move repair are all jobs, so a pull's write and its sync point are one step and no other
+    decision can see the half-applied state. A job never waits for another job on a path it holds (the
+    inner work — `pullRemote`, `handleConflict`, `pushFile` — is called directly), and the wait happens
+    before the job runs, so two multi-path jobs cannot form a cycle.
+  - **A vault event fired by the engine's own write is queued, not waited for.** A host may feed the event
+    back _inside_ the adapter call that performs the write; waiting for the event's job there would wait
+    for the write that is waiting for the handler. `SyncEngine` marks the paths it is writing and, when an
+    event arrives for one of them, queues its job and returns — the write finishes, then the job runs (and
+    persists its own state). That is why the engine still never deadlocks a host whose adapter awaits its
+    own event.
   - `RemoteIndex` keeps a `fileId → hash` reverse map (its per-`remember` sweep was O(N²) over the vault)
     and a `hash → {fileId}` set (shared content: when the owning chain moves or is forgotten, the lookup
     goes to the chain that still holds those bytes), and `adoptRemoteIdentity` drops only the recorded
@@ -559,9 +552,10 @@ file now lives at.
     `postBindReconcileAfterMs` (default 5 s), runs one ordinary reconcile behind it: the event source is
     wired only after the bind returns, so an edit made during a slow bind would otherwise wait for the
     periodic pass. `0` makes it unconditional, `Infinity` disables it.
-  - Covered by `priority.test.ts`, `work-pool.test.ts`, `path-claims.test.ts`, the
-    `SyncEngine — the order a pass works in`, `SyncEngine — how much a pass runs at once` and
-    `SyncEngine — two chains naming one path` cases in `engine.test.ts`, the priority/catch-up cases in
+  - Covered by `priority.test.ts`, `work-pool.test.ts`, `path-queue.test.ts`, the
+    `SyncEngine — the order a pass works in`, `SyncEngine — how much a pass runs at once`,
+    `SyncEngine — two chains naming one path` and `SyncEngine — operation interleavings` cases in
+    `engine.test.ts`, the priority/catch-up cases in
     `host.test.ts` and the plugin's `host.test.ts`, the `getVaultSyncIndex` mapping in
     `sync-handlers.test.ts`, the head/previousLive SQL in `file-versions.test.ts`, and the cold-start case
     in `sync.e2e.test.ts` / `plugin.e2e.test.ts` (mobile).
