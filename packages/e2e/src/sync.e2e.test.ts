@@ -767,6 +767,35 @@ describe("sync e2e — two clients through a real server", () => {
     });
   });
 
+  it("binds with the merge rule when an event arrives before the first sync", async () => {
+    const vault = await newVault("bind-merge-event");
+    const a = await newClient(vault.id, "device-a");
+    a.write("gone.md", "mine");
+    await a.sync();
+    const fileId = a.engine.fileIdForPath("gone.md")!;
+
+    // The peer deletes the note, so the server's head for that path is a tombstone.
+    const peer = await newClient(vault.id, "device-b");
+    await peer.sync();
+    peer.write("gone.md", "theirs");
+    await peer.change("gone.md");
+    peer.remove("gone.md");
+    await peer.removeAndSync("gone.md");
+
+    // A restarted client keeps the state that names the note; the server's head is a
+    // tombstone and the file is on disk. An event that arrives before the first sync
+    // must bind (merge: the local copy is the user's own), not apply the deletion.
+    const restarted = await newClient(vault.id, "device-a", a.dir);
+    restarted.engine.loadState(a.state.json ?? "{}");
+    restarted.write("gone.md", "mine");
+    await restarted.engine.handleLocalChange("gone.md");
+    await restarted.engine.whenIdle();
+
+    expect(restarted.read("gone.md")).toBe("mine");
+    const newId = restarted.engine.fileIdForPath("gone.md")!;
+    expect(newId).not.toBe(fileId);
+    expect((await fileVersions(server, vault.id, newId)).map((v) => v.action)).toEqual(["create"]);
+  });
   /**
    * The race no client can see by looking harder: a device decides from a chain and
    * a peer pushes that same file before the decision's push arrives. Against the real

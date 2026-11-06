@@ -1587,8 +1587,11 @@ export class SyncEngine {
     // instead of starting a second one, which would race `firstBind`/`tombstoneMerge`,
     // the remote index and the create batch. The bind's merge rule is what keeps a
     // connect from deleting notes the server already deleted.
+    // Any call made while a bind is in flight joins it: a plain `initialSync()` started
+    // by an e2e harness must not run a second reconcile that overwrites the bind's
+    // `firstBind`/`tombstoneMerge` fields mid-pass.
+    if (!this.initialized && this.bindPromise !== null) return await this.bindPromise;
     if (!this.initialized && options.firstBind === true) {
-      if (this.bindPromise !== null) return await this.bindPromise;
       const bind = this.runInitialSync(options);
       this.bindPromise = bind.finally(() => {
         this.bindPromise = null;

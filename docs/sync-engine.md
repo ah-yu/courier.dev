@@ -140,12 +140,13 @@ The rules below are the ones the e2e suites exist to protect.
 - **A `delete` head is read two ways, and the pass decides which.** `decideFile` takes a
   `TombstoneHandling` mode and a `locallyTracked` flag:
   - **`bind-merge`** — the single pass that binds a vault (`initialSync({ firstBind: true })`, sent by
-    `EngineHost.start()` and the CLI's one-shot run). The server has no live version of that file, so a
-    local copy is "only local": it is pushed as a **new file with a new fileId**, and the tombstone is
-    left out of the comparison entirely (its state entry is dropped). This is what stops "connect this
-    vault" from deleting notes the remote had already deleted.
-  - **`apply-remote-delete`** — everything else (scheduled reconciles, user edits, websocket
-    notifications). The local copy is the version the tombstone removed, so the deletion **is applied**
+    `EngineHost.start()`, the CLI's one-shot run, and a local event that arrives before the first pass
+    has completed). The server has no live version of that file, so a local copy is "only local": it is
+    pushed as a **new file with a new fileId**, and the tombstone is left out of the comparison entirely
+    (its state entry is dropped). This is what stops "connect this vault" from deleting notes the remote
+    had already deleted.
+  - **`apply-remote-delete`** — everything else (scheduled reconciles and websocket notifications). The
+    local copy is the version the tombstone removed, so the deletion **is applied**
     and peers' deletions keep propagating; if the local content diverged from that previous version the
     two are out of step and the engine resolves a **conflict** — the remote deletion stands and the local
     content is parked (see the rule above).

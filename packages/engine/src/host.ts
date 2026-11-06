@@ -545,20 +545,27 @@ export class SyncHost {
    */
   async whenIdle(): Promise<void> {
     for (;;) {
-      // Every engine this host stopped, not just the latest: a restart or a second
-      // `stop()` must not lose an engine that is still draining.
-      for (const engine of this.drainingEngines) {
-        await engine.whenIdle();
-        this.drainingEngines.delete(engine);
-      }
-      if (this.engineInstance !== null) await this.engineInstance.whenIdle();
+      // Every engine this host stopped stays under watch for the whole loop: an
+      // OpQueue job enqueued before `stop()` can still call into it, and the deferred
+      // job that follows is not counted by `background`. The set is cleared only on
+      // the return path, so no engine is forgotten while it still has work.
+      const engines =
+        this.engineInstance !== null
+          ? [...this.drainingEngines, this.engineInstance]
+          : [...this.drainingEngines];
+      for (const engine of engines) await engine.whenIdle();
       const idle =
         this.background === 0 &&
         !this.reconciling &&
         this.ops.running === 0 &&
-        this.ops.queued === 0 &&
-        this.drainingEngines.size === 0;
-      if (idle) return;
+        this.ops.queued === 0;
+      if (idle) {
+        // A deferred job can be queued by an OpQueue job that just finished; drain
+        // once more before the lease is released.
+        for (const engine of engines) await engine.whenIdle();
+        this.drainingEngines.clear();
+        return;
+      }
       await new Promise<void>((resolve) => {
         this.platform.after(50, resolve);
       });
