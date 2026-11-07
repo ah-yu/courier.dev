@@ -3981,6 +3981,26 @@ export class SyncEngine {
         hash = freshHash;
       }
 
+      // A `restore` resurrects a chain this device deleted, so before pushing one the engine
+      // asks the server whether another chain already owns the path. The in-memory index can
+      // be stale (a peer's `file_pushed` never arrived and no pass has run since), and this is
+      // the event push worth one index read: an untracked create cannot afford it on every new
+      // note, which is why the check lives here and not on that branch. A chain the index names
+      // wins the path exactly as it would on a pass: this device's tombstone is retired, and
+      // the local copy is adopted or parked.
+      if (decision.action === "push" && decision.pushAction === "restore") {
+        const other = await this.findLiveChainAtPath(path, fileId);
+        if (other) {
+          const applied = await this.resolveRecreateAgainstOwner(other, fileId, path, hash, stamp);
+          if (!applied) {
+            // A failed apply must be visible, not swallowed: the pass is the retry (the same
+            // rule the notification path follows). The local file is still on disk.
+            throw new Error(`Could not read the content of ${path} (${other.head.contentHash})`);
+          }
+          return;
+        }
+      }
+
       try {
         if (decision.action === "push") {
           // The stamp travels with the push, so the sync point it records is one the
@@ -4020,6 +4040,72 @@ export class SyncEngine {
         chain = err.chain;
       }
     }
+  }
+
+  /**
+   * The live chain the server records at `path`, other than `exceptFileId`, or null.
+   *
+   * The incremental decision is taken from the tracked chain alone, and the in-memory
+   * `RemoteIndex` can be stale when a peer's `file_pushed` never arrived (the socket was
+   * down) and no pass has run since. A `restore` is the event push that resurrects a chain
+   * this device deleted, so that is the one case worth a server read before pushing; an
+   * untracked create cannot afford this on every new note (see the docs for the limit that
+   * leaves). The read is the request a pass starts with, and the scan decrypts each live
+   * head's path — O(chains) crypto, paid once per recreate, not on ordinary edits. A failed
+   * read is a failed event, retried by the next pass.
+   */
+  private async findLiveChainAtPath(
+    path: string,
+    exceptFileId: string,
+  ): Promise<{ fileId: string; head: VersionChainEntry } | null> {
+    const index = await this.opts.api.getVaultSyncIndex(this.opts.vaultId);
+    for (const entry of index.files) {
+      if (entry.fileId === exceptFileId) continue;
+      if (entry.head.action === "delete") continue;
+      let plainPath: string | null = null;
+      try {
+        plainPath = await decryptString(this.opts.encryptionKey, entry.head.encryptedPath);
+      } catch {
+        continue;
+      }
+      if (plainPath === path && this.isSyncable(plainPath)) {
+        return { fileId: entry.fileId, head: entry.head };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Hand a recreated path to the chain that already owns it.
+   *
+   * The same rule a pass applies: the other chain keeps the path, the local copy either
+   * becomes the other head (identical bytes) or is parked as a conflict when it diverged,
+   * and only once that apply succeeded is this device's tombstone entry retired so no later
+   * event or pass restores it. A failed apply answers `false` with the state untouched — the
+   * caller reports it, and the next pass retries from the same decision.
+   */
+  private async resolveRecreateAgainstOwner(
+    other: { fileId: string; head: VersionChainEntry },
+    fileId: string,
+    path: string,
+    hash: string,
+    stamp: FileStamp | null,
+  ): Promise<boolean> {
+    this.remoteIndex.remember(other.fileId, other.head, path);
+    if (other.head.contentHash === hash) {
+      // The recreated bytes are already the owner's version: adopt it, no conflict.
+      this.adoptRemoteIdentity(other.fileId, path, other.head, stamp);
+    } else {
+      const applied = await this.handleConflict(other.fileId, path, other.head, true);
+      if (!applied) return false;
+    }
+    if (this.state[fileId]?.plainPath === path) {
+      delete this.state[fileId];
+      // The apply above may already have given the mapping to the owner; only drop a stale
+      // one that still names the dead chain.
+      if (this.pathToFileId.get(path) === fileId) this.pathToFileId.delete(path);
+    }
+    return true;
   }
 
   async handleLocalDelete(path: string): Promise<void> {

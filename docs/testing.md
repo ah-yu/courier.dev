@@ -371,7 +371,7 @@ plugin's now does too. When you add a host, copy the CLI's shape, not the eager 
   | remote only                   | pull (both modes)                                           | "2. remote only"                | "2. remote only"           | "2. remote only"       |
   | same name, different content  | conflict (both modes)                                       | "3. …remote wins, local parked" | "3. …local one is parked"  | "3. …remote note wins" |
   | same name, same content       | synced (both modes)                                         | "4. same name, same content"    | "4. …no second chain"      | "4. …no conflict"      |
-  | remote tombstone + local file | new file when never tracked; deletion/conflict when tracked | "5a/5b/5c"                      | "5a/5b, the paused resume" | "5. …new chain"        |
+  | remote tombstone + local file | new file when never tracked; deletion/conflict when tracked | "5a/5b/5c/5d"                   | "5a/5b, the paused resume" | "5. …new chain"        |
 
   The L3 cases put notes in place through Obsidian's own file layer (`app.vault.create`): a file
   dropped on disk is not in Obsidian's index until it rescans, so the plugin cannot see it.

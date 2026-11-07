@@ -533,6 +533,46 @@ describe("sync e2e — path shapes across two clients", () => {
       expect(b.read("phoenix.md")).toBeNull();
       expect(await b.list()).not.toContain("phoenix.md");
     });
+
+    it("5d. remote tombstone + a peer's new chain — an event keeps the owner", async () => {
+      const vault = await newVault("matrix-tombstone-event");
+      const a = await newClient(vault.id, "device-a");
+      const b = await newClient(vault.id, "device-b");
+      a.write("phoenix.md", "first life");
+      await a.sync();
+      await b.sync();
+      const deletedFileId = a.engine.fileIdForPath("phoenix.md")!;
+
+      a.remove("phoenix.md");
+      await a.removeAndSync("phoenix.md");
+
+      // B applies the deletion, then creates a new chain at the path. A never receives the
+      // notification (it does not sync here), so A's in-memory index does not know the new
+      // chain.
+      await b.sync();
+      b.write("phoenix.md", "second life");
+      await b.sync();
+      const occupantId = b.engine.fileIdForPath("phoenix.md")!;
+      expect(occupantId).not.toBe(deletedFileId);
+
+      // A's user writes a note at the recreated path: the event decides from A's tracked
+      // tombstone alone, and only the server index tells it the path is taken.
+      a.write("phoenix.md", "mine again");
+      await a.change("phoenix.md");
+
+      // One live chain, B's. A's copy is parked and the old chain keeps its tombstone.
+      expect(a.engine.fileIdForPath("phoenix.md")).toBe(occupantId);
+      expect(a.read("phoenix.md")).toBe("second life");
+      expect(await a.parkedContentOf("phoenix.md")).toBe("mine again");
+      expect((await fileVersions(server, vault.id, deletedFileId)).map((v) => v.action)).toEqual([
+        "create",
+        "delete",
+      ]);
+      expect((await fileVersions(server, vault.id, occupantId)).map((v) => v.action)).toEqual([
+        "create",
+      ]);
+      expect(await vaultHistory(server, vault.id)).toHaveLength(2);
+    });
   });
 
   /**
