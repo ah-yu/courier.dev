@@ -576,6 +576,34 @@ describe("EngineHost", () => {
       });
     });
 
+    it("treats a matching pid with no recorded machine as this window's own", async () => {
+      const now = Date.now();
+      const store = memoryStore(now).store;
+      const self = currentPID();
+      // A renderer launched from a GUI can have no hostname to record, and a record with
+      // no machine proves nothing either way. The safe reading is "possibly us": hiding the
+      // row is a smaller harm than building a second engine over a host still draining.
+      await withRendererProcess({ pid: self, env: {} }, async () => {
+        const draining = new SyncLease({
+          store,
+          owner: "plugin",
+          token: "draining-token",
+          now: () => now,
+          process,
+          pid: self,
+        });
+        expect(await draining.acquire()).toBe(true);
+
+        const next = new SyncLease({ store, owner: "plugin", token: "next-token", process });
+        const settings = baseSettings({ connectedVaultId: "vault-1" });
+        const { host } = await newHost(settings, undefined, {}, { lease: next });
+        track(host);
+
+        await host.start();
+        expect(await host.canTakeOver()).toBe(false);
+      });
+    });
+
     it("still offers a takeover of another machine's plugin record with the same pid", async () => {
       const now = Date.now();
       const store = memoryStore(now).store;

@@ -373,11 +373,14 @@ export class EngineHost {
     // A pid is evidence only on the machine that wrote the record (`leaseIsCurrent`'s rule):
     // on a shared folder another machine's plugin can own a pid this process also has, and
     // hiding the row then would take away the only escape from a writer nobody can end.
+    // Without a recorded machine nothing can be proven either way, so a matching pid is
+    // treated as this window's own: two engines of one plugin on the vault is the failure
+    // this guard exists to prevent, and a hidden row is the lesser harm.
     const node = pluginPlatform.process;
     const self = node?.pid;
     const here = currentHost(node);
     if (holder?.owner === "plugin" && holder.pid > 0 && holder.pid === self) {
-      return holder.host !== here;
+      return holder.host !== undefined && holder.host !== here;
     }
     return true;
   }

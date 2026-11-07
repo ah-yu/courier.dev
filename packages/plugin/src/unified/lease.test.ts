@@ -1,6 +1,7 @@
 import type { DataAdapter } from "obsidian";
+import { Platform } from "obsidian";
 import { describe, expect, it, vi } from "vitest";
-import { AdapterLeaseStore } from "./lease";
+import { AdapterLeaseStore, desktopHostname } from "./lease";
 
 /**
  * The lease store inside an Obsidian vault.
@@ -160,5 +161,72 @@ describe("AdapterLeaseStore", () => {
 
     await store.writeFile(".courier/sync-lease/owner.json", '{"owner":"plugin"}');
     expect(write).toHaveBeenCalledWith(".courier/sync-lease/owner.json", '{"owner":"plugin"}');
+  });
+});
+
+/**
+ * Install (and later restore) the renderer's `require`, which exists only on desktop.
+ *
+ * Restored through its property descriptor: `window` and `globalThis` are the same object
+ * here, so a plain `delete` would remove the runtime's own `require` for every later test.
+ */
+function withRequire(value: unknown, body: () => void): void {
+  const target = window as unknown as { require?: unknown };
+  const previous = Object.getOwnPropertyDescriptor(target, "require");
+  target.require = value;
+  try {
+    body();
+  } finally {
+    if (previous) Object.defineProperty(target, "require", previous);
+    else delete target.require;
+  }
+}
+
+/**
+ * The machine name a renderer may not carry in its environment, which the lease record
+ * needs beside the pid: without it a pid proves nothing about whose process it is.
+ */
+describe("desktopHostname", () => {
+  it("asks the OS through the renderer's require", () => {
+    const hostname = vi.fn(() => "  studio-mac  ");
+    withRequire(
+      (id: string) => (id === "node:os" ? { hostname } : undefined),
+      () => {
+        expect(desktopHostname()).toBe("studio-mac");
+      },
+    );
+  });
+
+  it("answers an empty name where there is no require, no os, or a refusal", () => {
+    expect(desktopHostname()).toBe("");
+
+    withRequire(
+      () => undefined,
+      () => {
+        expect(desktopHostname()).toBe("");
+      },
+    );
+    withRequire(
+      () => {
+        throw new Error("not available");
+      },
+      () => {
+        expect(desktopHostname()).toBe("");
+      },
+    );
+  });
+
+  it("answers an empty name on a phone, where the desktop surface is not there", () => {
+    withRequire(
+      () => ({ hostname: () => "should-not-be-asked" }),
+      () => {
+        Platform.isDesktop = false;
+        try {
+          expect(desktopHostname()).toBe("");
+        } finally {
+          Platform.isDesktop = true;
+        }
+      },
+    );
   });
 });

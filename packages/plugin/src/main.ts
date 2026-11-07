@@ -51,6 +51,7 @@ import {
   makeKeyCheck,
   importRawKey,
   exportRawKey,
+  currentHost,
   normalizeExcludedFolders,
   normalizeScope,
   SyncLease,
@@ -81,7 +82,7 @@ import {
 
 export type { VaultCredentialCheck };
 import { EngineHost } from "./unified/host";
-import { AdapterLeaseStore } from "./unified/lease";
+import { AdapterLeaseStore, desktopHostname } from "./unified/lease";
 import { PasswordPromptModal } from "./ui/dialogs/password-prompt-modal";
 import { TakeOverLeaseModal } from "./ui/dialogs/take-over-lease-modal";
 import type {
@@ -1280,6 +1281,10 @@ export default class CourierPlugin extends Plugin {
         owner: "plugin",
         // The renderer's Node surface: pid evidence on desktop, absent on mobile.
         process: pluginPlatform.process,
+        // A pid is evidence only with a machine beside it, and a renderer launched from a
+        // GUI often carries no hostname in its environment. The record names this machine
+        // so another host — or this window's own replaced host — can be told apart.
+        host: currentHost(pluginPlatform.process) || desktopHostname() || undefined,
       }),
       onLeaseChange: () => this.refreshLiveState(),
     });

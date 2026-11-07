@@ -1,5 +1,27 @@
 import type { DataAdapter } from "obsidian";
+import { Platform } from "obsidian";
 import type { SyncLeaseStore } from "@courier/engine";
+
+/**
+ * This machine's name, as the desktop renderer can learn it.
+ *
+ * `SyncLease.currentHost` reads the environment, which a renderer launched from a GUI
+ * often does not carry (macOS from Finder is the common case). A lease record without a
+ * machine cannot support pid evidence — neither "that holder is gone" nor "that holder is
+ * somebody else" — so the plugin asks the OS through `window.require`, the same door
+ * `lease-watch.ts` uses. Mobile has no such surface and answers "".
+ */
+export function desktopHostname(): string {
+  if (!Platform.isDesktop) return "";
+  try {
+    const requireFn = (window as unknown as { require?: (id: string) => unknown }).require;
+    if (typeof requireFn !== "function") return "";
+    const os = requireFn("node:os") as { hostname?: () => string } | undefined;
+    return (os?.hostname?.() ?? "").trim();
+  } catch {
+    return "";
+  }
+}
 
 /**
  * The lease store inside an Obsidian vault.

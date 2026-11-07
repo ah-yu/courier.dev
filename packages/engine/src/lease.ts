@@ -432,10 +432,14 @@ export class SyncLease {
    *
    * It deliberately **never writes**: `renew()` is what keeps this host's record fresh for
    * every other reader, and a watcher that renewed would be woken by its own heartbeat.
+   *
+   * A store that **cannot be read** rejects rather than answering "lost": callers treat a
+   * failed read as "no evidence yet" and keep the vault until the next renewal. A record
+   * that is simply not there is still `false` — somebody deletes it to take the vault.
    */
   async stillOwner(): Promise<boolean> {
     if (!this.held) return false;
-    const existing = await readQuietly(this.opts.store);
+    const existing = await readLeaseIn(this.opts.store, LEASE_DIR);
     if (existing?.token !== this.token) {
       this.held = false;
       return false;

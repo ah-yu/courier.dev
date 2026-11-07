@@ -424,9 +424,29 @@ describe("SyncLease", () => {
       });
 
       expect(await lease.read()).toBeNull();
-      expect(await lease.stillOwner()).toBe(false);
       expect(await lease.renew()).toBe(false);
       await expect(lease.release()).resolves.toBeUndefined();
+    });
+
+    /**
+     * The watcher's question is the one exception: a read that **failed** is not evidence
+     * that the lease is gone, so it rejects and the caller keeps the vault until the next
+     * renewal. Answering "lost" on a transient adapter error would stop the engine.
+     */
+    it("rejects from stillOwner when the record cannot be read at all", async () => {
+      let now = 1_000;
+      const store = new MemoryLeaseStore(() => now);
+      const lease = new SyncLease({
+        store,
+        owner: "cli",
+        token: "cli-token",
+        now: () => now,
+        process,
+      });
+      await lease.acquire();
+      store.readFile = storeFailure;
+
+      await expect(lease.stillOwner()).rejects.toThrow(/EIO/);
     });
 
     /**
