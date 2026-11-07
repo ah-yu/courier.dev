@@ -229,6 +229,21 @@ export class SelfEventLog {
     return expiresAt > this.now();
   }
 
+  /**
+   * Whether a delete this engine performed is still on the books for `path` — **without**
+   * consuming it (see `hasSelfWrite`). The host's burst rule asks this before it decides
+   * that a vault event is part of a user's bulk write rather than the echo of its own.
+   */
+  hasSelfDelete(path: string): boolean {
+    const expiresAt = this.selfDeletes.get(path);
+    if (expiresAt === undefined) return false;
+    if (expiresAt <= this.now()) {
+      this.selfDeletes.delete(path);
+      return false;
+    }
+    return true;
+  }
+
   // ── Moves ──
 
   /** Record a move this engine is about to perform locally (same reason as a write). */
@@ -246,6 +261,17 @@ export class SelfEventLog {
     if (!entry) return false;
     this.selfRenames.delete(from);
     return entry.expiresAt > this.now() && entry.to === to;
+  }
+
+  /** Whether a move out of `path` is still on the books (see `hasSelfDelete`). */
+  hasSelfRename(from: string): boolean {
+    const entry = this.selfRenames.get(from);
+    if (!entry) return false;
+    if (entry.expiresAt <= this.now()) {
+      this.selfRenames.delete(from);
+      return false;
+    }
+    return true;
   }
 
   // ── Deletes awaiting a possible rename ──

@@ -8,6 +8,8 @@ import {
 } from "@courier/testing";
 import { sortedCopy } from "@courier/shared";
 import {
+  LOCAL_EVENT_BURST_FLUSH_MS,
+  LOCAL_EVENT_BURST_SIZE,
   PUSH_NOTIFICATION_FLUSH_MS,
   SyncHost,
   type SyncEventSource,
@@ -200,6 +202,29 @@ async function untilIndexRead(api: Record<string, ReturnType<typeof vi.fn>>): Pr
   while (api.getVaultSyncIndex.mock.calls.length === 0) {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
+}
+
+/**
+ * Deliver `count` create events, for files the fake adapter already holds.
+ *
+ * What a bulk write looks like to the host: the bytes are on disk and the watcher reports
+ * one event per file, all inside one tick.
+ */
+function writeBurst(
+  adapter: FakeAdapter,
+  events: FakeEventSource,
+  count: number,
+  prefix = "notes/n",
+): string[] {
+  const paths: string[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const path = `${prefix}-${index}.md`;
+    const bytes = new TextEncoder().encode(`# note ${index}`);
+    adapter.files.set(path, bytes);
+    events.handlers!.changed(path, bytes.byteLength);
+    paths.push(path);
+  }
+  return paths;
 }
 
 describe("SyncHost", () => {
@@ -1079,6 +1104,142 @@ describe("SyncHost", () => {
       // The pass could not be cancelled, but the state it read before the stop must not
       // land over what a restarted host has already written.
       expect(save.mock.calls.length).toBe(savesBefore);
+    });
+  });
+
+  /**
+   * A bulk local write: an agent, a script or a folder operation drops hundreds of files
+   * into the vault, and the watcher reports one event per file within a second.
+   *
+   * Handled one at a time that is one push request per file — 1 000 generated notes
+   * measured 1 000 `POST /sync/push` calls, and the server's 600/minute allowance refuses
+   * the vault after about a minute (the client sat out limiter windows and the rest waited
+   * for the five-minute pass). More than `LOCAL_EVENT_BURST_SIZE` events inside one window
+   * are collected and handed to **one engine job** instead, whose creates travel 100 files
+   * per request.
+   */
+  describe("a burst of local events", () => {
+    it("handles the burst as one engine job, with no pass and no per-file push", async () => {
+      const adapter = new FakeAdapter();
+      const { host, api, events } = await newHost({ adapter, stateStore: store(null, true) });
+      track(host);
+      await host.start();
+
+      // The per-file path is what a burst must not take for every event: one call is one
+      // push request. Only the events below the threshold may reach it.
+      const perEvent = vi.spyOn(host.engine!, "handleLocalChange").mockResolvedValue(undefined);
+      const batch = vi.spyOn(host.engine!, "handleLocalEvents").mockResolvedValue(undefined);
+
+      const count = LOCAL_EVENT_BURST_SIZE * 3;
+      writeBurst(adapter, events, count);
+      await host.whenIdle();
+
+      // The events below the threshold went out one by one; the rest travelled as one job.
+      expect(perEvent.mock.calls.length).toBe(LOCAL_EVENT_BURST_SIZE);
+      expect(batch).toHaveBeenCalledTimes(1);
+      const handed = batch.mock.calls[0]![0] as { changed?: string[]; deleted?: string[] };
+      expect(handed.changed).toHaveLength(count - LOCAL_EVENT_BURST_SIZE);
+      expect(handed.deleted).toEqual([]);
+      // No pass: the burst job reads what it needs and never lists the vault's chains.
+      expect(api.getVaultSyncIndex).toHaveBeenCalledTimes(1);
+      // The burst says how big it was, which is what makes "a single save triggered a
+      // batch" answerable from a host's log rather than guessed from CPU use.
+      expect(hostLog.mock.calls.at(-1)?.[0]).toBe(
+        `local burst: ${count - LOCAL_EVENT_BURST_SIZE} changed, 0 deleted in one batched push`,
+      );
+    });
+
+    it("does not count its own pull's events as a burst", async () => {
+      vi.useFakeTimers();
+      const { host, api, events } = await newHost({ stateStore: store(null, true) });
+      track(host);
+      await host.start();
+      subscribed();
+      await advanceTimersByTimeAsync(0);
+
+      const perEvent = vi.spyOn(host.engine!, "handleLocalChange").mockResolvedValue(undefined);
+      const batch = vi.spyOn(host.engine!, "handleLocalEvents").mockResolvedValue(undefined);
+      // What a pull looks like from the watcher's side: one event per file the engine
+      // wrote itself. Counting them would batch behind every large download.
+      vi.spyOn(host.engine!, "hasSelfWriteHint").mockReturnValue(true);
+      const count = LOCAL_EVENT_BURST_SIZE * 3;
+      for (let index = 0; index < count; index += 1) {
+        events.handlers!.changed(`pulled/file-${index}.md`, 10);
+      }
+      await advanceTimersByTimeAsync(LOCAL_EVENT_BURST_FLUSH_MS * 4);
+      await host.whenIdle();
+
+      // Every event went to the per-file path, nothing was batched, and only the bind read
+      // the index — a pull is not a burst.
+      expect(perEvent).toHaveBeenCalledTimes(count);
+      expect(batch).not.toHaveBeenCalled();
+      expect(api.getVaultSyncIndex).toHaveBeenCalledTimes(1);
+    });
+
+    it("hands over the paths written while a batch job is still running", async () => {
+      const adapter = new FakeAdapter();
+      const { host, events } = await newHost({ adapter, stateStore: store(null, true) });
+      track(host);
+      await host.start();
+
+      // Hold the first job, so the vault can change underneath it.
+      let release!: () => void;
+      const batch = vi
+        .spyOn(host.engine!, "handleLocalEvents")
+        .mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              release = resolve;
+            }),
+        )
+        .mockResolvedValue(undefined);
+
+      writeBurst(adapter, events, LOCAL_EVENT_BURST_SIZE * 2);
+      await waitFor(() => expect(batch).toHaveBeenCalledTimes(1));
+
+      // More files land while that job is still deciding from what it read.
+      writeBurst(adapter, events, LOCAL_EVENT_BURST_SIZE, "notes/late");
+      release();
+      await waitFor(() => expect(batch).toHaveBeenCalledTimes(2));
+      await host.whenIdle();
+
+      // The second hand-off carries exactly the paths written during the first job.
+      const second = batch.mock.calls[1]![0] as { changed?: string[] };
+      expect(second.changed).toHaveLength(LOCAL_EVENT_BURST_SIZE);
+      expect(second.changed!.every((path) => path.startsWith("notes/late"))).toBe(true);
+    });
+
+    it("keeps deletions and moves out of the change batch", async () => {
+      const { host, events } = await newHost({ stateStore: store(null, true) });
+      track(host);
+      await host.start();
+
+      const batch = vi.spyOn(host.engine!, "handleLocalEvents").mockResolvedValue(undefined);
+      const perRename = vi.spyOn(host.engine!, "handleLocalRename").mockResolvedValue(undefined);
+      const perDelete = vi.spyOn(host.engine!, "handleLocalDelete").mockResolvedValue(undefined);
+
+      // A burst that removed a folder: the tombstones travel as one batch of `deleted`
+      // paths, never as `changed` (a change is decided by reading the file, and the file
+      // is gone).
+      for (let index = 0; index < LOCAL_EVENT_BURST_SIZE * 2; index += 1) {
+        events.handlers!.removed(`gone/file-${index}.md`);
+      }
+      await host.whenIdle();
+      expect(batch).toHaveBeenCalledTimes(1);
+      const handed = batch.mock.calls[0]![0] as { changed?: string[]; deleted?: string[] };
+      expect(handed.changed).toEqual([]);
+      expect(handed.deleted).toHaveLength(LOCAL_EVENT_BURST_SIZE);
+      // The events below the threshold went out one by one, as before.
+      expect(perDelete).toHaveBeenCalledTimes(LOCAL_EVENT_BURST_SIZE);
+
+      // A move re-points a chain instead of producing a version, so it stays on its own
+      // path even inside a burst.
+      for (let index = 0; index < LOCAL_EVENT_BURST_SIZE; index += 1) {
+        events.handlers!.renamed(`old-${index}.md`, `new-${index}.md`, 10);
+      }
+      await host.whenIdle();
+      expect(perRename).toHaveBeenCalledTimes(LOCAL_EVENT_BURST_SIZE);
+      expect(batch).toHaveBeenCalledTimes(1);
     });
   });
 });

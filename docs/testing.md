@@ -31,6 +31,7 @@ Run the file for the current list; this is the theme each one owns.
 | `packages/e2e/src/large-file.e2e.test.ts`      | wire cost: bytes not base64, rename without content, batching, stamps                                                        |
 | `packages/e2e/src/folder-rename.e2e.test.ts`   | folder renames and the concurrent burst                                                                                      |
 | `packages/e2e/src/user-lifecycle.e2e.test.ts`  | disable/re-enable, cascade delete, and the edits the service refuses                                                         |
+| `packages/e2e/src/bulk-write.e2e.test.ts`      | a bulk local write through the real `SyncHost` against the **deployed** allowance (creates, edits, deletions)                |
 | `packages/e2e/src/plugin.e2e.test.ts`          | the real plugin class (L2)                                                                                                   |
 | `packages/e2e/src/obsidian/`                   | real Obsidian over the CLI (L3)                                                                                              |
 
@@ -87,13 +88,18 @@ Same server and engine, but the client is the real `CourierPlugin`, with `obsidi
   only `obsidian` needs the alias. `packages/e2e/tsconfig.json` is type-check only and exists so
   `bun run typecheck` still covers the harness. `startTestServer` also sets
   `SYNC_RATE_LIMIT_MAX_ATTEMPTS` for its throwaway server (`syncRateLimitOptions()` in
-  `packages/server/src/middleware/rate-limit.ts`) — production's 120 requests per vault per minute is
-  sized for one user's devices, while a scenario has two clients answering each other.
+  `packages/server/src/middleware/rate-limit.ts`) — a scenario has two clients answering each other,
+  and a `429` mid-scenario reads as a sync failure instead of the limiter it is. That ceiling is a
+  default, not a law: `startTestServer(name, { syncRateLimitMaxAttempts })` passes the deployed number
+  (600) for a case that **is** about the allowance — `bulk-write.e2e.test.ts` does, because its point is
+  that a bulk write stays inside it.
 - **Request volume is bounded, and measured.** Idle traffic is **0 requests**; one local edit costs
   ~3 (pull → push → pull) and adds exactly one version to the chain; a first bind costs one request per
   **100 files** created (the pass batches its creates — see [sync-engine.md](sync-engine.md#batching)) plus the history call, not
-  one per file; a reconnect costs one reconcile (2 requests: the vault history plus whatever it has to
-  push or pull); the whole real-Obsidian suite is ~200. So the burst is honest event propagation, not a
+  one per file; a 700-file bulk write costs fewer than 40 pushes (the host hands the burst to one batched
+  job — see [sync-engine.md](sync-engine.md#pass-order-and-concurrency)); a reconnect costs one
+  reconcile (2 requests: the vault history plus whatever it has to push or pull); the whole
+  real-Obsidian suite is ~200. So the burst is honest event propagation, not a
   retry loop — but if a chain ever grows while nothing changes, that _is_ a loop: investigate it instead
   of raising the ceiling again.
 - **Known gaps are encoded as `it.fails(...)`** with a comment explaining what is broken, so the

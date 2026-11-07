@@ -122,13 +122,29 @@ export async function setUserMaxFileBytes(server: TestServer, maxFileBytes: numb
   await patchTestUser(server, { maxFileBytes });
 }
 
+export interface StartTestServerOptions {
+  /**
+   * The sync route's per-window request allowance.
+   *
+   * Defaults to the harness ceiling: a scenario drives two clients through operations
+   * back-to-back, and a 429 in the middle of one reads as a sync failure instead of the
+   * rate limit it is. A case that is *about* the allowance passes the deployed number
+   * (600) here — the route reads it when the server starts, so it cannot be changed
+   * afterwards.
+   */
+  syncRateLimitMaxAttempts?: number;
+}
+
 /**
  * Start a real server on a throwaway database.
  *
  * Each call gets its own temp directory, port and user, so test files can run
  * without sharing state.
  */
-export async function startTestServer(name = "e2e user"): Promise<TestServer> {
+export async function startTestServer(
+  name = "e2e user",
+  options: StartTestServerOptions = {},
+): Promise<TestServer> {
   const rootDir = mkdtempSync(join(tmpdir(), "courier-e2e-"));
   const sqlitePath = join(rootDir, "courier.db");
   mkdirSync(join(rootDir, "blobs"), { recursive: true });
@@ -149,7 +165,7 @@ export async function startTestServer(name = "e2e user"): Promise<TestServer> {
   // far behind, and a 429 mid-scenario reads as a sync failure rather than the
   // rate limit it is. Raise the ceiling generously: a runaway loop still trips it
   // long before a run ends. The limiter and its defaults are otherwise untouched.
-  process.env.SYNC_RATE_LIMIT_MAX_ATTEMPTS = "20000";
+  process.env.SYNC_RATE_LIMIT_MAX_ATTEMPTS = String(options.syncRateLimitMaxAttempts ?? 20_000);
   process.env.SYNC_RATE_LIMIT_WINDOW_MS = "60000";
 
   const { startServer } = await import("../../../server/src/commands/start");

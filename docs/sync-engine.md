@@ -470,8 +470,10 @@ file now lives at.
   now uses it (`createUntrackedFiles`). Batches are bounded twice — `MAX_PUSH_BATCH_FILES` (100, the
   server's own cap) and `MAX_PUSH_BATCH_BYTES` (8 MiB), because every file in a batch stays in memory
   until the request is built — and a file larger than the byte bound travels alone, so a bind never holds
-  two large payloads at once. `modify`/`rename` pushes stay one per request: those are event-driven
-  single-file changes, where a round trip is not what the pass is spending its time on.
+  two large payloads at once. `modify`/`rename` pushes stay one per request on the **single-event** path:
+  those are event-driven single-file changes, where a round trip is not what the pass is spending its
+  time on. A **burst** of such events is batched on both sides — the host hands it to one job whose
+  versions and chain reads travel 100/200 per request (see "A burst of local vault events" below).
   - **A refused batch costs one batch, not the pass.** The flush is always awaited before its failure is
     recorded (`const failure = await flush(); firstFailure ??= failure;`) — `firstFailure ??= await
     flush()` short-circuits the **call**, so one refused batch used to silently drop every batch after
@@ -543,6 +545,56 @@ file now lives at.
   state thousands of times and was most of a live pull's cost: 5 000 files, 59 s → 18 s, measured in a real
   Obsidian). The trade is crash granularity, not behaviour: a crash mid-batch leaves up to one batch of
   files to re-decide on the next pass. A lone remote edit still costs one request, 25 ms later.
+- **A burst of local vault events is carried out as one job, not one request per file.** An agent, a
+  script or a folder operation writes hundreds of files in a few seconds and the watcher reports one
+  event per file; handled one at a time that is one `POST /sync/push` per file — and, for a file this
+  device already tracks, one chain read _before_ it. Measured: 1 000 generated notes were 1 000 pushes;
+  300 edits to existing notes were 300 chain reads and 300 pushes. Once more than
+  `LOCAL_EVENT_BURST_SIZE` (4) events arrive inside `LOCAL_EVENT_BURST_WINDOW_MS` (500 ms) — eight a
+  second, just under the deployed allowance — `SyncHost` collects their paths and
+  `LOCAL_EVENT_BURST_FLUSH_MS` (50 ms) later hands them to **one engine job**
+  (`SyncEngine.handleLocalEvents`), which makes the same per-path decisions as a single event and sends
+  what they produce in batches:
+  - changes and edits to tracked files travel **100 versions per request** (the same
+    `MAX_PUSH_BATCH_FILES` / `MAX_PUSH_BATCH_BYTES` bounds the pass's creates use), and tracked files'
+    chains are fetched **200 per request** (`MAX_PULL_BATCH_FILES`) instead of one request each;
+  - deletions travel in the same batch as their own version list. `changed` and `deleted` paths are kept
+    apart because a change is decided by reading the file and a deletion by its absence — one list for
+    both would read nothing for a removed path and silently drop its tombstone. Deletions are decided
+    **first**, so the rename-by-hash record exists before a moved file's create is decided; a path that
+    is in both lists is decided as an **edit**, not a deletion (a tool replacing a file in place reports
+    both halves, and publishing the tombstone only to follow it with a restore tells every peer to delete
+    a note that never went away);
+  - the vault is **never scanned** and the chain index is **never fetched**: this is not a pass, and it
+    costs the burst, not the vault. A listing is read once per job (only when it has changes), where the
+    single-event path reads one listing per new file for its identity fallback.
+  - **The engine's own writes are not a burst.** A pull writes its files through the adapter and the
+    watcher echoes every one, which is exactly why `SelfEventLog` exists; the host asks the engine first
+    (`hasSelfWriteHint` / `hasSelfDeleteHint`) and queues those events as before without counting them.
+    Otherwise every large download would batch behind itself. The hint is cheap and time-bounded; the
+    engine still matches bytes before it ignores an event.
+  - **A burst that is still writing while the job runs owes another job.** Paths arriving during the job
+    set the flag again, and its tail arms one more hand-off rather than leaving them to the five-minute
+    periodic pass. `whenIdle()` counts an owed or running burst as work, so a host that hands its vault
+    lease over does not do it mid-burst.
+  - **A move stays on its own path.** A `rename` re-points a chain instead of producing a version of a
+    file's bytes, and a folder rename reports one per file; those keep their per-path job (one request
+    each) rather than joining the batch. It is the one bulk operation still sent file by file — the
+    remaining gap below.
+  - **A burst is logged with its size.** `local burst: N changed, M deleted in one batched push` goes to
+    the host's log, so "did one save just trigger a batch?" is answerable from a plugin console or the
+    daemon's log instead of inferred from CPU use. The threshold has headroom over one operation by
+    construction: the plugin wires one handler per Obsidian event
+    (`vault.on("create"|"modify"|"delete"|"rename")`), so a save is one event, a create at most two
+    (`create` and the `modify` the app also fires), and a rename one — against four in 500 ms.
+  - Individual events below the threshold keep their immediate push: an ordinary edit still travels on
+    the event, not in a batch. Covered by `host.test.ts` (`a burst of local events`: one job and no pass,
+    deletions kept out of the change list, moves still per path, the follow-up hand-off, a pull's own
+    events not counted) and `bulk-write.e2e.test.ts` (700 creates, 300 edits and 300 deletions against
+    the **deployed** 600/minute allowance: every version lands, fewer than 40 requests each way, and the
+    receiving host's only index read is its bind).
+  - **What it does not fix:** a folder **rename** of thousands of files is still one request per file.
+    Batching moves is the next lever; nothing else in a bulk operation is left unbatched.
 - **A cold-start pass works in the order the user will notice, and bounds how much is in flight.** The work
   is the same either way; the order and the concurrency are what a phone feels:
   - Every reconcile reads `GET /vaults/:id/sync/index` — **one row per chain** (`head`, plus the last live
@@ -616,7 +668,8 @@ file now lives at.
   `EngineHost` and the CLI's `runDaemon` are thin adapters over it; the loop itself — the bind pass and
   its `bindCompleted` gate, a reconcile that is never re-entered, a reconcile on a **re**connect and not
   on the first connect, the settings poll that reports one failure per outage, the `OpQueue`
-  around event-driven work, session-id propagation, and `stop()` — exists once. It used to exist twice,
+  around event-driven work, the **local-burst pass** (below), session-id propagation, and `stop()` —
+  exists once. It used to exist twice,
   and the copies had already drifted: the CLI kept running its watcher and interval after
   `user_key_revoked` while only logging "Sync stopped", and it hardcoded an exclusive weight instead of
   `weightForSize`. What a host still owns is what is genuinely host-specific: the event source

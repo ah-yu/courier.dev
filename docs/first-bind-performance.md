@@ -208,6 +208,10 @@ line).
   is now what bounds a first download (2.8 ms/file at four concurrent files, ~141 s for 50 000). A batch
   content route (N hashes per request) or a higher per-pass concurrency would cut it further; neither is
   needed to _finish_, which is what used to fail.
+- **A folder rename's request count.** A move re-points a chain instead of producing a version, so it stays
+  on its own per-path job: renaming a folder of a thousand notes is still a thousand small pushes. It
+  finishes (the engine waits out a limiter window), but it spends the allowance on round trips; batching
+  moves is the one lever left on the event path.
 - **The same measurement on a real network and on mobile.** Everything here is localhost on a desktop;
   the per-batch RTT and the adapter's IPC cost are what a phone makes of the same numbers.
 - **A peer that is online during the bind.** Not covered by the numbers above, because the harness
@@ -255,3 +259,44 @@ papered over.
 What remains is ~0.38 ms per file: the local `stat`/read half (~0.8 s for the vault), encryption,
 50 HTTP requests and 50 SQLite commits. The next levers are batch size (100 files / 8 MiB today) and
 the per-request fixed cost, not the store.
+
+## 2026-11-07: a bulk local write (one push per file)
+
+The bind passes above were never the whole story: **the event path was one request per file**, and that is
+what a generator, an agent or a "drop a folder in" produces. Measured at L1 — two real `SyncHost`s (the
+loop both clients run) against a real server, one device writing 1 000 notes into its vault and firing the
+watcher event each write would fire, the other online and bound:
+
+| 1 000 generated notes  | Before           | After (one batched job) |
+| ---------------------- | ---------------- | ----------------------- |
+| pushing host           | **1 000** pushes | **14** pushes (4 + 10)  |
+| peer                   | 125 chain pulls  | 11 chain pulls          |
+| vault scans            | —                | **0** (not a pass)      |
+| wall clock (localhost) | 6.0 s            | 1.5 s                   |
+
+The same shape for the other two bulk operations, measured the same way (300 files each):
+
+| 300 files | Before                       | After                        |
+| --------- | ---------------------------- | ---------------------------- |
+| edits     | 300 chain reads + 300 pushes | **6 chain reads + 7 pushes** |
+| deletions | 300 pushes                   | **3–7 pushes**               |
+
+Both numbers before are per-file requests against a **600/minute** sync allowance: the 1 000 pushes are
+refused after about a minute, and the client then sat out whole limiter windows while the rest of the
+vault waited for the five-minute pass. That is the "it syncs a few hundred files and then stops" report.
+The peer's 125 pulls were the same shape from the other side (a notification arriving after each push is
+its own chain request when the pushes are not batched; here they clustered, on a real network they do
+not).
+
+The fix is in the engine, driven by the host: more than `LOCAL_EVENT_BURST_SIZE` (4) local events inside
+`LOCAL_EVENT_BURST_WINDOW_MS` (500 ms) are collected and handed to **one job**
+(`SyncEngine.handleLocalEvents`), which decides each path exactly as a single event would and sends the
+versions 100 per request, with tracked files' chains fetched 200 per request. The vault is never scanned
+and the chain index is never fetched, so the cost follows the burst rather than the vault. The rule (and
+its guards: the engine's own writes are not counted, a burst still writing during the job owes one more
+job, deletions are their own list, moves stay per path) is in
+[sync-engine.md](sync-engine.md#pass-order-and-concurrency); the cases are `bulk-write.e2e.test.ts`, run
+against the deployed 600/minute allowance rather than the harness's raised one.
+
+Two limits stay: a folder **rename** of thousands of files is still one request per file, and a
+**download** is still one content request per file — the levers listed under Remaining work.
