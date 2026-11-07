@@ -173,6 +173,21 @@ The rules below are the ones the e2e suites exist to protect.
     point and put the deleted note back on top of it, leaving two live chains at one path.
     Covered by the `does not revive its deleted chain over a peer's new file at the same path`
     case in `engine.test.ts`.
+  - **A recreate event checks the server before it restores.** A vault event decides from the tracked
+    chain alone, and the in-memory remote index can be stale: a peer's `file_pushed` never arrived
+    (the socket was down) and no pass has run since, so the server may already hold a new chain at
+    the path. A `restore` is the event push that resurrects a chain this device deleted, and that is
+    the one this check covers: before pushing it the engine reads the vault index once and applies the
+    pass rule straight away when a live chain records the path — the tombstone entry is retired, the
+    owner's head is adopted when the bytes are identical, and a diverged copy is parked as a conflict.
+    A failed index read fails the event, and the next pass retries. The read costs one index request
+    plus the decryption of every live chain's path (the work a pass starts with), paid only on a
+    recreate, not on ordinary edits. An **untracked create** at a path the stale index does not know
+    is not covered: the engine cannot afford this read on every new note, so two devices that create
+    the same path while out of touch (or before the notification arrives) can still leave two live
+    chains until one of them wins a conflict — the same limit the conflict rule already accepts.
+    Covered by the `does not restore on a recreate event…` / `adopts the owner…` cases in
+    `engine.test.ts` and the `5d` case in `path-sync.e2e.test.ts`.
   - **A tracked chain whose head is a `delete` and whose file is gone is retired too**, unless its
     sync point is the tombstone itself (the recreate case, which keeps the entry). The deletion has
     already happened on this device — the file was removed while nothing watched, or the peer deleted

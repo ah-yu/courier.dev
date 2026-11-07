@@ -1436,6 +1436,163 @@ describe("SyncEngine conflicts", () => {
   });
 
   /**
+   * The incremental half of the same ownership rule: a create/change event for a file this
+   * device deleted, while a peer's new chain already owns the path **on the server** but no
+   * notification has reached this device (the socket is down, and no pass has run since the
+   * peer's push).
+   *
+   * The event's decision is taken from the tracked chain alone, so without a server check it
+   * answers "recreate" and pushes a `restore` onto the dead chain beside the peer's chain —
+   * two live chains at one path. The pass-level rule has to reach the event path too: the
+   * peer's chain owns the path, so the local copy is parked and the peer's head is applied.
+   */
+  it("does not restore on a recreate event when a peer's chain already owns the path", async () => {
+    const { engine, adapter, api, key } = await makeEngine();
+    adapter.files.set("n.md", encoder.encode("mine"));
+    await engine.initialSync();
+    const deletedId = await syncedFileId(api);
+
+    // This device deletes the note, so the tombstone is its sync point.
+    adapter.files.delete("n.md");
+    await engine.handleLocalDelete("n.md");
+
+    // A peer creates a new note at the same path; no notification reaches this device.
+    const peerAdapter = new FakeAdapter();
+    peerAdapter.files.set("n.md", encoder.encode("theirs"));
+    const peer = new SyncEngine({
+      platform: realPlatform,
+      vaultId: "vault-1",
+      adapter: peerAdapter,
+      api,
+      encryptionKey: key,
+    });
+    await peer.initialSync();
+    const peerId = peer.fileIdForPath("n.md")!;
+
+    // The user writes a new note at the path: the vault event decides immediately, before
+    // any pass or notification.
+    adapter.files.set("n.md", encoder.encode("mine again"));
+    await engine.handleLocalChange("n.md");
+
+    // One live chain, the peer's. The dead chain keeps its tombstone, the recreated copy is
+    // parked, and the peer's bytes are what the path holds.
+    const live = [...api.chains.entries()].filter(
+      ([, chain]) => chain[chain.length - 1]!.action !== "delete",
+    );
+    expect(live.map(([fileId]) => fileId)).toEqual([peerId]);
+    expect(api.chains.get(deletedId)!.map((v) => v.action)).toEqual(["create", "delete"]);
+    expect(engine.fileIdForPath("n.md")).toBe(peerId);
+    expect(new TextDecoder().decode(adapter.files.get("n.md"))).toBe("theirs");
+    expect(new TextDecoder().decode(adapter.files.get(conflictFilePath("n.md")))).toBe(
+      "mine again",
+    );
+    // The dead chain no longer names the path; the owner is the tracked one, so a restart
+    // cannot decide a restore for it again.
+    const state = JSON.parse(engine.serializeState()) as Record<string, { plainPath: string }>;
+    expect(state[deletedId]).toBeUndefined();
+    expect(state[peerId]?.plainPath).toBe("n.md");
+  });
+
+  /**
+   * The same event, with the recreated bytes equal to the owner's head. Identical bytes are
+   * never a conflict, so the owner's identity is adopted and no copy is parked.
+   */
+  it("adopts the owner when the recreated bytes are its head", async () => {
+    const { engine, adapter, api, key } = await makeEngine();
+    adapter.files.set("n.md", encoder.encode("mine"));
+    await engine.initialSync();
+    const deletedId = await syncedFileId(api);
+
+    adapter.files.delete("n.md");
+    await engine.handleLocalDelete("n.md");
+
+    const peerAdapter = new FakeAdapter();
+    peerAdapter.files.set("n.md", encoder.encode("theirs"));
+    const peer = new SyncEngine({
+      platform: realPlatform,
+      vaultId: "vault-1",
+      adapter: peerAdapter,
+      api,
+      encryptionKey: key,
+    });
+    await peer.initialSync();
+    const peerId = peer.fileIdForPath("n.md")!;
+
+    adapter.files.set("n.md", encoder.encode("theirs"));
+    const pushedBefore = api.pushed.length;
+    await engine.handleLocalChange("n.md");
+
+    expect(engine.fileIdForPath("n.md")).toBe(peerId);
+    expect(adapter.files.has(conflictFilePath("n.md"))).toBe(false);
+    expect(api.chains.get(deletedId)!.map((v) => v.action)).toEqual(["create", "delete"]);
+    expect(api.pushed).toHaveLength(pushedBefore);
+  });
+
+  it("fails the recreate event when the ownership check cannot read the index", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("n.md", encoder.encode("mine"));
+    await engine.initialSync();
+    const deletedId = await syncedFileId(api);
+    adapter.files.delete("n.md");
+    await engine.handleLocalDelete("n.md");
+
+    adapter.files.set("n.md", encoder.encode("mine again"));
+    const realIndex = api.getVaultSyncIndex.bind(api);
+    api.getVaultSyncIndex = async () => {
+      throw new Error("network down");
+    };
+    try {
+      // The event cannot prove the path is free, so it must not push the restore. The
+      // failure is visible and the next pass retries from the same state.
+      await expect(engine.handleLocalChange("n.md")).rejects.toThrow("network down");
+    } finally {
+      api.getVaultSyncIndex = realIndex;
+    }
+
+    expect(api.chains.get(deletedId)!.map((v) => v.action)).toEqual(["create", "delete"]);
+    expect(engine.fileIdForPath("n.md")).toBe(deletedId);
+    expect(new TextDecoder().decode(adapter.files.get("n.md"))).toBe("mine again");
+  });
+
+  it("keeps the tombstone and reports when the owner's content cannot be read", async () => {
+    const { engine, adapter, api, key } = await makeEngine();
+    adapter.files.set("n.md", encoder.encode("mine"));
+    await engine.initialSync();
+    const deletedId = await syncedFileId(api);
+    adapter.files.delete("n.md");
+    await engine.handleLocalDelete("n.md");
+
+    const peerAdapter = new FakeAdapter();
+    peerAdapter.files.set("n.md", encoder.encode("theirs"));
+    const peer = new SyncEngine({
+      platform: realPlatform,
+      vaultId: "vault-1",
+      adapter: peerAdapter,
+      api,
+      encryptionKey: key,
+    });
+    await peer.initialSync();
+    const peerId = peer.fileIdForPath("n.md")!;
+
+    adapter.files.set("n.md", encoder.encode("mine again"));
+    const peerHead = api.chains.get(peerId)!.at(-1)!;
+    const peerBlob = api.blobs.get(peerHead.contentHash)!;
+    api.blobs.delete(peerHead.contentHash);
+    try {
+      await expect(engine.handleLocalChange("n.md")).rejects.toThrow(/Could not read the content/);
+    } finally {
+      api.blobs.set(peerHead.contentHash, peerBlob);
+    }
+
+    // The apply failed, so the tombstone is untouched and the local note is still on disk:
+    // the next pass retries the same decision instead of losing the note silently.
+    expect(api.chains.get(deletedId)!.map((v) => v.action)).toEqual(["create", "delete"]);
+    expect(engine.fileIdForPath("n.md")).toBe(deletedId);
+    expect(new TextDecoder().decode(adapter.files.get("n.md"))).toBe("mine again");
+    expect(adapter.files.has(conflictFilePath("n.md"))).toBe(false);
+  });
+
+  /**
    * A peer-deleted chain whose local file is already gone leaves nothing to apply, so
    * the entry has to be retired rather than kept as "synced".
    *
