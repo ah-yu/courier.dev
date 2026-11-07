@@ -7601,6 +7601,61 @@ describe("plugin e2e — the real plugin against a real server", () => {
       expect(item.getAttribute("data-courier-status")).toBe("syncing");
     });
 
+    /**
+     * The wait can end while the confirmation is open: the holder releases and the retry
+     * starts syncing. Confirming then is not a failure — the vault is exactly where the
+     * user wanted it — so the click must not report one, and must not rebuild a host.
+     */
+    it("says nothing when the wait ends while the confirmation is open", async () => {
+      const { plugin, vault } = await startHostedPlugin("Status Take Over Release", holdCliLease);
+      await waitFor(() => plugin.host?.leaseWaiting === true, "the host never waited");
+
+      const menu = await openStatusMenu(statusBarItem(plugin));
+      menu.items.find((entry) => entry.title === "接管同步")!.click();
+      await waitFor(() => lastOpenedModal()?.title === "接管同步", "the confirmation never opened");
+      const confirming = lastOpenedModal()!;
+
+      // The other writer goes away while the dialog is up; the retry takes the vault.
+      await vault.adapter.remove(".courier/sync-lease/owner.json");
+      await vault.adapter.rmdir(".courier/sync-lease");
+      await waitForAsync(
+        async () => plugin.host?.leaseWaiting === false && plugin.host?.engine !== null,
+        "the retry never took the released vault",
+      );
+      const host = plugin.host;
+      const noticesBefore = notices.length;
+
+      clickModalButton(confirming, "接管");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Silent either way; what must never appear is a failure for a vault that is syncing.
+      expect(
+        notices.slice(noticesBefore).filter((message) => message.includes("接管同步失败")),
+      ).toHaveLength(0);
+      expect(plugin.host).toBe(host);
+      expect(statusBarItem(plugin).getAttribute("data-courier-status")).toBe("syncing");
+    });
+
+    /**
+     * A dialog this instance raised belongs to the session that asked for it: unloading the
+     * plugin closes it, so its confirm button cannot take a vault for a dead instance.
+     */
+    it("closes an open takeover confirmation when the plugin unloads", async () => {
+      const { plugin } = await startHostedPlugin("Status Take Over Unload", holdCliLease);
+      await waitFor(() => plugin.host?.leaseWaiting === true, "the host never waited");
+
+      const menu = await openStatusMenu(statusBarItem(plugin));
+      menu.items.find((entry) => entry.title === "接管同步")!.click();
+      await waitFor(() => lastOpenedModal()?.title === "接管同步", "the confirmation never opened");
+      const confirming = lastOpenedModal()!;
+
+      plugin.onunload();
+
+      expect(confirming.isOpen).toBe(false);
+      expect(plugin.host).toBeNull();
+      expect(plugin.engine).toBeNull();
+    });
+
     it("moves through not-synced, syncing and paused, and pauses/resumes from its menu", async () => {
       const { plugin } = await startHostedPlugin("Status Bar");
       await waitForAsync(

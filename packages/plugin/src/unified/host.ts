@@ -379,15 +379,17 @@ export class EngineHost {
         if (taken) await lease.release();
         return false;
       }
+      // A start that was already in flight when the user confirmed owns the vault now: it
+      // acquired the same record this attempt renewed, or built the host first. The user's
+      // goal — this window syncing the vault — is met, so this is a success, and arming a
+      // retry here would tear that healthy host down half a second later.
+      if (this.host !== null) return true;
       if (!taken) {
         // Still waiting with no state change: put the retry back, because the tick that
         // was in flight when this takeover began was dropped by `start()`.
-        if (this.host === null) this.scheduleLeaseRetry(generationAtStart);
+        this.scheduleLeaseRetry(generationAtStart);
         return false;
       }
-      // A start that began before this takeover owns the vault now. Its own renewal
-      // decides whether it keeps it; a retry here would tear a healthy host down.
-      if (this.host !== null) return false;
       if (this.leaseRetry) window.clearTimeout(this.leaseRetry);
       this.leaseRetry = null;
       this.closeLeaseWatch();
