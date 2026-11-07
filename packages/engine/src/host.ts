@@ -418,6 +418,8 @@ export class SyncHost {
    */
   private pendingBurstChanges = new Set<string>();
   private pendingBurstDeletes = new Set<string>();
+  /** A burst's moves, keyed by their source (a later event for it wins). */
+  private pendingBurstRenames = new Map<string, string>();
   /**
    * A burst job is owed: paths arrived after the last hand-off (or while one ran).
    *
@@ -543,6 +545,7 @@ export class SyncHost {
           "changed",
           `push ${path}`,
           path,
+          null,
           sizeBytes,
           engine.hasSelfWriteHint(path),
           () => engine.handleLocalChange(path),
@@ -553,16 +556,16 @@ export class SyncHost {
           "deleted",
           `delete ${path}`,
           path,
+          null,
           0,
           engine.hasSelfDeleteHint(path),
           () => engine.handleLocalDelete(path),
         ),
       renamed: (from, to, sizeBytes) =>
-        // A move stays on its own path: it re-points a chain rather than producing a
-        // version of a file's bytes, and a folder rename reports one per file.
         this.dispatchLocalEvent(
           "renamed",
           `rename ${from} → ${to}`,
+          from,
           to,
           sizeBytes,
           engine.hasSelfRenameHint(from),
@@ -686,6 +689,7 @@ export class SyncHost {
     this.localBurstOwed = false;
     this.pendingBurstChanges.clear();
     this.pendingBurstDeletes.clear();
+    this.pendingBurstRenames.clear();
     this.localEventsInWindow = 0;
     this.localEventWindowStart = 0;
     if (this.pushFlushTimer !== null) {
@@ -934,12 +938,13 @@ export class SyncHost {
   private dispatchLocalEvent(
     kind: "changed" | "deleted" | "renamed",
     label: string,
-    path: string,
+    from: string,
+    to: string | null,
     sizeBytes: number | null,
     own: boolean,
     run: () => Promise<unknown> | undefined,
   ): void {
-    if (own || kind === "renamed") {
+    if (own) {
       this.runQueued(label, sizeBytes, run);
       return;
     }
@@ -950,8 +955,9 @@ export class SyncHost {
     }
     this.localEventsInWindow += 1;
     if (this.localEventsInWindow > LOCAL_EVENT_BURST_SIZE) {
-      if (kind === "deleted") this.pendingBurstDeletes.add(path);
-      else this.pendingBurstChanges.add(path);
+      if (kind === "deleted") this.pendingBurstDeletes.add(from);
+      else if (kind === "renamed" && to !== null) this.pendingBurstRenames.set(from, to);
+      else if (kind === "changed") this.pendingBurstChanges.add(from);
       this.scheduleLocalBurst();
       return;
     }
@@ -988,15 +994,18 @@ export class SyncHost {
     if (this.localBurstRunning) return;
     const changed = [...this.pendingBurstChanges];
     const deleted = [...this.pendingBurstDeletes];
+    const renamed = [...this.pendingBurstRenames].map(([from, to]) => ({ from, to }));
     this.pendingBurstChanges.clear();
     this.pendingBurstDeletes.clear();
+    this.pendingBurstRenames.clear();
     this.localBurstOwed = false;
-    if (changed.length === 0 && deleted.length === 0) return;
+    if (changed.length === 0 && deleted.length === 0 && renamed.length === 0) return;
     // Say how big the burst was: a host that logs this after one save is looking at a
     // watcher that reports one save as a burst (the threshold is 4 events in 500 ms; an
     // ordinary save is one, a create at most two).
     this.log(
-      `local burst: ${changed.length} changed, ${deleted.length} deleted in one batched push`,
+      `local burst: ${changed.length} changed, ${deleted.length} deleted, ` +
+        `${renamed.length} renamed in one batched push`,
     );
     this.localBurstRunning = true;
     // One job for the whole batch: it reads, decides and sends 100 files per request.
@@ -1004,7 +1013,7 @@ export class SyncHost {
     // bounds how much it holds.
     this.runQueued("local burst", null, async () => {
       try {
-        await engine.handleLocalEvents({ changed, deleted });
+        await engine.handleLocalEvents({ changed, deleted, renamed });
       } finally {
         this.localBurstRunning = false;
         // Paths that arrived while this job ran were not covered by it.

@@ -1145,7 +1145,7 @@ describe("SyncHost", () => {
       // The burst says how big it was, which is what makes "a single save triggered a
       // batch" answerable from a host's log rather than guessed from CPU use.
       expect(hostLog.mock.calls.at(-1)?.[0]).toBe(
-        `local burst: ${count - LOCAL_EVENT_BURST_SIZE} changed, 0 deleted in one batched push`,
+        `local burst: ${count - LOCAL_EVENT_BURST_SIZE} changed, 0 deleted, 0 renamed in one batched push`,
       );
     });
 
@@ -1209,7 +1209,7 @@ describe("SyncHost", () => {
       expect(second.changed!.every((path) => path.startsWith("notes/late"))).toBe(true);
     });
 
-    it("keeps deletions and moves out of the change batch", async () => {
+    it("keeps the three event kinds apart, so a burst's moves are still moves", async () => {
       const { host, events } = await newHost({ stateStore: store(null, true) });
       track(host);
       await host.start();
@@ -1226,20 +1226,42 @@ describe("SyncHost", () => {
       }
       await host.whenIdle();
       expect(batch).toHaveBeenCalledTimes(1);
-      const handed = batch.mock.calls[0]![0] as { changed?: string[]; deleted?: string[] };
-      expect(handed.changed).toEqual([]);
-      expect(handed.deleted).toHaveLength(LOCAL_EVENT_BURST_SIZE);
+      const first = batch.mock.calls[0]![0] as {
+        changed?: string[];
+        deleted?: string[];
+        renamed?: unknown[];
+      };
+      expect(first.changed).toEqual([]);
+      expect(first.renamed).toEqual([]);
+      expect(first.deleted).toHaveLength(LOCAL_EVENT_BURST_SIZE);
       // The events below the threshold went out one by one, as before.
       expect(perDelete).toHaveBeenCalledTimes(LOCAL_EVENT_BURST_SIZE);
 
-      // A move re-points a chain instead of producing a version, so it stays on its own
-      // path even inside a burst.
-      for (let index = 0; index < LOCAL_EVENT_BURST_SIZE; index += 1) {
+      // A folder rename: the moves travel as their own list of pairs, so the engine
+      // re-points each chain instead of reading a destination as a new file.
+      const renames = LOCAL_EVENT_BURST_SIZE * 2;
+      for (let index = 0; index < renames; index += 1) {
         events.handlers!.renamed(`old-${index}.md`, `new-${index}.md`, 10);
       }
       await host.whenIdle();
-      expect(perRename).toHaveBeenCalledTimes(LOCAL_EVENT_BURST_SIZE);
-      expect(batch).toHaveBeenCalledTimes(1);
+      expect(batch).toHaveBeenCalledTimes(2);
+      const second = batch.mock.calls[1]![0] as {
+        renamed?: Array<{ from: string; to: string }>;
+      };
+      // Every move is accounted for once: the ones the window still had room for took the
+      // per-path job, the rest travelled in the batch — and none of them as a change.
+      const batched = second.renamed ?? [];
+      const perPath = perRename.mock.calls.length;
+      expect(batched).toHaveLength(renames - perPath);
+      const allPairs = new Set([
+        ...batched.map((pair) => pair.from),
+        ...perRename.mock.calls.map((call) => call[0]),
+      ]);
+      expect(allPairs.size).toBe(renames);
+      for (let index = 0; index < renames; index += 1) {
+        expect(allPairs.has(`old-${index}.md`)).toBe(true);
+      }
+      expect((second as { changed?: string[] }).changed ?? []).toEqual([]);
     });
   });
 });

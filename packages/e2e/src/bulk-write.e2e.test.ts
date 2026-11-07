@@ -1,5 +1,14 @@
 import { realPlatform } from "@courier/testing";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -336,6 +345,73 @@ describe("a bulk local write through a real server", () => {
 
       // Tombstones are content-less versions, but they are still requests: 100 per batch
       // instead of one per file.
+      expect(mac.counts.pushes).toBeLessThanOrEqual(30);
+      expect(mac.counts.rateLimited).toBe(0);
+      expect(mac.counts.indexReads).toBe(0);
+      expect(phone.counts.rateLimited).toBe(0);
+    } finally {
+      phone.host.stop();
+      mac.host.stop();
+    }
+  }, 120_000);
+
+  it("batches a burst of moves as well", async () => {
+    const vault = await createTestVault(server, "bulk-rename", material);
+    const phone = await startHost(
+      vault.id,
+      mkdtempSync(join(tmpdir(), "bulk-ren-phone-")),
+      "phone",
+    );
+    const mac = await startHost(vault.id, mkdtempSync(join(tmpdir(), "bulk-ren-mac-")), "mac");
+
+    const notes = 300;
+    const before = (index: number) => notePath("from", index);
+    const after = (index: number) => notePath("to", index);
+    const body = (index: number) => noteBody(index, 1);
+
+    try {
+      const events = mac.adapter.handlers!;
+      for (let index = 0; index < notes; index += 1) {
+        const path = before(index);
+        mkdirSync(join(mac.dir, dirname(path)), { recursive: true });
+        writeFileSync(join(mac.dir, path), body(index));
+        events.changed(path, body(index).length);
+      }
+      await waitFor(() => countNotes(phone.dir) === notes, `${notes} seeded notes`, 60_000);
+      await phone.host.whenIdle();
+      await mac.host.whenIdle();
+      for (const key of Object.keys(mac.counts) as Array<keyof WireCounts>) mac.counts[key] = 0;
+
+      // A folder rename: Obsidian reports one `rename` per file, and each one re-points
+      // its chain (a content-less version the batch can carry 100 at a time).
+      for (let index = 0; index < notes; index += 1) {
+        renameSync(join(mac.dir, before(index)), join(mac.dir, after(index)));
+        events.renamed(before(index), after(index), body(index).length);
+      }
+      const movedOnPeer = () => {
+        try {
+          for (let index = 0; index < notes; index += 1) {
+            if (existsSync(join(phone.dir, before(index)))) return false;
+            if (readFileSync(join(phone.dir, after(index)), "utf-8") !== body(index)) {
+              return false;
+            }
+          }
+          return countNotes(phone.dir) === notes;
+        } catch {
+          return false;
+        }
+      };
+      await waitFor(movedOnPeer, "every move applied on the peer", 60_000);
+      await phone.host.whenIdle();
+      await mac.host.whenIdle();
+
+      // Every note is at its new path on both sides, and no note was deleted.
+      expect(countNotes(phone.dir)).toBe(notes);
+      for (let index = 0; index < notes; index += 1) {
+        expect(readFileSync(join(phone.dir, after(index)), "utf-8"), after(index)).toBe(
+          body(index),
+        );
+      }
       expect(mac.counts.pushes).toBeLessThanOrEqual(30);
       expect(mac.counts.rateLimited).toBe(0);
       expect(mac.counts.indexReads).toBe(0);

@@ -31,7 +31,7 @@ Run the file for the current list; this is the theme each one owns.
 | `packages/e2e/src/large-file.e2e.test.ts`      | wire cost: bytes not base64, rename without content, batching, stamps                                                        |
 | `packages/e2e/src/folder-rename.e2e.test.ts`   | folder renames and the concurrent burst                                                                                      |
 | `packages/e2e/src/user-lifecycle.e2e.test.ts`  | disable/re-enable, cascade delete, and the edits the service refuses                                                         |
-| `packages/e2e/src/bulk-write.e2e.test.ts`      | a bulk local write through the real `SyncHost` against the **deployed** allowance (creates, edits, deletions)                |
+| `packages/e2e/src/bulk-write.e2e.test.ts`      | a bulk local write through the real `SyncHost` against the **deployed** allowance (creates, edits, deletions, moves)         |
 | `packages/e2e/src/plugin.e2e.test.ts`          | the real plugin class (L2)                                                                                                   |
 | `packages/e2e/src/obsidian/`                   | real Obsidian over the CLI (L3)                                                                                              |
 

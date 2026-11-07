@@ -208,10 +208,6 @@ line).
   is now what bounds a first download (2.8 ms/file at four concurrent files, ~141 s for 50 000). A batch
   content route (N hashes per request) or a higher per-pass concurrency would cut it further; neither is
   needed to _finish_, which is what used to fail.
-- **A folder rename's request count.** A move re-points a chain instead of producing a version, so it stays
-  on its own per-path job: renaming a folder of a thousand notes is still a thousand small pushes. It
-  finishes (the engine waits out a limiter window), but it spends the allowance on round trips; batching
-  moves is the one lever left on the event path.
 - **The same measurement on a real network and on mobile.** Everything here is localhost on a desktop;
   the per-batch RTT and the adapter's IPC cost are what a phone makes of the same numbers.
 - **A peer that is online during the bind.** Not covered by the numbers above, because the harness
@@ -294,9 +290,9 @@ The fix is in the engine, driven by the host: more than `LOCAL_EVENT_BURST_SIZE`
 versions 100 per request, with tracked files' chains fetched 200 per request. The vault is never scanned
 and the chain index is never fetched, so the cost follows the burst rather than the vault. The rule (and
 its guards: the engine's own writes are not counted, a burst still writing during the job owes one more
-job, deletions are their own list, moves stay per path) is in
+job, changes / deletions / moves are their own lists) is in
 [sync-engine.md](sync-engine.md#pass-order-and-concurrency); the cases are `bulk-write.e2e.test.ts`, run
 against the deployed 600/minute allowance rather than the harness's raised one.
 
-Two limits stay: a folder **rename** of thousands of files is still one request per file, and a
-**download** is still one content request per file — the levers listed under Remaining work.
+Two limits stay: a **download** is still one content request per file, and a first bind still scans the
+vault — the levers listed under Remaining work.

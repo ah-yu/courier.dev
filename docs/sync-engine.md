@@ -577,10 +577,12 @@ file now lives at.
     set the flag again, and its tail arms one more hand-off rather than leaving them to the five-minute
     periodic pass. `whenIdle()` counts an owed or running burst as work, so a host that hands its vault
     lease over does not do it mid-burst.
-  - **A move stays on its own path.** A `rename` re-points a chain instead of producing a version of a
-    file's bytes, and a folder rename reports one per file; those keep their per-path job (one request
-    each) rather than joining the batch. It is the one bulk operation still sent file by file — the
-    remaining gap below.
+  - **A move travels as its own list of pairs.** A `rename` re-points a chain instead of producing a
+    version of a file's bytes, so it is decided as such — but it joins the same batch, and its version
+    carries **no payload** (the head already holds the bytes). A move whose source this device never
+    tracked becomes a create at the destination, and a move that leaves this device's scope re-points
+    the chain and publishes nothing (see `rememberMoveOutOfScope`); both are decided inside the job, so
+    a folder rename is batch-sized too.
   - **A burst is logged with its size.** `local burst: N changed, M deleted in one batched push` goes to
     the host's log, so "did one save just trigger a batch?" is answerable from a plugin console or the
     daemon's log instead of inferred from CPU use. The threshold has headroom over one operation by
@@ -589,12 +591,12 @@ file now lives at.
     (`create` and the `modify` the app also fires), and a rename one — against four in 500 ms.
   - Individual events below the threshold keep their immediate push: an ordinary edit still travels on
     the event, not in a batch. Covered by `host.test.ts` (`a burst of local events`: one job and no pass,
-    deletions kept out of the change list, moves still per path, the follow-up hand-off, a pull's own
-    events not counted) and `bulk-write.e2e.test.ts` (700 creates, 300 edits and 300 deletions against
-    the **deployed** 600/minute allowance: every version lands, fewer than 40 requests each way, and the
+    the three event kinds kept apart, the follow-up hand-off, a pull's own events not counted) and
+    `bulk-write.e2e.test.ts` (700 creates, 300 edits, 300 deletions and 300 moves against the
+    **deployed** 600/minute allowance: every version lands, fewer than 40 requests each way, and the
     receiving host's only index read is its bind).
-  - **What it does not fix:** a folder **rename** of thousands of files is still one request per file.
-    Batching moves is the next lever; nothing else in a bulk operation is left unbatched.
+  - **What it does not fix:** a **download** is still one content request per file (see the remaining
+    work in [first-bind-performance.md](first-bind-performance.md#remaining-work)).
 - **A cold-start pass works in the order the user will notice, and bounds how much is in flight.** The work
   is the same either way; the order and the concurrency are what a phone feels:
   - Every reconcile reads `GET /vaults/:id/sync/index` — **one row per chain** (`head`, plus the last live

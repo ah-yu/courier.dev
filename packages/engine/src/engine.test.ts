@@ -6825,6 +6825,70 @@ describe("SyncEngine — a batch of local events", () => {
     await expectConsistent(engine, adapter, api);
   });
 
+  it("moves a batch of notes with 100 content-less versions per request", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    const paths = seed(adapter, 120);
+    await engine.initialSync();
+    const pushesBefore = api.pushed.length;
+    const before = api.pushCalls.length;
+
+    const pairs = paths.map((path, index) => {
+      const to = `moved/n-${index}.md`;
+      const bytes = adapter.files.get(path)!;
+      adapter.files.delete(path);
+      adapter.files.set(to, bytes);
+      return { from: path, to };
+    });
+    await engine.handleLocalEvents({ renamed: pairs });
+
+    expect(api.pushCalls.slice(before)).toEqual([100, 20]);
+    const moved = api.pushed.slice(pushesBefore);
+    expect(moved).toHaveLength(120);
+    // A move sends no content: the chain's head already holds those bytes.
+    expect(moved.every((file) => file.action === "rename" && file.content === null)).toBe(true);
+    for (const pair of pairs) expect(engine.fileIdForPath(pair.to)).not.toBeNull();
+    await expectConsistent(engine, adapter, api);
+  });
+
+  it("turns a move of an untracked file into a batch create", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    await engine.initialSync();
+
+    // The source was never tracked (created and moved between two events): the move is a
+    // create at the destination, decided with the batch's other changes.
+    adapter.files.set("moved/here.md", encoder.encode("never seen"));
+    await engine.handleLocalEvents({
+      renamed: [{ from: "was/elsewhere.md", to: "moved/here.md" }],
+    });
+
+    expect(api.pushed.at(-1)!.action).toBe("create");
+    expect(engine.fileIdForPath("moved/here.md")).not.toBeNull();
+    await expectConsistent(engine, adapter, api);
+  });
+
+  it("re-points a move that leaves the scope without pushing anything", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("note.md", encoder.encode("keep me"));
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("note.md")!;
+    const syncPoint = syncPointOf(engine, fileId);
+    const before = api.pushCalls.length;
+
+    // The destination is outside this device's sync set (a config-folder path with every
+    // settings group off): the chain follows the file, nothing is published, and a later
+    // pass must not read the old path as a deletion.
+    adapter.files.delete("note.md");
+    adapter.files.set(".obsidian/plugins/x/data.json", encoder.encode("keep me"));
+    await engine.handleLocalEvents({
+      renamed: [{ from: "note.md", to: ".obsidian/plugins/x/data.json" }],
+    });
+
+    expect(api.pushCalls).toHaveLength(before);
+    expect(syncPointOf(engine, fileId)).toBe(syncPoint);
+    expect(engine.fileIdForPath("note.md")).toBeNull();
+    await expectConsistent(engine, adapter, api);
+  });
+
   it("drops the whole batch when the request never lands, and the next pass retries it", async () => {
     const { engine, adapter, api } = await makeEngine();
     await engine.initialSync();
