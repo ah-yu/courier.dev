@@ -200,7 +200,8 @@ async function bindVault(
 }
 
 /**
- * Stop this daemon when the supervisor's pipe on stdin closes.
+ * Stop this daemon when the supervisor's pipe on stdin closes, calling `onClose` at most
+ * once.
  *
  * A supervisor — the desktop app — starts the daemon with a pipe on stdin and keeps its
  * write end open for as long as it runs, so this end reads EOF exactly when the supervisor
@@ -209,6 +210,9 @@ async function bindVault(
  * a daemon there hears about its supervisor. Only when the supervisor asks: a terminal
  * `run` with stdin redirected to `/dev/null` reads EOF at once, and a daemon must not stop
  * because nothing is on its stdin.
+ *
+ * A real pipe close reports both `end` and `close`, so the one-shot is the normal path, not
+ * an edge; the caller keeps its own guard for a signal that arrives at the same time.
  */
 export function watchSupervisor(
   onClose: () => void,
@@ -216,9 +220,15 @@ export function watchSupervisor(
   stdin: NodeJS.ReadStream = process.stdin,
 ): void {
   if (env.COURIER_DAEMON_SUPERVISED !== "1") return;
+  let fired = false;
+  const closeOnce = () => {
+    if (fired) return;
+    fired = true;
+    onClose();
+  };
   stdin.resume();
-  stdin.on("end", onClose);
-  stdin.on("close", onClose);
+  stdin.on("end", closeOnce);
+  stdin.on("close", closeOnce);
 }
 
 /**

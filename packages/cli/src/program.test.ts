@@ -219,4 +219,15 @@ describe("watchSupervisor", () => {
     stdin.emit("close");
     expect(closed).toHaveBeenCalledTimes(1);
   });
+
+  it("calls back once when a real close reports both events", () => {
+    const stdin = fakeStdin();
+    const closed = vi.fn();
+    watchSupervisor(closed, { COURIER_DAEMON_SUPERVISED: "1" }, stdin);
+
+    // A pipe closing fires "end" and then "close"; a drain must not run twice.
+    stdin.emit("end");
+    stdin.emit("close");
+    expect(closed).toHaveBeenCalledTimes(1);
+  });
 });

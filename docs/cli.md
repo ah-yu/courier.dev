@@ -503,14 +503,16 @@ per-vault lease:
   delete and recreate it.
 - **A record whose process is gone is stale at once, not after the TTL.** The record names the
   holder's pid and the machine that wrote it, so a pid no process holds **on that machine** proves
-  nobody is renewing, whether the holder was the CLI or the plugin. Neither application gets to run
-  `release()` on every exit: a supervisor stops a daemon by ending the process (Windows has
-  no deliverable signal), and Obsidian quits without waiting for a plugin's asynchronous release.
-  Waiting out the TTL would keep reporting a process that no longer exists as the writer — for the
-  page, for the other application that wants the vault (closing Obsidian hands it to a waiting CLI
-  at once), and for the user who restarts the same vault. A plugin lease belongs to the renderer
-  that wrote it and dies with that window or the app, so its pid is evidence in the same way.
-  Expiry remains the clock for a reader on another machine or without a process table.
+  nobody is renewing, whether the holder was the CLI or the plugin. A stop is not always a clean
+  exit: a SIGKILL, a crash, and Obsidian quitting without waiting for the plugin's asynchronous
+  release all end the process with no `release()`. A supervised daemon does release on its way out
+  (the pipe closing is one of its stop paths, and it drains first), but the rule above must hold
+  for the exits nothing can observe. Waiting out the TTL would keep reporting a process that no
+  longer exists as the writer — for the page, for the other application that wants the vault
+  (closing Obsidian hands it to a waiting CLI at once), and for the user who restarts the same
+  vault. A plugin lease belongs to the renderer that wrote it and dies with that window or the
+  app, so its pid is evidence in the same way. Expiry remains the clock for a reader on another
+  machine or without a process table.
 - **First come, first served — no application has priority.** The lease is acquired before an
   engine exists and is held until that writer stops. If the CLI holds it and Obsidian opens, the
   plugin waits; the CLI keeps syncing. If the plugin holds it and the CLI starts, the CLI waits.
