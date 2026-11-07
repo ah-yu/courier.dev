@@ -19,7 +19,7 @@ import { createTestClient, type TestClient } from "./harness/client";
 import { startTestServer, setUserMaxFileBytes, type TestServer } from "./harness/server";
 import { createTestVault, makeVaultMaterial, type VaultMaterial } from "./harness/vault";
 import { filesAtPath, vaultHistory } from "./harness/api";
-import { waitFor } from "./harness/wait";
+import { waitFor, waitForAsync } from "./harness/wait";
 
 /**
  * The headless daemon against a real server: `courier-cli run` watching a folder,
@@ -378,6 +378,108 @@ describe("cli daemon e2e — the headless host over a real server", () => {
       }
     } finally {
       await first.stop();
+    }
+  });
+
+  it("takes the vault from a running process with takeOver, and the displaced writer stops", async () => {
+    const remote = await createTestVault(server, "cli-take-over", material);
+    const vaultPath = mkdtempSync(join(tmpdir(), "courier-cli-vault-"));
+    tempDirs.push(vaultPath);
+    const { vault, config } = target(remote.id, vaultPath);
+
+    const firstLogs: string[] = [];
+    const first = await runDaemon(config, vault, {
+      intervalMinutes: 0,
+      onLog: (message) => firstLogs.push(message),
+    });
+    try {
+      await waitFor(
+        () => firstLogs.some((message) => message.startsWith("Connected to server")),
+        "the first process never subscribed",
+      );
+      expect(first.engine).toBeTruthy();
+
+      const secondLogs: string[] = [];
+      const second = await runDaemon(config, vault, {
+        intervalMinutes: 0,
+        takeOver: true,
+        onLog: (message) => secondLogs.push(message),
+      });
+      try {
+        // The one process that asked for it ends up syncing, and says whose process it
+        // displaced — the only evidence left after the record is replaced.
+        expect(second.engine).toBeTruthy();
+        expect(secondLogs.some((message) => message.includes("--take-over"))).toBe(true);
+
+        // The displaced writer leaves the vault on the directory event, not at its next
+        // five-second renewal: this assertion is the accelerator's reason to exist.
+        await waitFor(
+          () => first.engine === null,
+          "the displaced process kept its engine after the takeover",
+          2_000,
+        );
+        expect(firstLogs.some((message) => message.includes("lease"))).toBe(true);
+
+        // And the survivor is a normal writer: what it writes reaches the **server**, not
+        // just the local folder (waiting for a file this test wrote itself proves nothing).
+        writeAtomically(vaultPath, "after-take-over.md", "# after");
+        await waitForAsync(
+          async () =>
+            (await filesAtPath(server, remote.id, material.key, "after-take-over.md")).length > 0,
+          "the survivor's file never reached the server",
+          15_000,
+        );
+      } finally {
+        await second.stop();
+      }
+    } finally {
+      await first.stop();
+    }
+  });
+
+  it("lets run --once take the vault with takeOver instead of refusing with syncLocked", async () => {
+    const remote = await createTestVault(server, "cli-once-take-over", material);
+    const vaultPath = mkdtempSync(join(tmpdir(), "courier-cli-vault-"));
+    tempDirs.push(vaultPath);
+    const { vault, config } = target(remote.id, vaultPath);
+
+    const holderLogs: string[] = [];
+    const holder = await runDaemon(config, vault, {
+      intervalMinutes: 0,
+      onLog: (message) => holderLogs.push(message),
+    });
+    try {
+      await waitFor(
+        () => holderLogs.some((message) => message.startsWith("Connected to server")),
+        "the holding process never subscribed",
+      );
+
+      // Without the flag the one-shot pass refuses, exactly as before this change.
+      await expect(runOnceSync(config, vault, { onLog: () => {} })).rejects.toThrow(
+        /another syncer|sync lock|lease|leaseFailed/i,
+      );
+
+      // With it, the same call takes the vault, runs its pass, and releases again.
+      const logs: string[] = [];
+      writeAtomically(vaultPath, "once.md", "written by --once --take-over");
+      await runOnceSync(config, vault, {
+        takeOver: true,
+        onLog: (message) => logs.push(message),
+      });
+      expect(logs.some((message) => message.includes("--take-over"))).toBe(true);
+      await waitForAsync(
+        async () => (await filesAtPath(server, remote.id, material.key, "once.md")).length > 0,
+        "the one-shot pass never pushed its file",
+        15_000,
+      );
+      // It released the vault on the way out: the displaced holder takes it back.
+      await waitFor(
+        () => holder.engine !== null,
+        "the holder never got the released lease back",
+        10_000,
+      );
+    } finally {
+      await holder.stop();
     }
   });
 

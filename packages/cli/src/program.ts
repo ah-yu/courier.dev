@@ -568,70 +568,77 @@ export function createProgram(): Command {
     .description(t("cli.command.run.description"))
     .option("--vault <vaultId>", t("cli.option.vault"))
     .option("--once", t("cli.option.once"))
+    .option("--take-over", t("cli.option.takeOver"))
     .option("--interval <minutes>", t("cli.option.interval"), "30")
-    .action(async (options: { vault?: string; once?: boolean; interval: string }) => {
-      const config = requireConfig();
-      let selected: CliVault;
-      let intervalMinutes: number;
-      try {
-        // A hand-edited config can bind two folders that overlap; two processes would
-        // then write the same files. Refuse before the daemon starts.
-        const overlap = overlappingVaults(config.vaults);
-        if (overlap) {
-          throw new Error(
-            t("cli.error.vaultPathOverlap", {
-              path: overlap[0].vaultPath,
-              other: `${vaultLabel(overlap[1])} (${overlap[1].vaultPath})`,
+    .action(
+      async (options: { vault?: string; once?: boolean; takeOver?: boolean; interval: string }) => {
+        const config = requireConfig();
+        let selected: CliVault;
+        let intervalMinutes: number;
+        try {
+          // A hand-edited config can bind two folders that overlap; two processes would
+          // then write the same files. Refuse before the daemon starts.
+          const overlap = overlappingVaults(config.vaults);
+          if (overlap) {
+            throw new Error(
+              t("cli.error.vaultPathOverlap", {
+                path: overlap[0].vaultPath,
+                other: `${vaultLabel(overlap[1])} (${overlap[1].vaultPath})`,
+              }),
+            );
+          }
+          // Both decisions throw with what to fix, instead of letting an unusable value
+          // reach the daemon (see `options.ts`: `--interval 5m` used to switch the
+          // periodic reconcile off without a word).
+          selected = selectVaults(config, options.vault)[0]!;
+          intervalMinutes = parseIntervalMinutes(options.interval);
+        } catch (err) {
+          fail(err instanceof Error ? err.message : String(err));
+        }
+        try {
+          if (options.once) {
+            await runOnceSync(config, selected, {
+              onLog: (message) => console.log(message),
+              takeOver: options.takeOver,
+            });
+            return;
+          }
+          // A failed **startup pass** is tolerated inside the daemon — it comes up and
+          // retries on the interval — so what is reported here is a genuine failure (a
+          // config the client cannot use) as one line rather than an unhandled rejection.
+          const handle: RunnerHandle = await runDaemon(config, selected, {
+            intervalMinutes,
+            takeOver: options.takeOver,
+            onLog: (message) => console.log(message),
+            // A failure after the first attempt (a filesystem error while reacquiring
+            // the lease) cannot reject runDaemon: the caller already has the handle.
+            onFatal: (err) => fail(err.message),
+          });
+          const shutdown = () => {
+            console.log(t("cli.run.stopping"));
+            // Releasing the vault lease is a filesystem write; exiting first would leave the
+            // plugin waiting for the TTL after this process is already gone.
+            void handle.stop().finally(() => process.exit(0));
+            // Last resort if a drain never settles; give it the same budget a supervisor
+            // uses before it force-stops the process, not a mere one second.
+            setTimeout(() => process.exit(0), 5_000).unref();
+          };
+          process.on("SIGINT", shutdown);
+          process.on("SIGTERM", shutdown);
+          console.log(
+            t("cli.run.started", {
+              vault: `${vaultLabel(selected)} (${selected.vaultId})`,
+              vaultId: selected.vaultId,
+              vaultPath: selected.vaultPath,
+              serverUrl: config.serverUrl,
+              deviceName: vaultDeviceName(config, selected),
             }),
           );
+        } catch (err) {
+          fail(err instanceof Error ? err.message : String(err));
         }
-        // Both decisions throw with what to fix, instead of letting an unusable value
-        // reach the daemon (see `options.ts`: `--interval 5m` used to switch the
-        // periodic reconcile off without a word).
-        selected = selectVaults(config, options.vault)[0]!;
-        intervalMinutes = parseIntervalMinutes(options.interval);
-      } catch (err) {
-        fail(err instanceof Error ? err.message : String(err));
-      }
-      try {
-        if (options.once) {
-          await runOnceSync(config, selected, { onLog: (message) => console.log(message) });
-          return;
-        }
-        // A failed **startup pass** is tolerated inside the daemon — it comes up and
-        // retries on the interval — so what is reported here is a genuine failure (a
-        // config the client cannot use) as one line rather than an unhandled rejection.
-        const handle: RunnerHandle = await runDaemon(config, selected, {
-          intervalMinutes,
-          onLog: (message) => console.log(message),
-          // A failure after the first attempt (a filesystem error while reacquiring
-          // the lease) cannot reject runDaemon: the caller already has the handle.
-          onFatal: (err) => fail(err.message),
-        });
-        const shutdown = () => {
-          console.log(t("cli.run.stopping"));
-          // Releasing the vault lease is a filesystem write; exiting first would leave the
-          // plugin waiting for the TTL after this process is already gone.
-          void handle.stop().finally(() => process.exit(0));
-          // Last resort if a drain never settles; give it the same budget a supervisor
-          // uses before it force-stops the process, not a mere one second.
-          setTimeout(() => process.exit(0), 5_000).unref();
-        };
-        process.on("SIGINT", shutdown);
-        process.on("SIGTERM", shutdown);
-        console.log(
-          t("cli.run.started", {
-            vault: `${vaultLabel(selected)} (${selected.vaultId})`,
-            vaultId: selected.vaultId,
-            vaultPath: selected.vaultPath,
-            serverUrl: config.serverUrl,
-            deviceName: vaultDeviceName(config, selected),
-          }),
-        );
-      } catch (err) {
-        fail(err instanceof Error ? err.message : String(err));
-      }
-    });
+      },
+    );
 
   program
     .command("status")

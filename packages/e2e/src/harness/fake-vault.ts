@@ -409,17 +409,55 @@ export class FakeVault {
     },
 
     rmdir: async (path: string): Promise<void> => {
+      // The lease store (and every folder delete) asks for a recursive removal: Obsidian's
+      // `rmdir(path, true)` takes the children with the folder. A fake that dropped only
+      // the folder entry left the files behind under a path nothing could reach.
       this.folders.delete(path);
+      for (const known of this.files.keys()) {
+        if (known.startsWith(`${path}/`)) {
+          this.files.delete(known);
+          this.mtimes.delete(known);
+        }
+      }
+      for (const known of this.folders) {
+        if (known.startsWith(`${path}/`)) this.folders.delete(known);
+      }
     },
 
+    /**
+     * Obsidian's `DataAdapter.rename` moves a file **or a folder**, children included.
+     *
+     * The lease takeover renames `.courier/sync-lease` aside with exactly this call; a fake
+     * that only moved files would have made the takeover unreachable in L2 and hidden the
+     * real adapter's contract.
+     */
     rename: async (from: string, to: string): Promise<void> => {
       const bytes = this.files.get(from);
-      if (!bytes) throw new Error(`ENOENT: ${from}`);
-      const mtime = this.mtimes.get(from);
-      this.files.delete(from);
-      this.mtimes.delete(from);
-      this.files.set(to, bytes);
-      if (mtime !== undefined) this.mtimes.set(to, mtime);
+      if (bytes) {
+        const mtime = this.mtimes.get(from);
+        this.files.delete(from);
+        this.mtimes.delete(from);
+        this.files.set(to, bytes);
+        if (mtime !== undefined) this.mtimes.set(to, mtime);
+        return;
+      }
+      if (!this.folders.has(from)) throw new Error(`ENOENT: ${from}`);
+      for (const known of this.files.keys()) {
+        if (!known.startsWith(`${from}/`)) continue;
+        const moved = `${to}${known.slice(from.length)}`;
+        const content = this.files.get(known)!;
+        const mtime = this.mtimes.get(known);
+        this.files.delete(known);
+        this.mtimes.delete(known);
+        this.files.set(moved, content);
+        if (mtime !== undefined) this.mtimes.set(moved, mtime);
+      }
+      for (const known of this.folders) {
+        if (known === from || known.startsWith(`${from}/`)) {
+          this.folders.delete(known);
+          this.folders.add(`${to}${known.slice(from.length)}`);
+        }
+      }
     },
 
     getBasePath: (): string => "",

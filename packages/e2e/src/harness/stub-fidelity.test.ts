@@ -156,6 +156,19 @@ describe("FakeVault — the file APIs the plugin writes through", () => {
     await expect(vault.rename(file, "archive/a.md")).rejects.toThrow(/ENOENT/);
   });
 
+  it("renames a folder with its children, as the adapter's rename does", async () => {
+    const vault = new FakeVault();
+    await vault.createFolder(".courier/sync-lease");
+    await vault.adapter.write(".courier/sync-lease/owner.json", "{}");
+
+    // The lease takeover renames the holder's lease directory aside; a fake that moved
+    // only files would make that unreachable here and hide the real contract.
+    await vault.adapter.rename(".courier/sync-lease", ".courier/sync-lease.stale");
+
+    expect(await vault.adapter.exists(".courier/sync-lease")).toBe(false);
+    expect(await vault.adapter.read(".courier/sync-lease.stale/owner.json")).toBe("{}");
+  });
+
   it("throws from createFolder when the folder is already there", async () => {
     const vault = new FakeVault();
     await vault.createFolder("notes");

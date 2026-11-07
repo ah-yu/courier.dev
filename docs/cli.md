@@ -424,6 +424,7 @@ never travels even when another client syncs that folder.
 ```bash
 courier-cli run --vault <id>              # One process for one vault
 courier-cli run --vault <id> --once       # Run a single reconcile and exit
+courier-cli run --vault <id> --take-over  # Take the vault from its current writer instead of waiting
 courier-cli run --vault <id> --interval 60  # Custom full-reconcile interval (minutes)
 courier-cli run --vault <id> --interval 0   # Disable periodic reconcile (events + reconnect only)
 ```
@@ -506,6 +507,23 @@ per-vault lease:
   plugin waits; the CLI keeps syncing. If the plugin holds it and the CLI starts, the CLI waits.
   Whoever took the lease first continues until it releases; the other side never assumes ownership
   just because it is the Obsidian plugin or the CLI.
+- **One deliberate exception: a person can take the vault back.** While the plugin is waiting, the
+  status-bar menu offers **接管同步** (`SyncLease.takeOver()`): the plugin renames the holder's
+  lease directory aside and writes its own record — the same atomic step `acquire()` uses for a
+  stale directory — because a writer whose process the user cannot find must not lock their own
+  vault for good. The previous holder is **not** killed; it stops when it next reads a record that
+  is not its own — within milliseconds through the lease-directory watcher, or at the next renewal
+  (≤5 s) where no watcher is available — and a pass already in flight there finishes first, so the
+  two can overlap briefly. The confirmation names the holder (owner, pid, host) and says that
+  before anything is taken; nothing else triggers it. The headless equivalent is
+  `courier-cli run --take-over` (see below).
+- **The holder watches the directory; the renewal still owns freshness.** While a host holds the
+  lease it keeps a watcher on `<vault>/.courier` (the CLI's `fs.watch`; the plugin's desktop
+  adapter — mobile has none and falls back to the timer). An event triggers a **read-only**
+  ownership check (`SyncLease.stillOwner()`), so a takeover stops the old writer in milliseconds
+  instead of at its next tick. The event never renews: the five-second renewal is what keeps the
+  holder's own record fresh for every other reader, and a watcher that wrote would be woken by its
+  own heartbeat. A missed event therefore costs one renewal period, never correctness.
 - **Release only after the engine drains.** CLI `run` stops new work, waits for an in-flight pass
   via `SyncHost.whenIdle()`, then releases; `run --once` releases after its pass. The plugin does
   the same in `stop()` (pause, disconnect, unload) and keeps renewing while it drains.
@@ -521,9 +539,15 @@ per-vault lease:
   `fs.watch`; the plugin watches the same directory through the same `fs`. Removing the lease
   wakes the waiter immediately. A 500 ms timer is the fallback for a filesystem that reports no
   event (and the only path on mobile, where the plugin has no filesystem watcher).
+- **`run --take-over` is the headless takeover.** Refused once, the process prints who held the
+  vault (owner, pid, host), takes it, and starts syncing; `--once` uses it instead of failing with
+  `syncLocked`. It asks **once**, on the first refusal: a refused takeover (a rename the filesystem
+  did not allow, or another takeover that landed first) is reported and the process then waits like
+  any other, because retrying on the wait cadence would turn two `--take-over` daemons into a
+  takeover fight. It is never implicit — a supervisor's unit must ask for it.
 - Other vaults have their own lease path and processes; they are unaffected.
 - `run --once` refuses if the lease is held by anyone else (the plugin or another CLI), with
-  `cli.error.syncLocked`.
+  `cli.error.syncLocked` — unless `--take-over` is given.
 - A waiting process records `phase: "waiting"`, `reason: "other-writer"` in its runtime file;
   `status` reports the lease owner and a supervisor's page labels the row **等待其他同步**.
 

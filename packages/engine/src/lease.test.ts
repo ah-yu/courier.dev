@@ -83,6 +83,11 @@ class MemoryLeaseStore implements SyncLeaseStore {
   }
 }
 
+/** What a lease store does when the filesystem behind it is gone. */
+const storeFailure = async (): Promise<never> => {
+  throw new Error("EIO: the device is gone");
+};
+
 function twoLeases(store: MemoryLeaseStore, now: () => number) {
   const first = new SyncLease({
     process,
@@ -385,6 +390,347 @@ describe("SyncLease", () => {
     // The directory mtime is recent, so a contender waits for the TTL instead of
     // assuming the corrupt record belongs to nobody.
     expect(await first.acquire()).toBe(false);
+  });
+
+  /**
+   * Every method here runs against a store that can fail: a full disk, a revoked
+   * permission, a vault folder on a drive that went away. None of them may throw — a
+   * failed read is "no record", not "caller crashes" — and each has to keep answering the
+   * question its caller asks.
+   */
+  describe("a store that fails", () => {
+    /** The same memory store, with every operation rejecting. */
+    function brokenStore(now: number): MemoryLeaseStore {
+      const store = new MemoryLeaseStore(() => now);
+      store.ensureDir = storeFailure;
+      store.tryCreateDir = storeFailure;
+      store.tryRename = storeFailure;
+      store.readFile = storeFailure;
+      store.writeFile = storeFailure;
+      store.removeFile = storeFailure;
+      store.removeDir = storeFailure;
+      store.stat = storeFailure;
+      return store;
+    }
+
+    it("answers no lease and no ownership instead of throwing", async () => {
+      let now = 1_000;
+      const lease = new SyncLease({
+        store: brokenStore(now),
+        owner: "cli",
+        token: "cli-token",
+        now: () => now,
+        process,
+      });
+
+      expect(await lease.read()).toBeNull();
+      expect(await lease.stillOwner()).toBe(false);
+      expect(await lease.renew()).toBe(false);
+      await expect(lease.release()).resolves.toBeUndefined();
+    });
+
+    /**
+     * Taking the lease is the one pair that is allowed to throw: a filesystem error is not
+     * another writer, and the docs require the CLI to report it and exit instead of
+     * waiting forever. The callers that must not throw (`EngineHost`) catch it themselves.
+     */
+    it("reports a filesystem error from acquire and takeover instead of swallowing it", async () => {
+      let now = 1_000;
+      const lease = new SyncLease({
+        store: brokenStore(now),
+        owner: "cli",
+        token: "cli-token",
+        now: () => now,
+        process,
+      });
+
+      await expect(lease.acquire()).rejects.toThrow(/EIO/);
+      await expect(lease.takeOver()).rejects.toThrow(/EIO/);
+    });
+
+    it("releases without throwing when the directory cannot be moved aside", async () => {
+      let now = 1_000;
+      const store = new MemoryLeaseStore(() => now);
+      const lease = new SyncLease({
+        store,
+        owner: "cli",
+        token: "cli-token",
+        now: () => now,
+        process,
+      });
+      await lease.acquire();
+      // The record is readable and ours; only the rename fails, which is the shape of a
+      // filesystem that refuses the move (a locked directory on Windows).
+      store.tryRename = async () => {
+        throw new Error("EPERM: refused");
+      };
+
+      await expect(lease.release()).resolves.toBeUndefined();
+      // Nothing was deleted: the record is still there for the TTL sweep.
+      expect(store.dirs.has(".courier/sync-lease")).toBe(true);
+    });
+
+    /**
+     * The branch the rename-aside exists for: a takeover lands **between** this release's
+     * own-record read and its rename. The record it moved is then somebody else's, and
+     * putting it back is what keeps the user's takeover from being silently undone.
+     */
+    it("puts a takeover's record back when it lands in the middle of a release", async () => {
+      let now = 1_000;
+      const store = new MemoryLeaseStore(() => now);
+      const lease = new SyncLease({
+        store,
+        owner: "cli",
+        token: "cli-token",
+        now: () => now,
+        process,
+      });
+      await lease.acquire();
+
+      // A rival takes the vault in the window the release cannot close: after its read of
+      // the record, before its rename.
+      const rename = store.tryRename.bind(store);
+      let planted = false;
+      store.tryRename = async (from, to) => {
+        if (!planted && from === ".courier/sync-lease") {
+          planted = true;
+          await store.writeFile(
+            ".courier/sync-lease/owner.json",
+            JSON.stringify({
+              version: 1,
+              owner: "plugin",
+              token: "rival-token",
+              pid: 0,
+              acquiredAt: new Date(now).toISOString(),
+              updatedAt: new Date(now).toISOString(),
+              expiresAt: now + 60_000,
+            }),
+          );
+        }
+        return rename(from, to);
+      };
+
+      await expect(lease.release()).resolves.toBeUndefined();
+
+      // The rival's record is back at the lease path, still live: a contender is refused.
+      expect(await readSyncLease(store)).toMatchObject({ owner: "plugin", token: "rival-token" });
+      const contender = new SyncLease({
+        store,
+        owner: "cli",
+        token: "contender-token",
+        now: () => now,
+        process,
+      });
+      expect(await contender.acquire()).toBe(false);
+    });
+  });
+});
+
+/**
+ * The one deliberate exception to "first come, first served": a person who cannot end the
+ * other writer takes the vault from the status bar. The takeover must be atomic against a
+ * second takeover, must not need the record to be stale, and must leave the previous
+ * holder with a record it can no longer renew.
+ */
+describe("SyncLease.takeOver", () => {
+  it("takes a live lease, and the old holder stops renewing", async () => {
+    let now = 1_000;
+    const store = new MemoryLeaseStore(() => now);
+    const { first, second } = twoLeases(store, () => now);
+
+    expect(await first.acquire()).toBe(true);
+    // Well inside the TTL: this is not the stale-record path.
+    now += 1_000;
+    expect(await leaseIsCurrent(await readSyncLease(store), now, () => true, HOST)).toBe(true);
+
+    expect(await second.takeOver()).toBe(true);
+    expect(await readSyncLease(store)).toMatchObject({
+      owner: "plugin",
+      token: "plugin-token",
+    });
+    expect(await first.renew()).toBe(false);
+    expect(first.owned).toBe(false);
+    expect(await second.renew()).toBe(true);
+    expect(second.owned).toBe(true);
+  });
+
+  it("takes a vault nobody holds", async () => {
+    let now = 1_000;
+    const store = new MemoryLeaseStore(() => now);
+    const { second } = twoLeases(store, () => now);
+
+    expect(await store.stat(".courier/sync-lease")).toBeNull();
+    expect(await second.takeOver()).toBe(true);
+    expect(second.owned).toBe(true);
+    expect(await readSyncLease(store)).toMatchObject({ token: "plugin-token" });
+  });
+
+  it("leaves no quarantined directory behind", async () => {
+    let now = 1_000;
+    const store = new MemoryLeaseStore(() => now);
+    const { first, second } = twoLeases(store, () => now);
+
+    await first.acquire();
+    await second.takeOver();
+
+    expect([...store.dirs]).toEqual([".courier", ".courier/sync-lease"]);
+  });
+
+  it("lets the last takeover win", async () => {
+    let now = 1_000;
+    const store = new MemoryLeaseStore(() => now);
+    const { first } = twoLeases(store, () => now);
+    await first.acquire();
+
+    const third = new SyncLease({
+      store,
+      owner: "plugin",
+      token: "third-token",
+      now: () => now,
+      process,
+      host: HOST,
+    });
+    const second = new SyncLease({
+      store,
+      owner: "plugin",
+      token: "plugin-token",
+      now: () => now,
+      process,
+      host: HOST,
+    });
+    expect(await second.takeOver()).toBe(true);
+    expect(await third.takeOver()).toBe(true);
+
+    expect(await readSyncLease(store)).toMatchObject({ token: "third-token" });
+    expect(await second.renew()).toBe(false);
+    expect(await first.renew()).toBe(false);
+  });
+
+  /**
+   * A takeover reports the vault it actually holds. Two of them can run inside one another
+   * (two windows, a window and the CLI), and the one whose record was replaced must not
+   * answer `true` — the caller starts an engine on that answer.
+   */
+  it("reports false for a takeover whose record another one replaced first", async () => {
+    let now = 1_000;
+    const store = new MemoryLeaseStore(() => now);
+    const { second } = twoLeases(store, () => now);
+    const rival = new SyncLease({
+      store,
+      owner: "plugin",
+      token: "rival-token",
+      now: () => now,
+      process,
+      host: HOST,
+    });
+
+    // Every write this takeover makes is immediately overwritten by the rival, which is
+    // exactly the interleaving a second takeover produces when it runs inside the first.
+    const writeFile = store.writeFile.bind(store);
+    store.writeFile = async (path, data) => {
+      if (path === ".courier/sync-lease/owner.json" && !data.includes("rival-token")) {
+        await writeFile(path, JSON.stringify({ ...JSON.parse(data), token: "rival-token" }));
+        return;
+      }
+      await writeFile(path, data);
+    };
+
+    expect(await second.takeOver()).toBe(false);
+    expect(second.owned).toBe(false);
+    expect(await readSyncLease(store)).toMatchObject({ token: "rival-token" });
+    expect(rival.owned).toBe(false);
+  });
+
+  it("reads the holder without taking it", async () => {
+    let now = 1_000;
+    const store = new MemoryLeaseStore(() => now);
+    const { first, second } = twoLeases(store, () => now);
+
+    expect(await second.read()).toBeNull();
+    await first.acquire();
+
+    expect(await second.read()).toMatchObject({ owner: "cli", token: "cli-token" });
+    expect(second.owned).toBe(false);
+    expect(await first.renew()).toBe(true);
+  });
+
+  it("reports failure when the directory can be neither renamed nor created", async () => {
+    let now = 1_000;
+    const store = new MemoryLeaseStore(() => now);
+    const { second } = twoLeases(store, () => now);
+    store.tryRename = async () => false;
+    store.tryCreateDir = async () => false;
+
+    expect(await second.takeOver()).toBe(false);
+    expect(second.owned).toBe(false);
+  });
+
+  it("renews instead of taking over a lease this instance already holds", async () => {
+    let now = 1_000;
+    const store = new MemoryLeaseStore(() => now);
+    const { first } = twoLeases(store, () => now);
+    await first.acquire();
+    const beat = store.files.get(".courier/sync-lease/cli-token.hb");
+
+    now += 1_000;
+    expect(await first.takeOver()).toBe(true);
+
+    // The renewal path wrote a new heartbeat; the takeover path would have replaced the
+    // whole directory. The record's token is still the same either way, so the heartbeat
+    // is what tells them apart.
+    expect(store.files.get(".courier/sync-lease/cli-token.hb")).not.toBe(beat);
+    expect(first.owned).toBe(true);
+  });
+
+  /**
+   * The read-only half a holder's directory watcher uses. It must answer without writing:
+   * a watcher that renewed would be woken by its own heartbeat on every tick.
+   */
+  describe("stillOwner", () => {
+    it("answers true while the record is this instance's, and writes nothing", async () => {
+      let now = 1_000;
+      const store = new MemoryLeaseStore(() => now);
+      const { first } = twoLeases(store, () => now);
+      await first.acquire();
+      const beat = store.files.get(".courier/sync-lease/cli-token.hb");
+
+      now += 1_000;
+      expect(await first.stillOwner()).toBe(true);
+
+      // Not a renewal: the heartbeat the acquire wrote is untouched (no new expiry).
+      expect(store.files.get(".courier/sync-lease/cli-token.hb")).toBe(beat);
+      expect(first.owned).toBe(true);
+    });
+
+    it("answers false, and gives the lease up, once another record is there", async () => {
+      let now = 1_000;
+      const store = new MemoryLeaseStore(() => now);
+      const { first, second } = twoLeases(store, () => now);
+      await first.acquire();
+      await second.takeOver();
+
+      expect(await first.stillOwner()).toBe(false);
+      expect(first.owned).toBe(false);
+    });
+
+    it("answers false when the record is gone", async () => {
+      let now = 1_000;
+      const store = new MemoryLeaseStore(() => now);
+      const { first } = twoLeases(store, () => now);
+      await first.acquire();
+      await store.removeDir(".courier/sync-lease");
+
+      expect(await first.stillOwner()).toBe(false);
+      expect(first.owned).toBe(false);
+    });
+
+    it("answers false for a lease this instance never took", async () => {
+      let now = 1_000;
+      const store = new MemoryLeaseStore(() => now);
+      const { second } = twoLeases(store, () => now);
+
+      expect(await second.stillOwner()).toBe(false);
+    });
   });
 });
 

@@ -5,12 +5,12 @@ import { watchLeaseDirectory } from "./lease-watch";
 
 /**
  * The desktop wake-up is the difference between a handoff in milliseconds and one bounded
- * by the fallback timer. Obsidian has no adapter watcher, so this is the one place the
- * plugin reaches for a desktop-only module; the no-op paths are what keep mobile and the
- * test runtime safe.
+ * by the fallback timer. Obsidian has no adapter watcher, so the plugin reaches `fs` through
+ * `window.require` — see the module: a dynamic `import("node:fs")` is the browser's import
+ * in the renderer and rejects, which made this watcher a silent no-op on every desktop.
  *
- * The modules are imported dynamically (`await import("fs")`), so the fakes are installed
- * with `vi.mock` rather than through `window.require`.
+ * The fake is installed on `window.require`, which is the path the module actually takes;
+ * mocking the `node:fs` specifier would keep passing while the real app failed.
  */
 const watch = vi.fn(
   (
@@ -25,7 +25,10 @@ const watch = vi.fn(
 let listeners: Array<(event: string, filename: string | null) => void> = [];
 const close = vi.fn();
 
-vi.mock("node:fs", () => ({ watch }));
+/** What Electron's renderer exposes to a plugin: `window.require` resolving Node builtins. */
+function installRequire(resolve: (id: string) => unknown): void {
+  (window as unknown as { require?: (id: string) => unknown }).require = resolve;
+}
 
 describe("watchLeaseDirectory", () => {
   afterEach(() => {
@@ -33,9 +36,11 @@ describe("watchLeaseDirectory", () => {
     close.mockClear();
     watch.mockClear();
     Platform.isDesktop = true;
+    delete (window as unknown as { require?: unknown }).require;
   });
 
   it("is a no-op on mobile and without a filesystem adapter", async () => {
+    installRequire(() => ({ watch }));
     Platform.isDesktop = false;
     await expect(watchLeaseDirectory({} as DataAdapter, () => {})).resolves.toStrictEqual(
       expect.any(Function),
@@ -49,7 +54,17 @@ describe("watchLeaseDirectory", () => {
     expect(watch).not.toHaveBeenCalled();
   });
 
+  it("is a no-op where the renderer has no require", async () => {
+    const adapter = { getBasePath: () => "/vault" } as unknown as DataAdapter;
+
+    await expect(watchLeaseDirectory(adapter, () => {})).resolves.toStrictEqual(
+      expect.any(Function),
+    );
+    expect(watch).not.toHaveBeenCalled();
+  });
+
   it("watches .courier, wakes on a release, and ignores owner renewals", async () => {
+    installRequire(() => ({ watch }));
     const onChange = vi.fn();
     const adapter = { getBasePath: () => "/vault" } as unknown as DataAdapter;
 
@@ -68,5 +83,18 @@ describe("watchLeaseDirectory", () => {
 
     stop();
     expect(close).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to the `fs` spelling when the renderer rejects node:", async () => {
+    installRequire((id) => {
+      if (id !== "fs") throw new Error(`unknown module ${id}`);
+      return { watch };
+    });
+    const adapter = { getBasePath: () => "/vault" } as unknown as DataAdapter;
+
+    await watchLeaseDirectory(adapter, () => {});
+
+    // The first spelling (`node:fs`) threw, the second one installed the watcher.
+    expect(watch).toHaveBeenCalledTimes(1);
   });
 });

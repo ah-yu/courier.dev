@@ -536,6 +536,7 @@ export const en: Record<PluginMessageKey, string> = {
   "status.tooltipFirstSync": "Courier: first sync — {done} of {total} files",
   "status.tooltipFirstSyncVault": 'Courier: first sync — {done} of {total} files in "{vault}"',
   "status.menu.accountUnavailable": "Could not read account information",
+  "status.menu.takeOver": "Take over syncing",
   "status.menu.settings": "Settings",
   "status.value.expiry.never": "Never expires",
   "status.value.expiry.expired": "Expired",
@@ -545,6 +546,22 @@ export const en: Record<PluginMessageKey, string> = {
   "status.value.storage.ratio": "{used}/{limit}",
   "status.value.storage.unlimited": "{used} / unlimited",
   "status.value.storage.unknown": "Unavailable",
+
+  // ── Lease takeover ──
+  "dialog.takeOver.title": "Take over syncing",
+  "dialog.takeOver.body": '"{vault}" is held by {owner}, so this window is not syncing it.',
+  "dialog.takeOver.bodyNoVault": "This vault is held by {owner}, so this window is not syncing it.",
+  "dialog.takeOver.ownerCli": "the CLI",
+  "dialog.takeOver.ownerPlugin": "another Obsidian window",
+  "dialog.takeOver.ownerUnknown": "another writer",
+  "dialog.takeOver.pid": "PID {pid}",
+  "dialog.takeOver.host": "on {host}",
+  "dialog.takeOver.warning":
+    "This window starts syncing at once. The other writer notices immediately and stops, but a pass it already started finishes first — take over only when you cannot end that process.",
+  "dialog.takeOver.confirm": "Take over",
+  "notice.takeOverDone": "Sync took over here. Changes you make now are the ones that sync.",
+  "notice.takeOverFailed": "Could not take over syncing.",
+  "notice.takeOverNotWaiting": "No other writer is holding this vault.",
 
   // ── File menu ──
   "menu.versionHistory": "Courier version history",

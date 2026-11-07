@@ -1,5 +1,5 @@
 import { spawnSync } from "child_process";
-import { mkdirSync, rmSync, utimesSync, writeFileSync } from "fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { join } from "path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -3695,6 +3695,220 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
         );
         await vaultA.remove(notePath);
         await vaultB.remove(notePath);
+      }
+    }, 180_000);
+
+    /**
+     * The one case the wait above cannot cover: a holder the user cannot end.
+     *
+     * Driven through the real status bar, the real confirmation dialog and Obsidian's own
+     * adapter, because the atomic step is renaming a **directory on a real filesystem** —
+     * the part a fake store (L2) cannot be trusted to behave like the app does. The record
+     * is live and unexpired: this path must not depend on the stale-lease rules.
+     */
+    it("takes the vault from a live CLI record through the status bar, and syncs again", async () => {
+      const notePath = `${PROBE_PREFIX}take-over.md`;
+      await configurePluginHost(names.a, { ...setup, deviceName: "obsidian-A" });
+      await configurePluginHost(names.b, { ...setup, deviceName: "obsidian-B" });
+      const base = await vaultBasePath(names.a);
+      const leaseDir = join(base, ".courier", "sync-lease");
+
+      try {
+        // Park A's host so the vault is quiet before the record is planted.
+        await evalInVault(
+          names.a,
+          `
+          const p = app.plugins.plugins.courier;
+          const previous = p.host;
+          if (previous) {
+            previous.stop();
+            await previous.whenStopped();
+          }
+          p.host = null;
+          return true;
+          `,
+          60_000,
+        );
+        const now = Date.now();
+        mkdirSync(leaseDir, { recursive: true });
+        writeFileSync(
+          join(leaseDir, "owner.json"),
+          JSON.stringify({
+            version: 1,
+            owner: "cli",
+            token: "cli-token",
+            // No machine and no pid: liveness is the expiry alone, which is well in the
+            // future, so this records a holder that is very much alive.
+            pid: 0,
+            acquiredAt: new Date(now).toISOString(),
+            updatedAt: new Date(now).toISOString(),
+            expiresAt: now + 60_000,
+          }),
+        );
+
+        const waiting = await evalInVault<{ waiting: boolean; engine: boolean }>(
+          names.a,
+          `
+          const p = app.plugins.plugins.courier;
+          await p.startHost();
+          return { waiting: !!(p.host && p.host.leaseWaiting), engine: !!p.engine };
+          `,
+          60_000,
+        );
+        expect(waiting.waiting, "the host did not report the other writer").toBe(true);
+        expect(waiting.engine, "the host built an engine over another writer's vault").toBe(false);
+
+        // The row exists only in this state, and the confirmation comes before the write.
+        await waitForVaultState(
+          () => clickStatusBarItem(names.a),
+          "the status bar was not clickable",
+        );
+        await waitForVaultState(
+          () => clickStatusMenuRow(names.a, t("status.menu.takeOver")),
+          "the takeover row was missing from the status menu",
+        );
+        await waitForVaultState(
+          () => clickOpenModalButton(names.a, t("dialog.takeOver.confirm")),
+          "the takeover confirmation never appeared",
+        );
+
+        // The takeover is several awaited adapter writes plus a bind pass; the click only
+        // starts it. Both readings below are waited for, so a slow pass cannot be mistaken
+        // for a takeover that never completed.
+        await waitForVaultState(
+          () => {
+            const record = JSON.parse(readFileSync(join(leaseDir, "owner.json"), "utf-8")) as {
+              owner?: string;
+            };
+            return record.owner === "plugin";
+          },
+          "the record never named the plugin after the takeover",
+          60_000,
+        );
+        await waitForVaultState(
+          async () =>
+            (await evalInVault<boolean>(
+              names.a,
+              `const p = app.plugins.plugins.courier; return !!p.engine && !(p.host && p.host.leaseWaiting);`,
+            )) === true,
+          "the taken-over host did not start an engine",
+          60_000,
+        );
+
+        // A normal participant again, both ways: the peer's write arrives, its own leaves.
+        await vaultB.write(notePath, "arrived after the takeover");
+        await waitForVaultState(
+          async () => (await vaultA.read(notePath)) === "arrived after the takeover",
+          "vault A never pulled after taking the vault over",
+          60_000,
+        );
+        await vaultA.write(notePath, "pushed after the takeover");
+        await waitForVaultState(
+          async () => (await vaultB.read(notePath)) === "pushed after the takeover",
+          "vault A never pushed after taking the vault over",
+          60_000,
+        );
+      } finally {
+        // Hand the vault back the ordinary way: the next case expects to bind, not to
+        // inherit a host that already holds the lease.
+        await vaultA.remove(notePath).catch(() => {});
+        await vaultB.remove(notePath).catch(() => {});
+        await evalInVault(
+          names.a,
+          `
+          const p = app.plugins.plugins.courier;
+          const previous = p.host;
+          if (previous) {
+            previous.stop();
+            await previous.whenStopped();
+          }
+          p.host = null;
+          return true;
+          `,
+          60_000,
+        ).catch(() => {});
+        rmSync(leaseDir, { recursive: true, force: true });
+      }
+    }, 180_000);
+
+    /**
+     * The other direction of the same rule, and the reason the holder watches the
+     * directory: a host that holds the vault must leave it **when it loses it**, not at
+     * its next renewal. The bound here is well under the five-second renewal, so a host
+     * that only polled could not pass it.
+     */
+    it("leaves the vault within a second when another writer replaces its record", async () => {
+      await configurePluginHost(names.a, { ...setup, deviceName: "obsidian-A" });
+      const base = await vaultBasePath(names.a);
+      const leaseDir = join(base, ".courier", "sync-lease");
+      const recordPath = join(leaseDir, "owner.json");
+      const ownerOf = (): string | null => {
+        try {
+          return (
+            (JSON.parse(readFileSync(recordPath, "utf-8")) as { owner?: string }).owner ?? null
+          );
+        } catch {
+          return null;
+        }
+      };
+
+      try {
+        await waitForVaultState(
+          async () => ownerOf() === "plugin",
+          "vault A never took the lease",
+          60_000,
+        );
+
+        // Another writer takes the vault exactly the way `SyncLease.takeOver()` does:
+        // the directory is renamed aside and a new record is written. A plain rewrite of
+        // `owner.json` would stay invisible on Windows, where watching `.courier` reports
+        // direct children — which is why the takeover's own step is the rename.
+        const now = Date.now();
+        rmSync(`${leaseDir}.taken-external`, { recursive: true, force: true });
+        renameSync(leaseDir, `${leaseDir}.taken-external`);
+        mkdirSync(leaseDir);
+        writeFileSync(
+          join(leaseDir, "owner.json"),
+          JSON.stringify({
+            version: 1,
+            owner: "cli",
+            token: "cli-token",
+            pid: 0,
+            acquiredAt: new Date(now).toISOString(),
+            updatedAt: new Date(now).toISOString(),
+            expiresAt: now + 60_000,
+          }),
+        );
+
+        const started = Date.now();
+        await waitForVaultState(
+          async () =>
+            (await evalInVault<boolean>(
+              names.a,
+              `const p = app.plugins.plugins.courier; return !!p.host && p.host.leaseWaiting && !p.engine;`,
+            )) === true,
+          "vault A kept syncing after its lease was replaced",
+          4_000,
+        );
+        expect(
+          Date.now() - started,
+          "the host waited for its renewal instead of the event",
+        ).toBeLessThan(4_000);
+      } finally {
+        // Hand the vault back: the next case expects a host that can take it. The renamed
+        // directory this case quarantined goes with it, so a later run starts from the
+        // same `.courier` the first one did.
+        rmSync(leaseDir, { recursive: true, force: true });
+        rmSync(`${leaseDir}.taken-external`, { recursive: true, force: true });
+        await waitForVaultState(
+          async () =>
+            (await evalInVault<boolean>(
+              names.a,
+              `const p = app.plugins.plugins.courier; return !!p.engine;`,
+            )) === true,
+          "vault A never recovered the released lease",
+          60_000,
+        ).catch(() => {});
       }
     }, 180_000);
   });

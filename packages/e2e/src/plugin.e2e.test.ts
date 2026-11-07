@@ -7561,6 +7561,46 @@ describe("plugin e2e — the real plugin against a real server", () => {
       expect(plugin.host?.leaseWaiting).toBe(true);
     });
 
+    /**
+     * The only way out of the wait, for a holder the user cannot end. The row exists while
+     * another writer owns the vault, and confirming it must leave this host **syncing** in
+     * the same call — ending the wait without an engine would just be a different lock.
+     */
+    it("takes the vault back from its menu row, after a confirmation", async () => {
+      const { plugin } = await startHostedPlugin("Status Take Over", holdCliLease);
+      await waitFor(() => plugin.host?.leaseWaiting === true, "the host never waited");
+      const item = statusBarItem(plugin);
+      expect(item.getAttribute("data-courier-status")).toBe("waiting");
+
+      let menu = await openStatusMenu(item);
+      const row = menu.items.find((entry) => entry.title === "接管同步");
+      expect(row).toBeDefined();
+
+      row!.click();
+      await waitFor(() => lastOpenedModal()?.title === "接管同步", "the confirmation never opened");
+      const cancelling = lastOpenedModal()!;
+      clickModalButton(cancelling, "取消");
+      expect(plugin.host?.leaseWaiting).toBe(true);
+
+      menu = await openStatusMenu(item);
+      menu.items.find((entry) => entry.title === "接管同步")!.click();
+      await waitFor(
+        () => lastOpenedModal() !== cancelling && lastOpenedModal()?.title === "接管同步",
+        "the confirmation did not reopen",
+      );
+      clickModalButton(lastOpenedModal()!, "接管");
+
+      await waitForAsync(
+        async () => plugin.host?.leaseWaiting === false && plugin.host?.engine !== null,
+        "the takeover never built an engine",
+      );
+      await waitForAsync(
+        async () => plugin.wsState === "connected",
+        "the taken-over host never subscribed",
+      );
+      expect(item.getAttribute("data-courier-status")).toBe("syncing");
+    });
+
     it("moves through not-synced, syncing and paused, and pauses/resumes from its menu", async () => {
       const { plugin } = await startHostedPlugin("Status Bar");
       await waitForAsync(

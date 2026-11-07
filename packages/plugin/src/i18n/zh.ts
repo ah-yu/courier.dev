@@ -500,6 +500,7 @@ export const zh = {
   "status.tooltipFirstSync": "Courier：首次同步 — 已完成 {done} / {total} 个文件",
   "status.tooltipFirstSyncVault": "Courier：首次同步 — 已完成 {done} / {total} 个文件「{vault}」",
   "status.menu.accountUnavailable": "无法读取账号信息",
+  "status.menu.takeOver": "接管同步",
   "status.menu.settings": "设置",
   "status.value.expiry.never": "永不过期",
   "status.value.expiry.expired": "已过期",
@@ -509,6 +510,22 @@ export const zh = {
   "status.value.storage.ratio": "{used}/{limit}",
   "status.value.storage.unlimited": "{used} / 无上限",
   "status.value.storage.unknown": "读取失败",
+
+  // ── Lease takeover ──
+  "dialog.takeOver.title": "接管同步",
+  "dialog.takeOver.body": "「{vault}」现在由{owner}占用，本窗口没有在同步它。",
+  "dialog.takeOver.bodyNoVault": "这个库现在由{owner}占用，本窗口没有在同步它。",
+  "dialog.takeOver.ownerCli": "CLI 进程",
+  "dialog.takeOver.ownerPlugin": "另一个 Obsidian 窗口",
+  "dialog.takeOver.ownerUnknown": "其他写入者",
+  "dialog.takeOver.pid": "进程号 {pid}",
+  "dialog.takeOver.host": "位于 {host}",
+  "dialog.takeOver.warning":
+    "接管后本窗口立即开始同步。对方会立刻察觉并停止，但它已经跑起来的那一趟同步会先跑完 —— 只在你无法结束那个进程时才使用。",
+  "dialog.takeOver.confirm": "接管",
+  "notice.takeOverDone": "已接管同步，之后的改动由本窗口同步。",
+  "notice.takeOverFailed": "接管同步失败。",
+  "notice.takeOverNotWaiting": "当前没有其他写入者占用此 vault。",
 
   // ── File menu ──
   "menu.versionHistory": "Courier 版本历史",

@@ -463,6 +463,22 @@
   gap: 8px;
 }
 
+/* ── The lease-takeover confirmation ── */
+
+/* Who holds the vault, when the record names a pid or a machine: one muted line under the
+ * sentence, so the warning below reads as the consequence of what it names. */
+.courier-take-over-detail {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+/* The overlap the takeover costs (the other writer finishes a pass already running). It is
+ * the one thing a person must read before clicking, so it carries the wait state's colour
+ * rather than the muted one. */
+.courier-take-over-warning {
+  color: var(--text-warning, var(--color-yellow));
+}
+
 /* ── The excluded-folder tree ── */
 
 /**

@@ -83,6 +83,7 @@ export type { VaultCredentialCheck };
 import { EngineHost } from "./unified/host";
 import { AdapterLeaseStore } from "./unified/lease";
 import { PasswordPromptModal } from "./ui/dialogs/password-prompt-modal";
+import { TakeOverLeaseModal } from "./ui/dialogs/take-over-lease-modal";
 import type {
   PasswordPromptOptions,
   PasswordPromptResult,
@@ -310,6 +311,13 @@ export default class CourierPlugin extends Plugin {
   /** The modal behind `pendingPasswordPrompt`, so `onunload` can actually dismiss it. */
   private pendingPasswordModal: PasswordPromptModal | null = null;
   /**
+   * The open takeover confirmation, so `onunload` can dismiss it too.
+   *
+   * A dialog this instance raised belongs to the session that asked for it: left open, its
+   * confirm button would run a takeover for a plugin that is gone.
+   */
+  private takeOverModal: TakeOverLeaseModal | null = null;
+  /**
    * Whether this instance has been unloaded.
    *
    * A canary check or a host start can finish after `onunload`; without this, a dead
@@ -381,6 +389,7 @@ export default class CourierPlugin extends Plugin {
       readAccount: () => this.readAccountForStatusMenu(),
       pauseSync: () => this.pauseSync(),
       resumeSync: () => this.resumeSync(),
+      takeOverSync: () => void this.takeOverSync(),
       openSettings: () => this.openSettingsTab(),
     });
 
@@ -497,6 +506,8 @@ export default class CourierPlugin extends Plugin {
     this.unloaded = true;
     this.pendingPasswordModal?.close();
     this.pendingPasswordModal = null;
+    this.takeOverModal?.close();
+    this.takeOverModal = null;
     this.pendingPasswordPrompt = null;
     this.pendingAutoUnlock = null;
     this.pendingPasswordUnlock = null;
@@ -952,6 +963,58 @@ export default class CourierPlugin extends Plugin {
     // A failure reports itself (`startHost`); a success has nothing to add, because the
     // row re-renders to 暂停同步 and the state line to ● 已连接.
     await this.startHost();
+    this.refreshSettings();
+  }
+
+  /**
+   * Take this vault from the writer that holds it, and sync here now.
+   *
+   * The lease is first come, first served, so this is the one path where the plugin takes
+   * a vault another process is still holding: it exists for a writer the user cannot end
+   * (a CLI started by something they cannot find), which would otherwise keep their own
+   * vault locked. The host replaces the record; the displaced writer stops within
+   * milliseconds through its own lease-directory watcher (its next renewal, where no
+   * watcher exists).
+   *
+   * The confirmation names the holder and warns that a pass already in flight there keeps
+   * running until it finishes. Success and failure are the two outcomes the user cannot
+   * see for themselves, so each is a Notice; a cancelled dialog says nothing.
+   *
+   * Everything is re-read after the dialog: the wait can end while it is open (the holder
+   * releases and the retry starts syncing), and a confirmation for a state that is already
+   * over must not report a failure — nor build an engine on a host the plugin has dropped.
+   */
+  async takeOverSync(): Promise<void> {
+    const host = this.host;
+    if (!host?.leaseWaiting) {
+      showNotice(t("notice.takeOverNotWaiting"));
+      return;
+    }
+    const holder = await host.leaseHolder();
+    const modal = new TakeOverLeaseModal(this.app, holder, this.settings.connectedVaultName);
+    this.takeOverModal = modal;
+    modal.open();
+    let confirmed: boolean;
+    try {
+      confirmed = (await modal.getResult()) !== null;
+    } finally {
+      if (this.takeOverModal === modal) this.takeOverModal = null;
+    }
+    if (!confirmed) return;
+    // The wait ended while the dialog was open: there is nothing to take any more, and the
+    // vault is syncing, so the click needs no notice.
+    if (this.unloaded || this.host !== host || !host.leaseWaiting) {
+      this.refreshLiveState();
+      this.refreshSettings();
+      return;
+    }
+    const taken = await host.takeOverLease().catch((err: unknown) => {
+      console.error("Courier: taking over the vault lease failed:", err);
+      return false;
+    });
+    showNotice(t(taken ? "notice.takeOverDone" : "notice.takeOverFailed"));
+    // The icon and the page both read the wait state; both have to leave it at once.
+    this.refreshLiveState();
     this.refreshSettings();
   }
 
