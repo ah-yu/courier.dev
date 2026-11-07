@@ -47,6 +47,14 @@ export interface StatusBarHost {
   readAccount(): Promise<UserSummary | null>;
   pauseSync(): Promise<void>;
   resumeSync(): Promise<void>;
+  /**
+   * Take the vault from the writer holding it and sync here now.
+   *
+   * Offered only in the `waiting` state, which is the only state where another writer
+   * can own the vault. The confirmation (and the warning it carries) belongs to the
+   * plugin, not to this menu.
+   */
+  takeOverSync(): void;
   openSettings(): void;
 }
 
@@ -207,6 +215,18 @@ export function createStatusBar(host: StatusBarHost): StatusBarHandle {
             .onClick(() => {
               void (paused ? host.resumeSync() : host.pauseSync());
             }),
+        );
+      }
+
+      // The only way out of the wait: the other writer cannot be ended from here, and a
+      // vault the user wants to edit must not stay locked behind a process they cannot
+      // find. This row exists exactly and only while that is the situation.
+      if (status === "waiting") {
+        menu.addItem((item) =>
+          item
+            .setTitle(t("status.menu.takeOver"))
+            .setIcon("unlock")
+            .onClick(() => host.takeOverSync()),
         );
       }
 

@@ -58,6 +58,8 @@ export const en: Record<MessageKey, string> = {
     "Versions of every other file the vault keeps on the server (default 10)",
   "cli.option.once": "Run a single reconcile pass and exit",
   "cli.option.interval": "Full-reconcile interval in minutes (default 30)",
+  "cli.option.takeOver":
+    "Take the vault from whichever syncer holds it, once, at the first refusal",
   "cli.option.json": "Output as JSON",
 
   "cli.error.invalidLanguage": 'Unsupported language "{value}". Valid values: zh, en.',
@@ -82,6 +84,7 @@ export const en: Record<MessageKey, string> = {
     'Local folder "{path}" overlaps the bound {other}. One folder belongs to one vault; choose another path.',
   "cli.error.syncLocked":
     "Another syncer (the Obsidian plugin or another CLI) is writing this vault. Stop it first.",
+  "cli.error.takeOverFailed": "Could not take the vault from its writer (--take-over).",
   "cli.error.leaseFailed":
     "Cannot access the sync lease: {error}. This is a filesystem error (permissions, space, or a damaged path), not another syncer.",
 
@@ -197,6 +200,13 @@ export const en: Record<MessageKey, string> = {
   "cli.log.leaseWaiting":
     'Another syncer holds the "{vault}" lease; this process waits without starting an engine.',
   "cli.log.leaseResumed": 'The sync lease was released; "{vault}" resumed syncing.',
+  "cli.log.takingOver":
+    'Taking the "{vault}" lease from {holder} (--take-over). That writer stops within seconds; a pass it already started finishes first.',
+  "cli.lease.holderUnknown": "another writer",
+  "cli.lease.ownerCli": "the CLI",
+  "cli.lease.ownerPlugin": "the Obsidian plugin",
+  "cli.lease.pid": "PID {pid}",
+  "cli.lease.host": "on {host}",
   "cli.log.coexistenceFailed":
     "Could not tell whether Obsidian is syncing ({error}); treating it as closed.",
   "cli.log.startFailed": "The sync process failed to start ({error}); retrying shortly.",

@@ -176,6 +176,69 @@ function currentPID(): number {
   return (globalThis as { process?: { pid?: number } }).process?.pid ?? 0;
 }
 
+/**
+ * A lease store over memory, with its record map exposed.
+ *
+ * A test that needs the vault **stolen while the host holds it** has to replace the record
+ * under a running host, which a store closed over its own map cannot do.
+ */
+function memoryStore(now: number) {
+  const dirs = new Set([".courier"]);
+  const files = new Map<string, string>();
+  const store: SyncLeaseStore = {
+    ensureDir: async (path) => {
+      dirs.add(path);
+    },
+    tryCreateDir: async (path) => {
+      if (dirs.has(path)) return false;
+      dirs.add(path);
+      return true;
+    },
+    tryRename: async (from, to) => {
+      if (!dirs.has(from)) return false;
+      dirs.delete(from);
+      dirs.add(to);
+      for (const [path, content] of files) {
+        if (path.startsWith(`${from}/`)) {
+          files.delete(path);
+          files.set(`${to}${path.slice(from.length)}`, content);
+        }
+      }
+      return true;
+    },
+    readFile: async (path) => files.get(path) ?? null,
+    writeFile: async (path, data) => {
+      files.set(path, data);
+    },
+    removeFile: async (path) => {
+      files.delete(path);
+    },
+    removeDir: async (path) => {
+      dirs.delete(path);
+      for (const entry of files.keys()) {
+        if (entry.startsWith(`${path}/`)) files.delete(entry);
+      }
+    },
+    stat: async (path) => (dirs.has(path) ? { mtimeMs: now } : null),
+  };
+  return { store, files, dirs };
+}
+
+/** The record of a live writer holding the vault, for the lease fixtures. */
+function holderRecord(now: number): string {
+  return JSON.stringify({
+    version: 1,
+    owner: "cli",
+    token: "cli-token",
+    // A pid that exists: a record whose process is gone is stale whatever its expiry says,
+    // so a made-up pid would make these fixtures mean "nobody".
+    pid: currentPID(),
+    acquiredAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString(),
+    expiresAt: now + 60_000,
+  });
+}
+
 async function makeKey(): Promise<CryptoKey> {
   const raw = new Uint8Array(32);
   crypto.getRandomValues(raw);
@@ -316,6 +379,195 @@ describe("EngineHost", () => {
       expect(host.engine).toBeNull();
       expect(host.leaseWaiting).toBe(true);
       expect(waitStates).toEqual([true]);
+    });
+
+    /**
+     * A lease store over memory, with its record map exposed.
+     *
+     * A test that needs the vault **stolen while the host holds it** has to replace the
+     * record under a running host, which a store closed over its own map cannot do.
+     */
+    function takeoverStore(now: number): SyncLeaseStore {
+      const { store, files, dirs } = memoryStore(now);
+      dirs.add(".courier/sync-lease");
+      files.set(".courier/sync-lease/owner.json", holderRecord(now));
+      return store;
+    }
+
+    /**
+     * The one exception to "first come, first served": a person who cannot end the CLI
+     * takes the vault from the status bar. The wait must end and an engine must exist
+     * **in the same call** — the point is that the vault is no longer locked.
+     */
+    it("takes the vault from a live CLI lease when the user asks for it", async () => {
+      const now = Date.now();
+      const lease = new SyncLease({
+        store: takeoverStore(now),
+        owner: "plugin",
+        token: "plugin-token",
+        process,
+      });
+      const waitStates: boolean[] = [];
+      const settings = baseSettings({ connectedVaultId: "vault-1" });
+      const { host } = await newHost(
+        settings,
+        undefined,
+        {},
+        { lease, onLeaseChange: (waiting) => waitStates.push(waiting) },
+      );
+      track(host);
+
+      await host.start();
+      expect(host.leaseWaiting).toBe(true);
+      expect(host.engine).toBeNull();
+      expect(await host.leaseHolder()).toMatchObject({ owner: "cli", token: "cli-token" });
+
+      expect(await host.takeOverLease()).toBe(true);
+
+      expect(host.leaseWaiting).toBe(false);
+      expect(host.engine).not.toBeNull();
+      expect(lease.owned).toBe(true);
+      expect(waitStates).toEqual([true, false]);
+    });
+
+    it("answers false and keeps waiting when the takeover cannot win the directory", async () => {
+      const now = Date.now();
+      const lease = new SyncLease({
+        store: cliHeldStore(now),
+        owner: "plugin",
+        token: "plugin-token",
+        process,
+      });
+      const settings = baseSettings({ connectedVaultId: "vault-1" });
+      const { host } = await newHost(settings, undefined, {}, { lease });
+      track(host);
+
+      await host.start();
+      expect(await host.takeOverLease()).toBe(false);
+
+      expect(host.leaseWaiting).toBe(true);
+      expect(host.engine).toBeNull();
+      expect(lease.owned).toBe(false);
+    });
+
+    it("does not take over a lease this host already owns", async () => {
+      const settings = baseSettings();
+      const { host } = await newHost(settings);
+      track(host);
+      await host.start();
+      expect(host.engine).not.toBeNull();
+
+      expect(await host.takeOverLease()).toBe(false);
+      expect(host.engine).not.toBeNull();
+    });
+
+    /**
+     * A stop that lands while the takeover is in flight wins. The record this call took is
+     * handed back (the next host must be able to take it) and no engine is built: a paused
+     * or unloaded plugin that kept syncing would break "stopped means stopped" **and** hold
+     * the lease against the host that replaces it.
+     */
+    it("hands the taken record back when a stop lands mid-takeover", async () => {
+      const now = Date.now();
+      const store = takeoverStore(now);
+      const lease = new SyncLease({
+        store,
+        owner: "plugin",
+        token: "plugin-token",
+        process,
+      });
+      const settings = baseSettings({ connectedVaultId: "vault-1" });
+      const { host } = await newHost(settings, undefined, {}, { lease });
+      track(host);
+
+      await host.start();
+      expect(host.leaseWaiting).toBe(true);
+
+      // Deliberately not awaited: `stop()` runs while the takeover is between its awaited
+      // filesystem calls.
+      const takeover = host.takeOverLease();
+      host.stop();
+
+      expect(await takeover).toBe(false);
+      expect(host.engine).toBeNull();
+      // Released, not left behind: another lease over the same store can take it at once.
+      const next = new SyncLease({ store, owner: "plugin", token: "next-token", process });
+      expect(await next.acquire()).toBe(true);
+    });
+
+    /**
+     * The fast half of the same rule: a host that **holds** the vault leaves it on the
+     * directory event, not at its next renewal. The renewal stays — it is what keeps the
+     * record fresh for everybody else — but it is the slow path.
+     */
+    it("leaves the vault on the first lease-directory event that is not its own", async () => {
+      const now = Date.now();
+      const { store, files, dirs } = memoryStore(now);
+      let onEvent: (() => void) | null = null;
+      leaseWatchMock.watchLeaseDirectory.mockImplementation(async (_adapter, callback) => {
+        onEvent = callback as () => void;
+        return () => {};
+      });
+      const lease = new SyncLease({
+        store,
+        owner: "plugin",
+        token: "plugin-token",
+        process,
+      });
+      const waitStates: boolean[] = [];
+      const settings = baseSettings({ connectedVaultId: "vault-1" });
+      const { host } = await newHost(
+        settings,
+        undefined,
+        {},
+        { lease, onLeaseChange: (waiting) => waitStates.push(waiting) },
+      );
+      track(host);
+
+      await host.start();
+      expect(host.engine).not.toBeNull();
+      expect(onEvent).not.toBeNull();
+
+      // Somebody else's record lands, and the watcher reports the directory change.
+      dirs.add(".courier/sync-lease");
+      files.set(".courier/sync-lease/owner.json", holderRecord(now));
+      onEvent!();
+
+      // The check itself is a read, so it settles in a few microtasks — no timer is
+      // advanced here on purpose: this must happen long before the 5-second renewal.
+      await waitFor(() => expect(host.leaseWaiting).toBe(true));
+      expect(host.engine).toBeNull();
+      expect(waitStates).toEqual([true]);
+    });
+
+    it("keeps the vault when the event shows the record is still its own", async () => {
+      const now = Date.now();
+      const { store } = memoryStore(now);
+      let onEvent: (() => void) | null = null;
+      leaseWatchMock.watchLeaseDirectory.mockImplementation(async (_adapter, callback) => {
+        onEvent = callback as () => void;
+        return () => {};
+      });
+      const lease = new SyncLease({
+        store,
+        owner: "plugin",
+        token: "plugin-token",
+        process,
+      });
+      const settings = baseSettings({ connectedVaultId: "vault-1" });
+      const { host } = await newHost(settings, undefined, {}, { lease });
+      track(host);
+
+      await host.start();
+      expect(host.engine).not.toBeNull();
+
+      // Every renewal writes a heartbeat inside the watched directory, so this host's own
+      // writes wake it too. Re-reading must therefore change nothing.
+      onEvent!();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(host.engine).not.toBeNull();
+      expect(host.leaseWaiting).toBe(false);
     });
 
     /**
