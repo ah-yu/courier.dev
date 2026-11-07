@@ -1,10 +1,11 @@
 import { mkdtempSync, rmSync } from "fs";
+import { EventEmitter } from "events";
 import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig, saveConfig } from "./config";
 import { setLocale, t } from "./i18n";
-import { createProgram } from "./program";
+import { createProgram, watchSupervisor } from "./program";
 
 /**
  * The command surface is built from the active catalog before commander parses, so
@@ -167,5 +168,55 @@ describe("vault update", () => {
       delete process.env.COURIER_CLI_CONFIG_DIR;
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+/** A stand-in for a supervised stdin: it records whether anything started reading. */
+class FakeStdin extends EventEmitter {
+  resumed = 0;
+  resume() {
+    this.resumed += 1;
+    return this;
+  }
+}
+
+function fakeStdin(): NodeJS.ReadStream & FakeStdin {
+  return new FakeStdin() as unknown as NodeJS.ReadStream & FakeStdin;
+}
+
+/**
+ * The supervisor's pipe closing is the desktop app's death, which macOS has no other way to
+ * report. It must stay an explicit opt-in: a terminal run with stdin at /dev/null is EOF at
+ * once, and a daemon that stopped there would never sync.
+ */
+describe("watchSupervisor", () => {
+  it("leaves stdin alone unless the supervisor asked", () => {
+    const stdin = fakeStdin();
+    const closed = vi.fn();
+    watchSupervisor(closed, {}, stdin);
+    stdin.emit("end");
+    stdin.emit("close");
+
+    expect(stdin.resumed).toBe(0);
+    expect(closed).not.toHaveBeenCalled();
+  });
+
+  it("stops when the supervisor's pipe ends", () => {
+    const stdin = fakeStdin();
+    const closed = vi.fn();
+    watchSupervisor(closed, { COURIER_DAEMON_SUPERVISED: "1" }, stdin);
+    expect(stdin.resumed).toBe(1);
+
+    stdin.emit("end");
+    expect(closed).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops when the supervisor's pipe is closed outright", () => {
+    const stdin = fakeStdin();
+    const closed = vi.fn();
+    watchSupervisor(closed, { COURIER_DAEMON_SUPERVISED: "1" }, stdin);
+
+    stdin.emit("close");
+    expect(closed).toHaveBeenCalledTimes(1);
   });
 });

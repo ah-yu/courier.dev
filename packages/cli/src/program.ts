@@ -200,6 +200,28 @@ async function bindVault(
 }
 
 /**
+ * Stop this daemon when the supervisor's pipe on stdin closes.
+ *
+ * A supervisor — the desktop app — starts the daemon with a pipe on stdin and keeps its
+ * write end open for as long as it runs, so this end reads EOF exactly when the supervisor
+ * is gone: a quit, a crash, or a force-kill that runs no cleanup code. macOS has no
+ * parent-death signal (a child is only reparented to launchd), which makes this the one way
+ * a daemon there hears about its supervisor. Only when the supervisor asks: a terminal
+ * `run` with stdin redirected to `/dev/null` reads EOF at once, and a daemon must not stop
+ * because nothing is on its stdin.
+ */
+export function watchSupervisor(
+  onClose: () => void,
+  env: NodeJS.ProcessEnv = process.env,
+  stdin: NodeJS.ReadStream = process.stdin,
+): void {
+  if (env.COURIER_DAEMON_SUPERVISED !== "1") return;
+  stdin.resume();
+  stdin.on("end", onClose);
+  stdin.on("close", onClose);
+}
+
+/**
  * Build the whole command surface.
  *
  * Kept out of `main.ts` so the entry point can resolve the language **before** any
@@ -608,7 +630,11 @@ export function createProgram(): Command {
           // the lease) cannot reject runDaemon: the caller already has the handle.
           onFatal: (err) => fail(err.message),
         });
+        let stopping = false;
         const shutdown = () => {
+          // A supervisor's pipe closing and a signal can both ask; the drain runs once.
+          if (stopping) return;
+          stopping = true;
           console.log(t("cli.run.stopping"));
           // Releasing the vault lease is a filesystem write; exiting first would leave the
           // plugin waiting for the TTL after this process is already gone.
@@ -619,6 +645,8 @@ export function createProgram(): Command {
         };
         process.on("SIGINT", shutdown);
         process.on("SIGTERM", shutdown);
+        // A supervisor's pipe closing is the manager's death, not an input to read.
+        watchSupervisor(shutdown);
         console.log(
           t("cli.run.started", {
             vault: `${vaultLabel(selected)} (${selected.vaultId})`,

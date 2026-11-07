@@ -438,6 +438,16 @@ fallback for a headless machine (the server keeps no backlog for subscribers, so
 offline are not resent), and silently turning it off is a failure the user cannot notice. `0` is the
 only spelling that means off.
 
+**Stopping with its supervisor.** A process that should not outlive whatever started it says so with
+`COURIER_DAEMON_SUPERVISED=1`: `run` then watches stdin and treats EOF — or the pipe closing — the way
+it treats `SIGTERM`. It drains, releases the lease, clears its runtime record and exits. The desktop
+app starts every daemon that way and keeps its end of the pipe open for as long as it runs, so a
+quit, a crash or a force-kill of the app stops its daemons too. macOS is the case that needs it: a
+child there is only reparented to launchd, so the pipe closing is the one way a daemon hears that its
+supervisor is gone. The variable is opt-in on purpose — a terminal `run` with stdin redirected to
+`/dev/null` reads EOF at once, and a daemon must not stop because nothing is on its stdin. Without it,
+`run` ignores stdin entirely.
+
 Behavior: scan local syncable files (md/canvas and the enabled file types, excluding conflict
 copies; the config folder is never part of this scan) → full reconcile (push/pull/conflicts) → watch
 local file events for incremental pushes → subscribe to remote changes over WebSocket and pull. There
