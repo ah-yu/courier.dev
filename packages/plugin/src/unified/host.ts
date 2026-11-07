@@ -4,6 +4,7 @@ import {
   LEASE_RENEW_MS,
   SyncHost,
   SyncLease,
+  currentHost,
   normalizeScope,
   type AuthFailureReason,
   type ConflictResolvedEvent,
@@ -369,8 +370,15 @@ export class EngineHost {
     // may still be writing.
     if (this.leaseRelease !== null) return false;
     const holder = await this.leaseHolder();
-    const self = pluginPlatform.process?.pid;
-    if (holder?.owner === "plugin" && holder.pid > 0 && holder.pid === self) return false;
+    // A pid is evidence only on the machine that wrote the record (`leaseIsCurrent`'s rule):
+    // on a shared folder another machine's plugin can own a pid this process also has, and
+    // hiding the row then would take away the only escape from a writer nobody can end.
+    const node = pluginPlatform.process;
+    const self = node?.pid;
+    const here = currentHost(node);
+    if (holder?.owner === "plugin" && holder.pid > 0 && holder.pid === self) {
+      return holder.host !== here;
+    }
     return true;
   }
 

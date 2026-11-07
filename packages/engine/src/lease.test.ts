@@ -611,6 +611,55 @@ describe("SyncLease.takeOver", () => {
    * (two windows, a window and the CLI), and the one whose record was replaced must not
    * answer `true` — the caller starts an engine on that answer.
    */
+  /**
+   * The window a takeover cannot close completely: between its rename and its own mkdir,
+   * the displaced holder's watcher fires and its loop asks for the lease again. That is the
+   * same writer coming back, so the click must still win — otherwise a user on Windows
+   * reads "could not take over" at random, whenever the two land in the same millisecond.
+   */
+  it("wins against the same writer re-acquiring in the window after the rename", async () => {
+    let now = 1_000;
+    const store = new MemoryLeaseStore(() => now);
+    const { second } = twoLeases(store, () => now);
+    const holder = new SyncLease({
+      store,
+      owner: "cli",
+      token: "cli-token",
+      now: () => now,
+      process,
+      host: HOST,
+    });
+    await holder.acquire();
+
+    // The displaced writer comes back with a new token, same pid and machine, exactly
+    // where the real one does: right after its directory was renamed away.
+    const tryCreateDir = store.tryCreateDir.bind(store);
+    let slipped = false;
+    store.tryCreateDir = async (path) => {
+      if (!slipped && path === ".courier/sync-lease") {
+        slipped = true;
+        await store.writeFile(
+          ".courier/sync-lease/owner.json",
+          JSON.stringify({
+            version: 1,
+            owner: "cli",
+            token: "cli-token-2",
+            pid: selfPID(),
+            host: HOST,
+            acquiredAt: new Date(now).toISOString(),
+            updatedAt: new Date(now).toISOString(),
+            expiresAt: now + 60_000,
+          }),
+        );
+        return false;
+      }
+      return tryCreateDir(path);
+    };
+
+    expect(await second.takeOver()).toBe(true);
+    expect(await readSyncLease(store)).toMatchObject({ owner: "plugin", token: "plugin-token" });
+  });
+
   it("reports false for a takeover whose record another one replaced first", async () => {
     let now = 1_000;
     const store = new MemoryLeaseStore(() => now);

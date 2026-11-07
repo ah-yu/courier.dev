@@ -178,6 +178,25 @@ function currentPID(): number {
 }
 
 /**
+ * Run `body` with the renderer's Node surface (`window.process`) replaced.
+ *
+ * Restored through its property descriptor rather than deleted: in this runtime `window`
+ * and `globalThis` are the same object, so a plain `delete` would take `process` itself
+ * away from every test that runs afterwards.
+ */
+async function withRendererProcess<T>(value: unknown, body: () => Promise<T>): Promise<T> {
+  const target = window as unknown as { process?: unknown };
+  const previous = Object.getOwnPropertyDescriptor(target, "process");
+  target.process = value;
+  try {
+    return await body();
+  } finally {
+    if (previous) Object.defineProperty(target, "process", previous);
+    else delete target.process;
+  }
+}
+
+/**
  * A lease store over memory, with its record map exposed.
  *
  * A test that needs the vault **stolen while the host holds it** has to replace the record
@@ -526,36 +545,119 @@ describe("EngineHost", () => {
     it("does not offer a takeover of this same process's own record", async () => {
       const now = Date.now();
       const store = memoryStore(now).store;
-      // The record a host this window already replaced leaves behind while it drains: this
-      // process's pid, another token. Taking it would put two engines of this plugin on the
-      // vault, which is exactly what the drain exists to prevent.
-      const draining = new SyncLease({
-        store,
-        owner: "plugin",
-        token: "draining-token",
-        now: () => now,
-        process,
-        pid: currentPID(),
-        host: "here",
-      });
-      expect(await draining.acquire()).toBe(true);
+      // The renderer's Node surface: a pid is evidence only with a machine to read it on.
+      const self = currentPID();
+      const selfHost = "this-machine";
+      await withRendererProcess({ pid: self, env: { COMPUTERNAME: selfHost } }, async () => {
+        // The record a host this window replaced leaves behind while it drains: this
+        // process's pid, this machine, another token. Taking it would put two engines of
+        // this plugin on the vault, which is exactly what the drain prevents.
+        const draining = new SyncLease({
+          store,
+          owner: "plugin",
+          token: "draining-token",
+          now: () => now,
+          process,
+          pid: self,
+          host: selfHost,
+        });
+        expect(await draining.acquire()).toBe(true);
 
-      const next = new SyncLease({ store, owner: "plugin", token: "next-token", process });
+        const next = new SyncLease({ store, owner: "plugin", token: "next-token", process });
+        const settings = baseSettings({ connectedVaultId: "vault-1" });
+        const { host } = await newHost(settings, undefined, {}, { lease: next });
+        track(host);
+
+        await host.start();
+        expect(host.leaseWaiting).toBe(true);
+        expect(await host.canTakeOver()).toBe(false);
+        expect(await host.takeOverLease()).toBe(false);
+        expect(host.engine).toBeNull();
+      });
+    });
+
+    it("still offers a takeover of another machine's plugin record with the same pid", async () => {
+      const now = Date.now();
+      const store = memoryStore(now).store;
+      const self = currentPID();
+      await withRendererProcess({ pid: self, env: { COMPUTERNAME: "this-machine" } }, async () => {
+        // A shared folder: the other machine's plugin owns a pid this one also has. A pid
+        // is evidence only where the record was written, so this must stay takeable — it
+        // is the only escape from a writer nobody can end.
+        const remote = new SyncLease({
+          store,
+          owner: "plugin",
+          token: "remote-token",
+          now: () => now,
+          process,
+          pid: self,
+          host: "another-machine",
+        });
+        expect(await remote.acquire()).toBe(true);
+
+        const next = new SyncLease({ store, owner: "plugin", token: "next-token", process });
+        const settings = baseSettings({ connectedVaultId: "vault-1" });
+        const { host } = await newHost(settings, undefined, {}, { lease: next });
+        track(host);
+
+        await host.start();
+        expect(await host.canTakeOver()).toBe(true);
+      });
+    });
+
+    /**
+     * The success branch `takeOverLease` exists for after `210a30d`: a waiting retry's
+     * `start()` that was already in flight builds the host while the takeover is awaiting
+     * its record. That must report **success** (the window is syncing, which is what the
+     * user asked for) and must not arm a retry that would tear the new host down.
+     */
+    it("reports success when a start in flight built the host first", async () => {
+      vi.useFakeTimers();
+      const now = Date.now();
+      const lease = new SyncLease({
+        store: takeoverStore(now),
+        owner: "plugin",
+        token: "plugin-token",
+        process,
+      });
       const settings = baseSettings({ connectedVaultId: "vault-1" });
-      const { host } = await newHost(settings, undefined, {}, { lease: next });
+      const { host } = await newHost(settings, undefined, {}, { lease });
       track(host);
 
       await host.start();
       expect(host.leaseWaiting).toBe(true);
-      expect(await host.canTakeOver()).toBe(false);
-      expect(await host.takeOverLease()).toBe(false);
-      expect(host.engine).toBeNull();
+
+      // Model the state the code sees when the waiting retry is already running: its timer
+      // has fired (so nothing is pending) and it builds a host while the takeover awaits.
+      // Standing the host up here is the only deterministic way to land in that window.
+      const pending = (host as unknown as { leaseRetry: number | null }).leaseRetry;
+      if (pending !== null) window.clearTimeout(pending);
+      (host as unknown as { leaseRetry: number | null }).leaseRetry = null;
+      const built = {
+        engine: { syncLocalSettings: vi.fn() },
+        stop: vi.fn(),
+        whenIdle: vi.fn(async () => {}),
+      };
+      const takeOver = lease.takeOver.bind(lease);
+      vi.spyOn(lease, "takeOver").mockImplementation(async () => {
+        (host as unknown as { host: unknown }).host = built;
+        return takeOver();
+      });
+
+      expect(await host.takeOverLease()).toBe(true);
+      expect(
+        (host as unknown as { leaseRetry: unknown }).leaseRetry,
+        "a retry was armed over a running host",
+      ).toBeNull();
+      // And nothing fires later: the healthy host stays.
+      await advanceTimersByTimeAsync(LEASE_RETRY_MS * 3);
+      expect(host.engine).toBe(built.engine);
     });
 
     /**
-     * The fast half of the same rule: a host that **holds** the vault leaves it on the
-     * directory event, not at its next renewal. The renewal stays — it is what keeps the
-     * record fresh for everybody else — but it is the slow path.
+     * A host that **holds** the vault leaves it on the directory event, not at its next
+     * renewal. The renewal stays — it is what keeps the record fresh for everybody else —
+     * but it is the slow path.
      */
     it("leaves the vault on the first lease-directory event that is not its own", async () => {
       const now = Date.now();

@@ -270,6 +270,27 @@ async function ignoreFailure(work: Promise<unknown>): Promise<void> {
 }
 
 /**
+ * Whether `current` is the same writer as `displaced`, possibly on a new token.
+ *
+ * A displaced holder can re-acquire before a takeover's own mkdir lands — its watcher
+ * fires on the rename and its loop asks for the lease again immediately. That is the same
+ * writer coming back, not a rival takeover, and retrying against it is what makes the
+ * user's click win. A different writer (another pid, another machine, or no record at
+ * all) must not be displaced a second time.
+ */
+function isSameWriter(current: SyncLeaseInfo | null, displaced: SyncLeaseInfo | null): boolean {
+  if (current === null) return true;
+  if (displaced === null) return false;
+  if (current.token === displaced.token) return true;
+  return (
+    current.owner === displaced.owner &&
+    current.pid > 0 &&
+    current.pid === displaced.pid &&
+    current.host === displaced.host
+  );
+}
+
+/**
  * The lease one host holds.
  *
  * `acquire` is safe to call after a failed attempt: it re-reads the record and either
@@ -367,20 +388,26 @@ export class SyncLease {
     // unconditional on purpose — but it is what lets a **second** takeover notice that the
     // first one already landed, instead of displacing a record nobody asked about.
     const displaced = await readQuietly(store);
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      // A takeover can race the holder's own renewal, and on Windows a directory with a
-      // write in flight refuses the rename. One retry covers both; a third would only
-      // repeat the same failure.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
       const quarantine = `${LEASE_DIR}.taken-${this.token}`;
-      if (await store.tryRename(LEASE_DIR, quarantine)) {
-        await store.removeDir(quarantine);
+      let created: boolean;
+      if (await renameQuietly(store, LEASE_DIR, quarantine)) {
+        // Create this takeover's own directory **before** cleaning up the quarantined one.
+        // The gap between the rename and this mkdir is the only window in which the
+        // displaced holder can slip back in — and it is already reacting to the rename
+        // through its own watcher — so the window must be one await, not three.
+        created = await store.tryCreateDir(LEASE_DIR);
+        await ignoreFailure(store.removeDir(quarantine));
+      } else {
+        // Nothing to move: the lease directory was not there at all (or has just gone).
+        created = await store.tryCreateDir(LEASE_DIR);
       }
-      if (await store.tryCreateDir(LEASE_DIR)) return this.createRecord();
-      // Somebody created the directory between the rename and the mkdir — the displaced
-      // holder re-acquiring, or another takeover. Retry only while the record is still the
-      // one this call set out to displace.
+      if (created) return this.createRecord();
+      // Something is in the directory again. That is either the writer this call set out
+      // to displace (re-acquired through its watcher while the rename was landing) or a
+      // different takeover that already won. Only the first is a reason to try again.
       const current = await readQuietly(store);
-      if (current !== null && current.token !== displaced?.token) return false;
+      if (!isSameWriter(current, displaced)) return false;
     }
     return false;
   }
