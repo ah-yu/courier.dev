@@ -1291,6 +1291,199 @@ describe("SyncEngine conflicts", () => {
     expect(api.chains.get(newFileId)!.map((v) => v.action)).toEqual(["create"]);
     expect(await api.readPlainLatest(newFileId)).toBe("still here");
   });
+
+  /**
+   * A device that was **not running** when the peer deleted the note has to apply that
+   * deletion when it starts again. Its persisted state already holds the chain and the
+   * sync point, so the tombstone is nothing new to it: only a local file the engine has
+   * never tracked is the user's own and gets a fresh identity on a bind
+   * (`DecideInput.locallyTracked`).
+   *
+   * Reading every restart as "a vault I have never seen" revived the file instead: the
+   * bind pass dropped the tracked chain, the surviving copy became an untracked file,
+   * and it went back to the server as a new chain — so a note deleted on device A came
+   * back on every device when B resumed. That is the pause → peer deletes → resume
+   * report, and a plain Obsidian restart reaches the same bind.
+   */
+  it("applies a peer's deletion on a later bind instead of reviving the file", async () => {
+    let persisted = "{}";
+    const { engine, adapter, api, key } = await makeEngine((json) => {
+      persisted = json;
+    });
+    adapter.files.set("gone.md", encoder.encode("still here"));
+    await engine.initialSync({ firstBind: true });
+    const originalFileId = api.pushed.find((p) => p.action === "create")!.fileId;
+
+    // The peer deletes the note while this device is not running (paused, or closed).
+    await api.remoteDelete(originalFileId);
+
+    // The next start — a pause followed by a resume, or Obsidian reopening — binds again
+    // from the state the previous run persisted.
+    const resumed = new SyncEngine({
+      platform: realPlatform,
+      vaultId: "vault-1",
+      adapter,
+      api,
+      encryptionKey: key,
+    });
+    resumed.loadState(persisted);
+    await resumed.initialSync({ firstBind: true });
+
+    expect(adapter.files.has("gone.md")).toBe(false);
+    expect(api.chains.get(originalFileId)!.map((v) => v.action)).toEqual(["create", "delete"]);
+    expect([...api.chains.keys()]).toEqual([originalFileId]);
+  });
+
+  /**
+   * A peer that recreates a note at a path this device deleted owns that path from then
+   * on. The old chain's tombstone is this device's own sync point, and its state entry
+   * outlives the deletion — that is what makes "delete a note, then write it again" a
+   * recreate — but a local file at the path is **not** a recreate once another chain
+   * claims it.
+   *
+   * Without that, the next pass read the peer's new note as the file under this device's
+   * delete point and pushed a `restore` on the dead chain: two live chains at one path,
+   * and the note the user deleted back on top of the peer's new one. The state entry is
+   * what the bind pass now keeps across a restart, so the pass itself has to retire it
+   * when the path changes hands.
+   */
+  it("does not revive its deleted chain over a peer's new file at the same path", async () => {
+    const { engine, adapter, api, key } = await makeEngine();
+    adapter.files.set("n.md", encoder.encode("mine"));
+    await engine.initialSync();
+    const deletedId = await syncedFileId(api);
+
+    // This device deletes the note, so its own tombstone is the sync point.
+    adapter.files.delete("n.md");
+    await engine.handleLocalDelete("n.md");
+    expect(engine.fileIdForPath("n.md")).toBe(deletedId);
+
+    // A peer creates a new note at the same path — a second chain on the server.
+    const peerAdapter = new FakeAdapter();
+    peerAdapter.files.set("n.md", encoder.encode("theirs"));
+    const peer = new SyncEngine({
+      platform: realPlatform,
+      vaultId: "vault-1",
+      adapter: peerAdapter,
+      api,
+      encryptionKey: key,
+    });
+    await peer.initialSync();
+    const newId = peer.fileIdForPath("n.md")!;
+    expect(newId).not.toBe(deletedId);
+
+    // Its notification arrives here and the pull takes the path.
+    await engine.handleFilePushed(newId, (await api.latestVersionId(newId))!);
+    expect(new TextDecoder().decode(adapter.files.get("n.md"))).toBe("theirs");
+    expect(engine.fileIdForPath("n.md")).toBe(newId);
+
+    // The next pass must leave the peer's note alone: no `restore` on the dead chain.
+    await engine.initialSync();
+    expect(new TextDecoder().decode(adapter.files.get("n.md"))).toBe("theirs");
+    expect(engine.fileIdForPath("n.md")).toBe(newId);
+    expect(api.chains.get(deletedId)!.map((v) => v.action)).toEqual(["create", "delete"]);
+  });
+
+  /**
+   * The same ownership rule when the competitor is known **only from the pass index**.
+   *
+   * A peer's new chain can be in the server index without a notification ever having
+   * pulled it here (this device was stopped, or the socket was down), so `pathToFileId`
+   * still names the tombstone. The pass has the live chain in its index, and that is
+   * enough: retiring the tombstone there is what keeps the recreated local note from
+   * being pushed as a `restore` beside the peer's chain.
+   */
+  it("does not restore over a peer's chain the pass only learns from the index", async () => {
+    const { engine, adapter, api, key } = await makeEngine();
+    adapter.files.set("n.md", encoder.encode("mine"));
+    await engine.initialSync();
+    const deletedId = await syncedFileId(api);
+
+    // This device deletes the note: its own tombstone is the sync point.
+    adapter.files.delete("n.md");
+    await engine.handleLocalDelete("n.md");
+
+    // A peer creates a new note at the same path; this device hears nothing about it.
+    const peerAdapter = new FakeAdapter();
+    peerAdapter.files.set("n.md", encoder.encode("theirs"));
+    const peer = new SyncEngine({
+      platform: realPlatform,
+      vaultId: "vault-1",
+      adapter: peerAdapter,
+      api,
+      encryptionKey: key,
+    });
+    await peer.initialSync();
+    const peerId = peer.fileIdForPath("n.md")!;
+
+    // The host was stopped; the user writes a new note at the path; the next start's
+    // bind sees the peer's chain only in the index it just fetched.
+    adapter.files.set("n.md", encoder.encode("mine again"));
+    await engine.initialSync({ firstBind: true });
+
+    // One live chain, the peer's: the recreated copy is parked, and the dead chain keeps
+    // its tombstone instead of gaining a `restore`.
+    const live = [...api.chains.entries()].filter(
+      ([, chain]) => chain[chain.length - 1]!.action !== "delete",
+    );
+    expect(live.map(([fileId]) => fileId)).toEqual([peerId]);
+    expect(api.chains.get(deletedId)!.map((v) => v.action)).toEqual(["create", "delete"]);
+    expect(new TextDecoder().decode(adapter.files.get("n.md"))).toBe("theirs");
+    expect(engine.fileIdForPath("n.md")).toBe(peerId);
+    expect(new TextDecoder().decode(adapter.files.get(conflictFilePath("n.md")))).toBe(
+      "mine again",
+    );
+  });
+
+  /**
+   * A peer-deleted chain whose local file is already gone leaves nothing to apply, so
+   * the entry has to be retired rather than kept as "synced".
+   *
+   * The file was removed while nothing was watching and the peer deleted it too; the
+   * bind then meets a `delete` head with no local file and answers `synced`. Keeping the
+   * pre-delete sync point leaves the state naming a path with no file, and the next note
+   * the user writes at that freed path is decided against the dead chain — deleted and
+   * parked as a conflict instead of becoming a new chain.
+   */
+  it("retires a peer-deleted chain whose local file was already gone", async () => {
+    let persisted = "{}";
+    const { engine, adapter, api, key } = await makeEngine((json) => {
+      persisted = json;
+    });
+    adapter.files.set("n.md", encoder.encode("v1"));
+    await engine.initialSync();
+    const deletedId = await syncedFileId(api);
+
+    // The file disappeared while nothing watched, and the peer deleted it as well.
+    adapter.files.delete("n.md");
+    await api.remoteDelete(deletedId);
+
+    // A restart binds from the state that still names the file.
+    const restarted = new SyncEngine({
+      platform: realPlatform,
+      vaultId: "vault-1",
+      adapter,
+      api,
+      encryptionKey: key,
+    });
+    restarted.loadState(persisted);
+    await restarted.initialSync({ firstBind: true });
+
+    // The dead chain is gone from the state: no path, no sync point, nothing to restore.
+    expect(restarted.fileIdForPath("n.md")).toBeNull();
+    expect(JSON.parse(restarted.serializeState())).toEqual({});
+    expect(api.chains.get(deletedId)!.map((v) => v.action)).toEqual(["create", "delete"]);
+
+    // The free path takes a new note as its own chain, not as a conflict with the chain
+    // that used to live there.
+    adapter.files.set("n.md", encoder.encode("a new note"));
+    await restarted.handleLocalChange("n.md");
+    const created = api.pushed.filter((p) => p.action === "create").at(-1)!;
+    expect(created.fileId).not.toBe(deletedId);
+    expect(api.chains.get(created.fileId)!.map((v) => v.action)).toEqual(["create"]);
+    expect(adapter.files.has(conflictFilePath("n.md"))).toBe(false);
+    expect(new TextDecoder().decode(adapter.files.get("n.md"))).toBe("a new note");
+  });
 });
 
 /**

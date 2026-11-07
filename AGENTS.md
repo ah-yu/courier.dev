@@ -179,8 +179,10 @@ protocol or a security hole. Read the linked section before changing one.
    `{stem}-{YYYY-MM-DD-HHmmss}[-n].conflict{ext}` and conflict copies never
    sync. See [sync-engine.md](docs/sync-engine.md#conflicts) and
    [sync-scope.md](docs/sync-scope.md#conflict-copies).
-3. **A `delete` head is read two ways.** The first bind merges (local-only files become new
-   chains); every other pass applies the remote deletion. A file under this device's own delete
+3. **A `delete` head is read two ways.** A bind revives only a file this device has **never
+   tracked** (it becomes a new chain); a file the state already tracks follows the apply rule on
+   every pass, bind included, so a peer's deletion made while this device was paused or closed
+   lands instead of the surviving copy being pushed back. A file under this device's own delete
    point is a recreate, pushed as `restore`; applying a deletion drops the chain from the
    identity index. See [sync-engine.md](docs/sync-engine.md#tombstones-and-binding).
 4. **Every push names its base.** `baseVersionId`; the server checks and inserts atomically, so

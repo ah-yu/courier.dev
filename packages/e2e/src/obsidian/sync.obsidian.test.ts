@@ -912,15 +912,21 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
       60_000,
     );
 
-    // 2. "Obsidian was closed and reopened": park A's host, write a new note at the
-    //    old path, then bring the host back. The bind pass gives that note its own
-    //    file, so the path now holds a different file than the one in the bin.
-    await pausePluginHost(names.a);
-    await vaultA.write(path, "new content");
-    await configurePluginHost(
-      names.a,
-      { ...setup, deviceName: "obsidian-A" },
-      { resetSyncState: false },
+    // 2. The other vault creates a note at the old path after the deletion. It applied
+    //    A's delete first, so its own note is a different chain — the path now holds a
+    //    different file than the one in the bin.
+    await reconcile(names.b);
+    await waitForVaultState(
+      async () => (await vaultB.read(path)) === null,
+      "vault B never applied the deletion",
+    );
+    await vaultB.write(path, "new content");
+    await reconcile(names.b);
+    // Two chains name this path now: the deleted one in the bin, and the note B made.
+    expect(await filesAtPath(server, remote.id, material.key, path)).toHaveLength(2);
+    await waitForVaultState(
+      async () => (await readVaultFile(names.a, path)) === "new content",
+      "vault A never pulled the note created in B",
     );
     await waitForVaultState(
       async () => (await fileIdForPath(names.a, path)) !== fileId,

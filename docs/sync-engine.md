@@ -140,13 +140,18 @@ The rules below are the ones the e2e suites exist to protect.
 - **A `delete` head is read two ways, and the pass decides which.** `decideFile` takes a
   `TombstoneHandling` mode and a `locallyTracked` flag:
   - **`bind-merge`** — the single pass that binds a vault (`initialSync({ firstBind: true })`, sent by
-    `EngineHost.start()`, the CLI's one-shot run, a caller-requested rebind, and a local event that
-    arrives before the first pass has completed). The server has no live version of that file, so a local copy is "only local": it is
-    pushed as a **new file with a new fileId**, and the tombstone is left out of the comparison entirely
-    (its state entry is dropped). This is what stops "connect this vault" from deleting notes the remote
-    had already deleted.
-  - **`apply-remote-delete`** — everything else (scheduled reconciles, user edits after the first pass has completed, and websocket notifications). The
-    local copy is the version the tombstone removed, so the deletion **is applied**
+    `EngineHost.start()` — so every process start, including a resume after a pause — the CLI's
+    one-shot run, and a local event that arrives before the first pass has completed). The server has
+    no live version of that file, so a local copy the engine has **never tracked** is "only local":
+    it is pushed as a **new file with a new fileId**. This is what stops "connect this vault" from
+    deleting notes the remote had already deleted. A local copy whose chain this device still tracks
+    is not "only local" — the tombstone is not new to it — so the decision falls through to the
+    `apply-remote-delete` rule below: the deletion is applied, or a local copy that diverged from the
+    version it removed is parked as a conflict. Dropping the tracked chain here made every start
+    revive a note a peer had deleted while this device was paused or closed.
+  - **`apply-remote-delete`** — every other pass (scheduled reconciles, user edits after the first
+    pass has completed, websocket notifications, and a bind that meets a chain this device already
+    tracks). The local copy is the version the tombstone removed, so the deletion **is applied**
     and peers' deletions keep propagating; if the local content diverged from that previous version the
     two are out of step and the engine resolves a **conflict** — the remote deletion stands and the local
     content is parked (see the rule above).
@@ -159,6 +164,22 @@ The rules below are the ones the e2e suites exist to protect.
     and the deletion would never surface. A file that converges on content it already had
     is still **recorded** (state + path → fileId) so the host can look up its identity — otherwise a
     converged note had no version history to open.
+  - **A tracked tombstone whose path another chain has taken is retired.** The state entry
+    that makes a recreate a `restore` is kept across binds, so **ownership** decides which
+    chain a local file at the path belongs to: once another chain claims it — a peer
+    recreated the note, or this device did and the event gave it its own chain — the pass
+    drops the tombstone's state entry instead of pushing a `restore` over the occupant.
+    Without that, a scheduled pass read the new note as the file under this device's delete
+    point and put the deleted note back on top of it, leaving two live chains at one path.
+    Covered by the `does not revive its deleted chain over a peer's new file at the same path`
+    case in `engine.test.ts`.
+  - **A tracked chain whose head is a `delete` and whose file is gone is retired too**, unless its
+    sync point is the tombstone itself (the recreate case, which keeps the entry). The deletion has
+    already happened on this device — the file was removed while nothing watched, or the peer deleted
+    it before it was ever materialised — so keeping the pre-delete sync point would leave the state
+    naming a path with no file, and the next note written at the freed path would be decided against
+    the dead chain (deleted and parked) instead of becoming a new chain. Covered by the
+    `retires a peer-deleted chain whose local file was already gone` case in `engine.test.ts`.
   - **Applying a deletion drops the chain from the identity index** (`RemoteIndex.forget`). A chain whose
     head is a `delete` lives at no path, and the index's previous **live** head is not an identity a file
     at that path can adopt: leaving it there made the file adopt a chain whose content it does not have,
@@ -613,9 +634,12 @@ file now lives at.
     "finished" signal rather than a fixed job's completion. `SyncHost.binding` says whether that pass is
     still the bind, which is what lets a host show "first sync" instead of "not synced" — the two
     were indistinguishable, and the second one reads as a fault.
-  - **`binding` is not "first time": every `start()` runs a bind pass.** The pass exists because the
-    first one of a process must _merge_ rather than apply remote deletions, so a months-old vault still
-    runs one on every app start (it is cheap: stamps and one index read). `SyncHost.firstSync` is the
+  - **`binding` is not "first time": every `start()` runs a bind pass.** The pass exists because a
+    local file this device has **never tracked** must _merge_ rather than be deleted by the connection's
+    view of the remote, so a months-old vault still runs one on every app start (it is cheap: stamps
+    and one index read). A file the state already tracks is decided from its sync point like any other
+    chain, so a peer's deletion made while the device was paused or closed is applied on the next
+    start instead of the surviving copy being pushed back as a new file. `SyncHost.firstSync` is the
     narrower fact a status surface needs: `binding` **and** no bind has ever completed for this vault on
     this device. That completion is **persisted beside the per-file state** — the state store's optional
     `loadBindCompleted`/`saveBindCompleted` pair, which the plugin keeps as `syncState.bindCompleted`
@@ -629,8 +653,8 @@ file now lives at.
 ## Restore
 
 - **A restore never writes over a file that is not its own.** Bringing a deleted file back means writing
-  at the path it used to live at, and that path can have been taken since (a note created there after a
-  reopen, when the bind pass gives it its own chain — or a note the engine has not indexed yet).
+  at the path it used to live at, and that path can have been taken since (a note another device created
+  there while the file was deleted, or a note the engine has not indexed yet).
   `SyncEngine.inspectRestoreTarget` resolves the target first (`free` / `same-chain` / `other-file` /
   `unattributed`), `restoreFile` refuses anything but a free or same-chain path with a
   `RestoreBlockedError`, and `options.targetPath` brings the content back **under another name** instead

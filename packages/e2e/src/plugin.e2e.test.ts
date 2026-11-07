@@ -2944,15 +2944,17 @@ describe("plugin e2e — the real plugin against a real server", () => {
         "the delete never reached the recycle bin",
       );
 
-      // 2. Reopen the vault's host and then write a new note at the old path. A
-      //    bind leaves the tombstone out of the comparison, so the new note is its
-      //    own file — the state where a restore used to overwrite it and leave two
-      //    chains claiming one path.
-      plugin.host!.stop();
-      plugin.host = null;
-      await vault.create("hero.md", "new content");
-      await vault.settle();
-      await plugin.startHost();
+      // 2. Another device creates a note at the old path afterwards, so the path is
+      //    occupied by a **different** chain. The recycle bin's row keeps the old path,
+      //    and a restore must not overwrite the note that lives there now.
+      const peer = await newPeer(remote.id);
+      await peer.sync();
+      peer.write("hero.md", "new content");
+      await peer.sync();
+      await waitFor(
+        () => vault.read("hero.md") === "new content",
+        "the peer's note at the deleted path never arrived",
+      );
       const occupantFileId = await trackedFileId(plugin, "hero.md");
       expect(occupantFileId).not.toBe(oldFileId);
 
@@ -7164,6 +7166,50 @@ describe("plugin e2e — the real plugin against a real server", () => {
         async () => vault.read("peer-while-paused.md") === "written by the peer",
         "the peer's file never arrived after resuming",
       );
+    });
+
+    /**
+     * The delete half of the same pause: a note this device already tracks, deleted
+     * on a peer while this device is paused. Resume is a bind pass, but the tombstone
+     * is not new to this device — the surviving local copy is the version the deletion
+     * removed, so the deletion must be applied. Reading every bind as a first connect
+     * revived the note as a new chain, and the note the user deleted on device A came
+     * back on every device when B resumed.
+     */
+    it("applies a peer's deletion made while paused, instead of reviving the note", async () => {
+      const { plugin, vault, remote } = await startHostedPlugin("Paused Delete", async (v) => {
+        await v.create("gone.md", "deleted while paused");
+      });
+      const fileId = await trackedFileId(plugin, "gone.md");
+
+      await plugin.pauseSync();
+      expect(plugin.host).toBeNull();
+      expect(vault.read("gone.md")).toBe("deleted while paused");
+
+      // The peer deletes the note while this device is paused.
+      const peer = await newPeer(remote.id);
+      await peer.sync();
+      peer.remove("gone.md");
+      await peer.removeAndSync("gone.md");
+      await waitForAsync(
+        async () => (await deletedFiles(server, remote.id)).some((file) => file.fileId === fileId),
+        "the peer's delete never reached the recycle bin",
+      );
+
+      // Resume: the peer's deletion is applied, not undone by pushing the copy back.
+      await plugin.resumeSync();
+      await waitFor(
+        () => vault.read("gone.md") === null,
+        "the resumed host never applied the peer's deletion",
+      );
+
+      expect(plugin.engine!.fileIdForPath("gone.md")).toBeNull();
+      expect(vault.paths().filter((path) => isConflictFile(path))).toEqual([]);
+      // Still one chain, still deleted: nothing came back on the deleting device.
+      expect((await deletedFiles(server, remote.id)).map((file) => file.fileId)).toContain(fileId);
+      expect(await filesAtPath(server, remote.id, material.key, "gone.md")).toEqual([fileId]);
+      await peer.sync();
+      expect(peer.read("gone.md")).toBeNull();
     });
 
     it("reopens paused without asking for a password, and resumes from the row", async () => {
