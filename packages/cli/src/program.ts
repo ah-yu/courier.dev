@@ -227,6 +227,11 @@ export function watchSupervisor(
     onClose();
   };
   stdin.resume();
+  // The resumed pipe is a live handle of its own. Unreferenced, it still reports EOF, but
+  // it no longer keeps the process alive by itself: a daemon whose run loop ends on its own
+  // (a revoked key, a deleted vault, a fatal error) has nothing else pending, and must exit
+  // there instead of lingering with a stale runtime record.
+  (stdin as { unref?: () => void }).unref?.();
   stdin.on("end", closeOnce);
   stdin.on("close", closeOnce);
 }

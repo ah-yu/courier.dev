@@ -19,7 +19,7 @@ import {
 import { setUserMaxFileBytes, startTestServer, type TestServer } from "./harness/server";
 import { vaultSettings } from "./harness/api";
 import { createTestVault, makeVaultMaterial } from "./harness/vault";
-import { runtimePath } from "../../cli/src/runtime";
+import { daemonStatus, runtimePath } from "../../cli/src/runtime";
 
 /**
  * The command surface a supervising process drives.
@@ -646,5 +646,32 @@ describe("cli commands e2e — the contract a supervising process reads", () => 
     } finally {
       if (daemon.child.exitCode === null) daemon.child.kill("SIGKILL");
     }
+  }, 120_000);
+
+  // Watching the pipe must not be the only thing keeping the daemon alive: when the run
+  // loop ends on its own — here the vault is deleted server-side — the process has to exit
+  // and clear its record, or the supervisor sees a live pid that is not syncing at all.
+  it("exits a supervised daemon whose sync path ends on its own", async () => {
+    resetConfig();
+    const vault = await bindVault("supervised-fatal");
+    const daemon = spawnDaemon(["run", "--vault", vault.id, "--interval", "0"], {
+      COURIER_DAEMON_SUPERVISED: "1",
+    });
+    try {
+      await daemon.waitForOutput(vault.id);
+      const response = await fetch(`${server.serverUrl}/api/vaults/${vault.id}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${server.userKey}` },
+      });
+      expect(response.ok).toBe(true);
+      // No input, no signal: the deletion is the only event, and the process still exits.
+      await expect(daemon.exited).resolves.toBe(0);
+    } finally {
+      if (daemon.child.exitCode === null) daemon.child.kill("SIGKILL");
+    }
+    // The record it left behind is advisory ("this is why sync stopped"): the pid is gone,
+    // so a reader reports not running and drops it, instead of showing a live pid forever.
+    expect(daemonStatus(vault.id).running).toBe(false);
+    expect(existsSync(runtimePath(vault.id))).toBe(false);
   }, 120_000);
 });
