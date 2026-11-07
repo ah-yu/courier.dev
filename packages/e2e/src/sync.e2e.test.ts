@@ -767,7 +767,7 @@ describe("sync e2e — two clients through a real server", () => {
     });
   });
 
-  it("binds with the merge rule when an event arrives before the first sync", async () => {
+  it("applies the remote tombstone when an event arrives before the first pass", async () => {
     const vault = await newVault("bind-merge-event");
     const a = await newClient(vault.id, "device-a");
     a.write("gone.md", "mine");
@@ -783,8 +783,10 @@ describe("sync e2e — two clients through a real server", () => {
     await peer.removeAndSync("gone.md");
 
     // A restarted client keeps the state that names the note; the server's head is a
-    // tombstone and the file is on disk. An event that arrives before the first sync
-    // must bind (merge: the local copy is the user's own), not apply the deletion.
+    // tombstone and the file is on disk. The state already holds the chain and the sync
+    // point, so the tombstone is not new to this device: the local copy is the version
+    // the deletion removed, and the event that arrives before the first pass has to
+    // apply the deletion rather than revive the note.
     const restarted = await newClient(vault.id, "device-a", a.dir);
     const state = a.state.json;
     expect(state, "the first client never persisted a state").toBeTruthy();
@@ -794,10 +796,16 @@ describe("sync e2e — two clients through a real server", () => {
     await restarted.engine.handleLocalChange("gone.md");
     await restarted.engine.whenIdle();
 
-    expect(restarted.read("gone.md")).toBe("mine");
-    const newId = restarted.engine.fileIdForPath("gone.md")!;
-    expect(newId).not.toBe(fileId);
-    expect((await fileVersions(server, vault.id, newId)).map((v) => v.action)).toEqual(["create"]);
+    expect(restarted.read("gone.md")).toBeNull();
+    expect(restarted.engine.fileIdForPath("gone.md")).toBeNull();
+    // The local copy diverged from the version the peer's deletion removed ("theirs"),
+    // so the remote deletion wins and the local bytes are parked, as for any conflict.
+    expect(await restarted.parkedContentOf("gone.md")).toBe("mine");
+    expect((await fileVersions(server, vault.id, fileId)).map((v) => v.action)).toEqual([
+      "create",
+      "modify",
+      "delete",
+    ]);
   });
   it("applies the remote tombstone on a plain pass (the contrast to a bind)", async () => {
     const vault = await newVault("plain-pass-tombstone");

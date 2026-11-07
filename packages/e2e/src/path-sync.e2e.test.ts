@@ -475,7 +475,7 @@ describe("sync e2e — path shapes across two clients", () => {
       expect(a.engine.fileIdForPath("phoenix.md")).toBe(rebornFileId);
     });
 
-    it("5b. remote tombstone + local file when the peer comes back — new file again", async () => {
+    it("5b. remote tombstone + local file on a later bind over tracked state — deletion applied", async () => {
       const vault = await newVault("matrix-tombstone-rebind");
       const a = await newClient(vault.id, "device-a");
       const b = await newClient(vault.id, "device-b");
@@ -489,25 +489,29 @@ describe("sync e2e — path shapes across two clients", () => {
       a.remove("phoenix.md");
       await a.removeAndSync("phoenix.md");
 
-      // B goes through a bind (Obsidian reopened, or reconnect) with its copy
-      // still on disk: the local file is the user's, so it comes back as a new
-      // file instead of being deleted by the bind.
+      // B goes through a bind (Obsidian reopened, or a pause followed by resume) with
+      // its copy still on disk. B already tracks that chain, so the tombstone is not
+      // new to it: the local file is the version the deletion removed, and the bind
+      // has to apply the deletion. Treating every bind as a first connect revived the
+      // note as a new chain — a note deleted on A came back on every device when B
+      // resumed.
       await b.bind();
 
       expect(await b.conflictFiles()).toEqual([]);
-      const rebornFileId = b.engine.fileIdForPath("phoenix.md")!;
-      expect(rebornFileId).not.toBe(deletedFileId);
-      expect((await fileVersions(server, vault.id, rebornFileId)).map((v) => v.action)).toEqual([
+      expect(b.read("phoenix.md")).toBeNull();
+      expect(b.engine.fileIdForPath("phoenix.md")).toBeNull();
+      expect((await fileVersions(server, vault.id, deletedFileId)).map((v) => v.action)).toEqual([
         "create",
+        "delete",
       ]);
-      expect(b.read("phoenix.md")).toBe("first life");
-      expect((await deletedFiles(server, vault.id)).map((f) => f.fileId)).toContain(deletedFileId);
+      // One chain: the deletion stands on the server too.
+      expect(await vaultHistory(server, vault.id)).toHaveLength(1);
 
-      // And a **scheduled** pass (no bind) leaves it alone — the rebind is a
-      // one-off, not something that repeats on every reconcile.
+      // A later scheduled pass leaves the deletion alone rather than pulling the old
+      // bytes back or filing a second tombstone.
       await b.sync();
-      expect(b.read("phoenix.md")).toBe("first life");
-      expect(b.engine.fileIdForPath("phoenix.md")).toBe(rebornFileId);
+      expect(b.read("phoenix.md")).toBeNull();
+      expect(await vaultHistory(server, vault.id)).toHaveLength(1);
     });
 
     it("5c. remote tombstone + local file on a non-binding pass — deletion applied", async () => {

@@ -1575,9 +1575,11 @@ export class SyncEngine {
    * Full reconcile.
    *
    * `options.firstBind` marks the pass that **binds** this vault: a connect, or a
-   * host starting up. On that one pass a local file the server has no live version
-   * of is the user's own, so it is pushed as a new file instead of being deleted
-   * by the connection (and the tombstone is left out of the comparison entirely).
+   * host starting up (including a resume after a pause). On that pass a local file
+   * the server has no live version of **and this engine has never tracked** is the
+   * user's own, so it is pushed as a new file instead of being deleted by the
+   * connection. A chain this device does track is compared against its sync point
+   * as usual: the deletion is applied, or a divergent local copy is parked.
    *
    * Every other pass — scheduled reconciles, and a plain `initialSync()` — applies
    * what other devices did, deletions included. See `TombstoneHandling`.
@@ -1601,9 +1603,9 @@ export class SyncEngine {
       if (options.firstBind !== true) return await this.passPromise;
       await this.passPromise;
     }
-    // A bind merges wherever the caller asks for one: a reconnect or a rebind is a merge
-    // too (see `5b. remote tombstone + local file when the peer comes back` — the local
-    // copy comes back as a new file). Only the pass itself is single-flight here.
+    // A bind runs wherever the caller asks for one (every host start, a reconnect, a
+    // local event before the first pass), but the merge it performs only revives files
+    // this engine has never tracked. Only the pass itself is single-flight here.
     const run = this.runInitialSync({
       ...options,
       firstBind: options.firstBind === true,
@@ -1770,8 +1772,8 @@ export class SyncEngine {
 
     // Chains whose last version is a `delete` hold no live file — the fileId is
     // only a tombstone. Mapping their path would claim the local file for a chain
-    // that no longer exists, which is wrong in both modes: a bind pushes it as a
-    // new file, a running client applies the deletion.
+    // that no longer exists, which is wrong in both modes: a bind pushes an untracked
+    // file as a new one, and a device that tracks the chain applies the deletion.
     const liveFileIds = new Set(
       index.files.filter((entry) => entry.head.action !== "delete").map((entry) => entry.fileId),
     );
@@ -1816,25 +1818,6 @@ export class SyncEngine {
       } catch {
         // Undecryptable path — skip (wrong key or legacy row).
       }
-    }
-
-    // On the bind pass, a chain the server deleted is not a history point to merge
-    // against at all: the tombstone is dropped from the comparison, so a local file
-    // still occupying its path is "untracked" and the new-file branch below gives it
-    // a fresh fileId. (Its own state entry is dropped with it, or the retired
-    // fileId would still be iterated over from the snapshot below.)
-    if (this.firstBind) {
-      let retired = false;
-      for (const fileId of Object.keys(this.state)) {
-        // Only chains the server knows and that end in a delete — a fileId we hold
-        // with no server chain at all is a local file still waiting to be pushed.
-        if (liveFileIds.has(fileId) || !chainByFileId.has(fileId)) continue;
-        const { plainPath } = this.state[fileId];
-        delete this.state[fileId];
-        this.pathToFileId.delete(plainPath);
-        retired = true;
-      }
-      if (retired) this.persist();
     }
 
     // Local hashes for the files this pass can decide about. One `stat` per visible path
@@ -1891,15 +1874,14 @@ export class SyncEngine {
       await this.repairMovedFile(fileId, entry, localHashes, liveFileIds, this.remoteIndex);
     }
 
-    // Every fileId we know about (so a tombstone we already synced stays synced),
-    // plus every live chain the server knows. A tombstone is skipped on the bind
-    // pass, because merging against it is exactly what that pass does not do.
-    const allFileIds = new Set<string>([
-      ...Object.keys(this.state).filter(
-        (fileId) => !(this.firstBind && chainByFileId.has(fileId) && !liveFileIds.has(fileId)),
-      ),
-      ...this.remoteIndex.fileIds(),
-    ]);
+    // Every fileId we know about, plus every live chain the server knows. A tracked
+    // tombstone is decided like any other chain: `decideFile` reads `locallyTracked`,
+    // applies the deletion (or parks a divergent local copy), and only a local file the
+    // engine has never tracked is the user's own on a bind. Retiring those entries on
+    // the bind pass instead made every start a "vault I have never seen" — a pause
+    // followed by a resume, or Obsidian reopening after a peer deleted a note, pushed the
+    // surviving local copy back as a new chain and every device downloaded it again.
+    const allFileIds = new Set<string>([...Object.keys(this.state), ...this.remoteIndex.fileIds()]);
 
     const failure = await this.reconcileLoop({
       fileIds: allFileIds,
@@ -2176,6 +2158,32 @@ export class SyncEngine {
     // and this local-only move is remembered by the state rather than by the log.
     if (plainPath && !this.isSyncable(plainPath)) return null;
 
+    // A tombstone this device itself pushed is its sync point for a deleted file, and
+    // the entry is kept so a new local file at that path is a recreate (see `decideFile`).
+    // Ownership settles that question: the path belongs to another chain once this device
+    // maps it there (a pull adopted it) **or** the pass's server index records a live chain
+    // there (a peer's new note this device has not pulled yet — a tombstone itself is never
+    // in that index). Retiring the entry stops the pass from reading the new note as the
+    // file under this device's delete point; a `restore` pushed from it would put the
+    // deleted note back on top of the peer's and leave two live chains naming one path.
+    if (
+      head?.action === "delete" &&
+      entry !== undefined &&
+      entry.lastKnownVersionId === head.versionId &&
+      plainPath !== null
+    ) {
+      const localOwner = this.pathToFileId.get(plainPath) ?? null;
+      const remoteOwner = pass.remote.fileIdAt(plainPath);
+      if (
+        (localOwner !== null && localOwner !== fileId) ||
+        (remoteOwner !== null && remoteOwner !== fileId)
+      ) {
+        delete this.state[fileId];
+        if (localOwner === fileId) this.pathToFileId.delete(plainPath);
+        return null;
+      }
+    }
+
     // A path this pass could not hash is left alone — except when the reason is the
     // **upload** cap, which must not stop this device from receiving a peer's newer
     // version. An unstatable path is left entirely as it is: an index that lags the disk
@@ -2231,6 +2239,24 @@ export class SyncEngine {
 
     switch (decision.action) {
       case "synced": {
+        // A `delete` head with no local file means the deletion has already happened
+        // here: the file was removed while nothing was watching, or the peer deleted it
+        // before this device ever materialised it. The entry's sync point is then a
+        // version of a file that is not on disk, and neither the chain nor the path is
+        // this device's any more. Retiring it keeps the state honest (an entry naming a
+        // path with no file) and lets the next note at the freed path become a `create`
+        // instead of being decided against a chain this device no longer has. The one
+        // exception is the recreate case: a sync point that IS the tombstone keeps its
+        // entry, so a file the user writes there is pushed as a `restore`.
+        if (head?.action === "delete" && entry !== undefined && !localExists) {
+          if (entry.lastKnownVersionId !== head.versionId) {
+            delete this.state[fileId];
+            if (plainPath !== null && this.pathToFileId.get(plainPath) === fileId) {
+              this.pathToFileId.delete(plainPath);
+            }
+          }
+          break;
+        }
         // Nothing to transfer, but the identity still has to be recorded. That covers
         // two shapes: a file that converges on the content it already had (the common
         // case when binding a vault whose remote holds the same note), and a sync point

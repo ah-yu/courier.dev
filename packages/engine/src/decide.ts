@@ -15,9 +15,10 @@ export type FileDecision =
 /**
  * How to treat a *local* file whose remote chain ends in a `delete`.
  *
- * - `"bind-merge"` — first bind or reconnect of a vault (a connect, or Obsidian
- *   reopening with no state). The file exists locally and the server has no live
- *   version of it, so it is the user's own file: push it as a NEW file.
+ * - `"bind-merge"` — the first pass of a host start (a connect, Obsidian reopening, or a
+ *   resume after a pause). A local file this engine has never tracked is the user's own,
+ *   so it is pushed as a NEW file. A file it *does* track already merged that tombstone
+ *   (see {@link DecideInput.locallyTracked}), and the deletion applies.
  * - `"apply-remote-delete"` — a running client. The server says the file is gone,
  *   so the local copy is removed unless it was changed since the tombstone's
  *   previous version, in which case the two are out of step and conflict.
@@ -39,8 +40,9 @@ export interface DecideInput {
    * Whether this engine already holds a state entry for the file (a persisted
    * history point). A `bind-merge` only revives a file the engine has **never**
    * tracked: an entry means this device already merged that tombstone, and
-   * treating it as new again on every reconnect would push a fresh chain each
-   * time. On a running client the flag decides nothing.
+   * treating it as new again on every start would push a fresh chain each time —
+   * which is how a note a peer deleted while this device was paused came back.
+   * On a running client the flag decides nothing.
    */
   locallyTracked: boolean;
   /**
