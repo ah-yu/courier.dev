@@ -48,6 +48,14 @@ export interface StatusBarHost {
   pauseSync(): Promise<void>;
   resumeSync(): Promise<void>;
   /**
+   * Whether a takeover here would displace another writer.
+   *
+   * `waiting` is not the whole answer: a host this window replaced can still be draining,
+   * and its record names this same process. The row is offered only when the answer is a
+   * real other writer, so the confirmation never describes this window as another one.
+   */
+  canTakeOver(): Promise<boolean>;
+  /**
    * Take the vault from the writer holding it and sync here now.
    *
    * Offered only in the `waiting` state, which is the only state where another writer
@@ -220,8 +228,8 @@ export function createStatusBar(host: StatusBarHost): StatusBarHandle {
 
       // The only way out of the wait: the other writer cannot be ended from here, and a
       // vault the user wants to edit must not stay locked behind a process they cannot
-      // find. This row exists exactly and only while that is the situation.
-      if (status === "waiting") {
+      // find. `canTakeOver` keeps this off a wait that is really this window's own drain.
+      if (status === "waiting" && (await host.canTakeOver())) {
         menu.addItem((item) =>
           item
             .setTitle(t("status.menu.takeOver"))

@@ -389,6 +389,7 @@ export default class CourierPlugin extends Plugin {
       readAccount: () => this.readAccountForStatusMenu(),
       pauseSync: () => this.pauseSync(),
       resumeSync: () => this.resumeSync(),
+      canTakeOver: () => this.host?.canTakeOver() ?? Promise.resolve(false),
       takeOverSync: () => void this.takeOverSync(),
       openSettings: () => this.openSettingsTab(),
     });
@@ -986,7 +987,7 @@ export default class CourierPlugin extends Plugin {
    */
   async takeOverSync(): Promise<void> {
     const host = this.host;
-    if (!host?.leaseWaiting) {
+    if (!host?.leaseWaiting || !(await host.canTakeOver())) {
       showNotice(t("notice.takeOverNotWaiting"));
       return;
     }

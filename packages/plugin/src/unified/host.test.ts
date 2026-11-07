@@ -9,6 +9,7 @@ import {
 import { DEFAULT_SETTINGS, type CourierSettings } from "../shared/settings";
 import {
   importRawKey,
+  readSyncLease,
   SyncEngine,
   SyncLease,
   NO_FILE_TYPES,
@@ -483,16 +484,72 @@ describe("EngineHost", () => {
       await host.start();
       expect(host.leaseWaiting).toBe(true);
 
-      // Deliberately not awaited: `stop()` runs while the takeover is between its awaited
-      // filesystem calls.
+      // The stop lands **after** the record was taken, which is the window the release is
+      // for: a takeover that succeeded and was then overtaken by a stop must hand the
+      // record back, not hold a vault this window no longer syncs.
+      const takeOver = lease.takeOver.bind(lease);
+      vi.spyOn(lease, "takeOver").mockImplementation(async () => {
+        const taken = await takeOver();
+        host.stop();
+        return taken;
+      });
+
+      expect(await host.takeOverLease()).toBe(false);
+      expect(host.engine).toBeNull();
+      // Released, not left behind: another lease over the same store can take it at once.
+      const next = new SyncLease({ store, owner: "plugin", token: "next-token", process });
+      expect(await next.acquire()).toBe(true);
+    });
+
+    it("takes nothing when a stop lands before the takeover reads the holder", async () => {
+      const now = Date.now();
+      const store = takeoverStore(now);
+      const lease = new SyncLease({ store, owner: "plugin", token: "plugin-token", process });
+      const settings = baseSettings({ connectedVaultId: "vault-1" });
+      const { host } = await newHost(settings, undefined, {}, { lease });
+      track(host);
+
+      await host.start();
+      expect(host.leaseWaiting).toBe(true);
+
+      // Synchronous stop immediately after the call: it lands while the holder is being
+      // read, before anything is displaced, so the request is simply abandoned.
       const takeover = host.takeOverLease();
       host.stop();
 
       expect(await takeover).toBe(false);
       expect(host.engine).toBeNull();
-      // Released, not left behind: another lease over the same store can take it at once.
+      // The CLI's record is untouched.
+      expect(await readSyncLease(store)).toMatchObject({ owner: "cli", token: "cli-token" });
+    });
+
+    it("does not offer a takeover of this same process's own record", async () => {
+      const now = Date.now();
+      const store = memoryStore(now).store;
+      // The record a host this window already replaced leaves behind while it drains: this
+      // process's pid, another token. Taking it would put two engines of this plugin on the
+      // vault, which is exactly what the drain exists to prevent.
+      const draining = new SyncLease({
+        store,
+        owner: "plugin",
+        token: "draining-token",
+        now: () => now,
+        process,
+        pid: currentPID(),
+        host: "here",
+      });
+      expect(await draining.acquire()).toBe(true);
+
       const next = new SyncLease({ store, owner: "plugin", token: "next-token", process });
-      expect(await next.acquire()).toBe(true);
+      const settings = baseSettings({ connectedVaultId: "vault-1" });
+      const { host } = await newHost(settings, undefined, {}, { lease: next });
+      track(host);
+
+      await host.start();
+      expect(host.leaseWaiting).toBe(true);
+      expect(await host.canTakeOver()).toBe(false);
+      expect(await host.takeOverLease()).toBe(false);
+      expect(host.engine).toBeNull();
     });
 
     /**

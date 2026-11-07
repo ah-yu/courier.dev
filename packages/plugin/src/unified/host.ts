@@ -353,6 +353,28 @@ export class EngineHost {
   }
 
   /**
+   * Whether taking the vault here would displace somebody **else**.
+   *
+   * The waiting state alone is not enough. A host this window replaced can still be
+   * finishing its last pass, and its record names **this process** (same pid): taking that
+   * one would put two engines of this plugin on the vault — the handoff `whenIdle()` and
+   * the drain keep-alive exist to prevent — while the confirmation described the holder as
+   * another window. Only a holder that is not us can be taken over.
+   */
+  async canTakeOver(): Promise<boolean> {
+    if (!this.opts.lease || !this.waitingForLease || this.host !== null || this.takingOver) {
+      return false;
+    }
+    // This instance is still handing the vault back: its own record is live and its pass
+    // may still be writing.
+    if (this.leaseRelease !== null) return false;
+    const holder = await this.leaseHolder();
+    const self = pluginPlatform.process?.pid;
+    if (holder?.owner === "plugin" && holder.pid > 0 && holder.pid === self) return false;
+    return true;
+  }
+
+  /**
    * Take the vault from whoever holds it and start syncing here now.
    *
    * Only meaningful while this host is waiting for the lease: a running host is not
@@ -364,10 +386,14 @@ export class EngineHost {
    */
   async takeOverLease(): Promise<boolean> {
     const lease = this.opts.lease;
-    // `takeOverLease` is only meaningful for a host that is *waiting* for the vault: a
-    // running host already has it, and a stopped one must not start itself.
-    if (!lease || !this.waitingForLease || this.host !== null || this.takingOver) return false;
+    if (!lease) return false;
+    // Captured before the first await: a stop that lands while the holder is being read
+    // must win, exactly like one that lands during the takeover itself.
     const generationAtStart = this.generation;
+    // `takeOverLease` is only meaningful for a host that is *waiting* for the vault, and
+    // only against a holder that is not this process (see `canTakeOver`).
+    if (!(await this.canTakeOver())) return false;
+    if (generationAtStart !== this.generation) return false;
     this.takingOver = true;
     try {
       const taken = await lease.takeOver().catch(() => false);
