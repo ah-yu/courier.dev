@@ -32,6 +32,7 @@ function fakeClient(): {
     getVaultSyncHistory: vi.fn(async () => ({ files: [] })),
     getVaultSyncIndex: vi.fn(async () => ({ files: [] })),
     getVersionContent: vi.fn(async () => new Uint8Array([1, 2])),
+    getVersionContents: vi.fn(async () => [new Uint8Array([1, 2])]),
     getVersionContentRange: vi.fn(async () => new Uint8Array([1, 2])),
     uploadChunk: vi.fn(async () => ({ received: 1 })),
     getChunkStatus: vi.fn(async () => null),

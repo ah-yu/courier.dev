@@ -595,8 +595,15 @@ file now lives at.
     `bulk-write.e2e.test.ts` (700 creates, 300 edits, 300 deletions and 300 moves against the
     **deployed** 600/minute allowance: every version lands, fewer than 40 requests each way, and the
     receiving host's only index read is its bind).
-  - **What it does not fix:** a **download** is still one content request per file (see the remaining
-    work in [first-bind-performance.md](first-bind-performance.md#remaining-work)).
+  - **A download's content reads travel in batches too.** `fetchRemoteBytes` holds a read for
+    `CONTENT_BATCH_WINDOW_MS` (5 ms) so the four per-file operations a pass or a burst already runs
+    together fetch their versions in one request (`POST …/sync/contents`, see
+    [api.md](api.md#11b-get-several-versions-content-at-once)) instead of one per file. The batch is
+    bounded by 64 hashes / 8 MiB of plaintext (a file big enough to fill it travels alone), and a hash the
+    store does not hold comes back as a missing entry — the same "nothing to apply" a `404` is. A chunked
+    version still reads its ranges one at a time, which is what keeps a 200 MiB pull bounded.
+  - **What it does not fix:** nothing on the event path is left unbatched. A first bind still scans the
+    local vault (one `stat` per file) — the cost that bounds a cold start.
 - **A cold-start pass works in the order the user will notice, and bounds how much is in flight.** The work
   is the same either way; the order and the concurrency are what a phone feels:
   - Every reconcile reads `GET /vaults/:id/sync/index` — **one row per chain** (`head`, plus the last live

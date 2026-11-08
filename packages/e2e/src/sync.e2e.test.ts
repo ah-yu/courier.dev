@@ -147,6 +147,10 @@ describe("sync e2e — two clients through a real server", () => {
     expect(phone.contentFetches.indexOf(openedHash)).toBeLessThan(
       DEFAULT_OP_QUEUE_LIMITS.maxConcurrent,
     );
+    // Nine versions, but not nine requests: the reads of the first wave travel together,
+    // so the download costs one request per wave rather than one per file.
+    expect(phone.contentBatchCalls.length).toBeLessThan(names.length);
+    expect(Math.max(...phone.contentBatchCalls.map((call) => call.length))).toBeGreaterThan(1);
     for (const name of names) expect(phone.read(name)).toBe(`${name} v2`);
   });
 

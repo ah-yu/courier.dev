@@ -109,7 +109,11 @@ read and nothing is pushed.
 
 One request per remote file, so the transfer allowance used to be the ceiling (2 000/min). It is now
 60 000/min — above what the per-file pipeline can use — and a refusal is waited out instead of ending the
-pass.
+pass. The numbers above are the **per-file** pipeline at four concurrent files; since the batch content
+route (`POST …/sync/contents`, [api.md](api.md#11b-get-several-versions-content-at-once)) the four reads
+of a wave travel in one request: a 9-version cold pull measured **3 content requests (4 + 4 + 1) instead
+of 9**, and a large first bind costs about a quarter of the requests it used to. What bounds it now is
+the pool's concurrency, not the route.
 
 ## The three cliffs (before the fixes)
 
@@ -204,10 +208,9 @@ line).
 
 ## Remaining work
 
-- **A download's request count.** One content request per file is inherent to content addressing, and it
-  is now what bounds a first download (2.8 ms/file at four concurrent files, ~141 s for 50 000). A batch
-  content route (N hashes per request) or a higher per-pass concurrency would cut it further; neither is
-  needed to _finish_, which is what used to fail.
+- **The local scan of a first bind.** It is one `stat` per file (0.6 s per 10 000, 8.4 s per 50 000) and it
+  is now what a cold start spends its time on; the download's request count is no longer the ceiling (the
+  content route batches the four reads of a wave, and only the pool's concurrency bounds it).
 - **The same measurement on a real network and on mobile.** Everything here is localhost on a desktop;
   the per-batch RTT and the adapter's IPC cost are what a phone makes of the same numbers.
 - **A peer that is online during the bind.** Not covered by the numbers above, because the harness

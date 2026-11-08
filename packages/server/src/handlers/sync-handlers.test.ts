@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   handleSyncPush as handleSyncPushWithDeps,
   handleSyncPull as handleSyncPullWithChain,
+  handleSyncContents,
   getFileVersionHistory,
   getVaultSyncHistory,
   getVaultSyncIndex,
@@ -23,6 +24,19 @@ import type {
 } from "./sync-handlers";
 import type { SyncPushResponse } from "@courier/shared";
 import { DEFAULT_HISTORY_LIMITS, type HistoryLimits } from "@courier/shared";
+import { PayloadTooLargeError } from "../lib/errors";
+import type { BlobReader } from "../lib/blob-store";
+import { parseContentBatchBody } from "@courier/shared";
+
+/** A blob reader that answers `payload` (or `undefined`) and records its close. */
+function blobReader(
+  payload: Uint8Array | undefined,
+): BlobReader & { close: ReturnType<typeof vi.fn> } {
+  return {
+    readAll: async () => payload,
+    close: vi.fn(async () => {}),
+  } as unknown as BlobReader & { close: ReturnType<typeof vi.fn> };
+}
 import { NotFoundError } from "../lib/errors";
 
 /**
@@ -1495,5 +1509,48 @@ describe("listDeletedFiles", () => {
     const listDeletedChains = vi.fn<ListDeletedChainsFn>().mockResolvedValue([]);
     const result = await listDeletedFiles({ vaultId: "v1" }, listDeletedChains);
     expect(result.files).toHaveLength(0);
+  });
+});
+
+describe("handleSyncContents", () => {
+  it("answers the versions in order, with a missing entry for a hash the store lacks", async () => {
+    const first = new Uint8Array([1, 2, 3]);
+    const second = new Uint8Array([4, 5]);
+    const openBlobReader = vi.fn(async (_vaultId: string, hash: string) => {
+      if (hash === "a".repeat(64)) return blobReader(first);
+      if (hash === "b".repeat(64)) return undefined;
+      return blobReader(second);
+    });
+
+    const body = await handleSyncContents(
+      { vaultId: "v1", hashes: ["a".repeat(64), "b".repeat(64), "c".repeat(64)] },
+      openBlobReader,
+    );
+
+    const parsed = parseContentBatchBody(body, 3);
+    expect(parsed[0]).toEqual(first);
+    expect(parsed[1]).toBeNull();
+    expect(parsed[2]).toEqual(second);
+  });
+
+  it("reads a short file as missing, and closes every handle it opened", async () => {
+    const opened = blobReader(undefined);
+    const body = await handleSyncContents(
+      { vaultId: "v1", hashes: ["a".repeat(64)] },
+      async () => opened,
+    );
+    expect(parseContentBatchBody(body, 1)).toEqual([null]);
+    expect(opened.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses to build an answer over its byte bound, without leaking the handle", async () => {
+    const opened = blobReader(new Uint8Array(64));
+    const run = handleSyncContents(
+      { vaultId: "v1", hashes: ["a".repeat(64)] },
+      async () => opened,
+      32,
+    );
+    await expect(run).rejects.toBeInstanceOf(PayloadTooLargeError);
+    expect(opened.close).toHaveBeenCalledTimes(1);
   });
 });

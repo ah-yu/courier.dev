@@ -1,5 +1,6 @@
 import type { ApiError } from "./errors";
 import type { UserSummary } from "./auth";
+import { parseContentBatchBody } from "./wire";
 import type {
   ClearDeletedResponse,
   FileVersionHistoryResponse,
@@ -207,6 +208,18 @@ export interface CourierClient {
   /** The stored ciphertext of one version: `iv ‖ ciphertext ‖ tag`, exactly as held. */
   getVersionContent(vaultId: string, contentHash: string): Promise<Uint8Array>;
   /**
+   * The ciphertext of several versions in one request (`POST …/sync/contents`).
+   *
+   * `null` for a hash the store does not hold — the same answer a `404` gives for one
+   * version, and just as ordinary (a reclaimed blob, or a chain no peer can fetch). The
+   * batch is bounded by the server (`MAX_CONTENT_BATCH_FILES` / `…_BYTES`); the caller
+   * keeps its batches under that, so a refusal here is a bug, not a normal answer.
+   */
+  getVersionContents(
+    vaultId: string,
+    contentHashes: readonly string[],
+  ): Promise<Array<Uint8Array | null>>;
+  /**
    * One byte range of a version's chunk region (`end` inclusive).
    *
    * A whole-file version's region is its single `iv‖ct‖tag`; a chunked version's is the
@@ -377,6 +390,15 @@ export function createCourierClient(options: CourierClientOptions): CourierClien
         `/vaults/${segment(vaultId)}/sync/versions/${segment(contentHash)}/content`,
       );
       return new Uint8Array(response.arrayBuffer);
+    },
+
+    async getVersionContents(vaultId, contentHashes) {
+      const response = await send(`/vaults/${segment(vaultId)}/sync/contents`, {
+        method: "POST",
+        contentType: "application/json",
+        body: JSON.stringify({ hashes: [...contentHashes] }),
+      });
+      return parseContentBatchBody(new Uint8Array(response.arrayBuffer), contentHashes.length);
     },
 
     async getVersionContentRange(vaultId, contentHash, start, end) {

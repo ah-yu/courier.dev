@@ -5,7 +5,6 @@ import { DEFAULT_SETTINGS, type CourierSettings } from "../../plugin/src/shared/
 import {
   DEFAULT_FILE_TYPES,
   DEFAULT_MAX_FILE_BYTES,
-  DEFAULT_OP_QUEUE_LIMITS,
   deriveEncryptionKey,
   FILE_TYPE_GROUPS,
   isConflictFile,
@@ -2196,14 +2195,16 @@ describe("plugin e2e — the real plugin against a real server", () => {
       "the mobile host never pulled the peer's edits",
     );
 
-    // Up to four files are pulled at once, so the note on screen has to be in the first
-    // wave rather than at the end of the nine.
-    const contentRequests = requestsMatching(/\/sync\/versions\/[^/]+\/content$/);
-    expect(contentRequests).toHaveLength(names.length);
+    // Up to four files are pulled at once, and their content travels together (the batch
+    // content route), so the note on screen has to be in the first request rather than at
+    // the end of the nine.
+    const contentRequests = requestsMatching(/\/sync\/(versions\/[^/]+\/content|contents)$/);
+    expect(contentRequests.length).toBeGreaterThan(0);
+    expect(contentRequests.length).toBeLessThanOrEqual(names.length);
     const openedHash = await sha256Hex(new TextEncoder().encode(`${opened} v2`));
-    const index = contentRequests.findIndex((request) => request.url.includes(openedHash));
-    expect(index).toBeGreaterThanOrEqual(0);
-    expect(index).toBeLessThan(DEFAULT_OP_QUEUE_LIMITS.maxConcurrent);
+    const first = contentRequests[0]!;
+    const firstBody = typeof first.body === "string" ? first.body : "";
+    expect(first.url.includes(openedHash) || firstBody.includes(openedHash)).toBe(true);
   });
 
   /**

@@ -24,11 +24,13 @@ import type {
 } from "@courier/shared";
 import {
   CHUNK_PLAINTEXT_BYTES,
+  MAX_CONTENT_BATCH_FILES,
   chunkAdditionalData,
   reversedCopy,
   sortedCopy,
 } from "@courier/shared";
 import { conflictFilePath } from "./conflict-file";
+import type { OpQueueLimits } from "./op-queue";
 import { MAX_RATE_LIMIT_WAITS } from "./rate-limit";
 import {
   normalizeScope,
@@ -270,6 +272,8 @@ class FakeApi implements SyncApi {
   pushDelayMs = 0;
   /** Every version content this server was asked for, by hash. */
   contentFetches: string[] = [];
+  /** Every batched content request, by the hashes it named, in call order. */
+  contentBatchCalls: string[][] = [];
   /** Chunks staged by a chunked upload, by content hash → index → bytes. */
   chunks = new Map<string, Map<number, Uint8Array>>();
   /** The `chunkCount`/`plaintextSize` the first chunk of an upload established. */
@@ -421,6 +425,30 @@ class FakeApi implements SyncApi {
         versions: this.chains.get(fileId) ?? [],
       })),
     };
+  }
+
+  /**
+   * The batched content route: the same blobs, in the order asked for, with `null` for a
+   * hash the store does not hold. `contentBatchCalls` is what a test asserts the engine's
+   * batching against.
+   */
+  async getVersionContents(
+    _vaultId: string,
+    contentHashes: readonly string[],
+  ): Promise<Array<Uint8Array | null>> {
+    this.guard();
+    this.contentBatchCalls.push([...contentHashes]);
+    for (const hash of contentHashes) this.contentFetches.push(hash);
+    this.inFlightContent++;
+    this.maxInFlightContent = Math.max(this.maxInFlightContent, this.inFlightContent);
+    try {
+      if (this.contentDelayMs > 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, this.contentDelayMs));
+      }
+      return contentHashes.map((hash) => this.blobs.get(hash) ?? null);
+    } finally {
+      this.inFlightContent--;
+    }
   }
 
   async getVersionContent(_vaultId: string, contentHash: string): Promise<Uint8Array> {
@@ -5714,8 +5742,8 @@ describe("SyncEngine — a first bind that meets the server's limits", () => {
       api,
       encryptionKey: key,
     });
-    const realContent = api.getVersionContent.bind(api);
-    api.getVersionContent = async () => {
+    const realContent = api.getVersionContents.bind(api);
+    api.getVersionContents = async () => {
       throw rateLimited(1);
     };
     try {
@@ -5724,7 +5752,7 @@ describe("SyncEngine — a first bind that meets the server's limits", () => {
       await expect(download.initialSync()).rejects.toThrow(/rate limit/i);
       expect(downloadAdapter.files.has("note.md")).toBe(false);
     } finally {
-      api.getVersionContent = realContent;
+      api.getVersionContents = realContent;
     }
 
     // The next pass, with the limiter window over, applies it.
@@ -5745,19 +5773,19 @@ describe("SyncEngine — a first bind that meets the server's limits", () => {
       api,
       encryptionKey: key,
     });
-    const realContent = api.getVersionContent.bind(api);
+    const realContent = api.getVersionContents.bind(api);
     let attempts = 0;
-    api.getVersionContent = async (vaultId, contentHash) => {
+    api.getVersionContents = async (vaultId, contentHashes) => {
       attempts += 1;
       if (attempts === 1) throw rateLimited();
-      return await realContent(vaultId, contentHash);
+      return await realContent(vaultId, contentHashes);
     };
     try {
       // The window is waited out (the server said how long), so the first download of a
       // large vault does not fail on a bound it can simply wait for.
       await expect(download.initialSync()).resolves.toBeUndefined();
     } finally {
-      api.getVersionContent = realContent;
+      api.getVersionContents = realContent;
     }
 
     expect(attempts).toBe(2);
@@ -5777,14 +5805,95 @@ describe("SyncEngine — a first bind that meets the server's limits", () => {
       api,
       encryptionKey: key,
     });
-    api.getVersionContent = async () => {
-      throw Object.assign(new Error("Version content not found"), { status: 404 });
-    };
+    api.getVersionContents = async (_vaultId, contentHashes) => contentHashes.map(() => null);
 
     // A 404 is the store saying it holds nothing: no file is written and the pass does
     // not fail — the next pass decides again.
     await expect(download.initialSync()).resolves.toBeUndefined();
     expect(downloadAdapter.files.has("note.md")).toBe(false);
+  });
+});
+
+describe("SyncEngine — batched content reads", () => {
+  /** A source vault holding `paths`, bound and synced, ready to be pulled by a target. */
+  async function sourceFor(
+    paths: ReadonlyArray<{ path: string; text: string }>,
+  ): Promise<{ api: FakeApi; key: CryptoKey }> {
+    const { engine, adapter, api, key } = await makeEngine();
+    for (const entry of paths) adapter.files.set(entry.path, encoder.encode(entry.text));
+    await engine.initialSync();
+    return { api, key };
+  }
+
+  /** A fresh device that binds the same vault, and answers its content requests. */
+  async function bindTarget(api: FakeApi, key: CryptoKey, opLimits?: OpQueueLimits) {
+    const adapter = new FakeAdapter();
+    const engine = new SyncEngine({
+      platform: realPlatform,
+      vaultId: "vault-1",
+      adapter,
+      api,
+      encryptionKey: key,
+      ...(opLimits === undefined ? {} : { opLimits }),
+    });
+    await engine.initialSync();
+    return { engine, adapter };
+  }
+
+  it("names a content hash two files share once", async () => {
+    const { api, key } = await sourceFor([
+      { path: "a.md", text: "identical bytes" },
+      { path: "b.md", text: "identical bytes" },
+    ]);
+    api.contentBatchCalls.length = 0;
+
+    // Both chains point at the same blob; the wave fetches it once and both files apply.
+    const { adapter } = await bindTarget(api, key, { maxConcurrent: 4, exclusiveBytes: 1_024 });
+
+    expect(api.contentBatchCalls).toHaveLength(1);
+    expect(api.contentBatchCalls[0]).toHaveLength(1);
+    expect(new TextDecoder().decode(adapter.files.get("a.md"))).toBe("identical bytes");
+    expect(new TextDecoder().decode(adapter.files.get("b.md"))).toBe("identical bytes");
+  });
+
+  it("flushes a batch when the next file would pass its byte budget", async () => {
+    // 5 MiB each, below the chunking threshold, so each is one whole-file read; two of
+    // them do not fit in one 8 MiB batch.
+    const five = new Uint8Array(5 * 1024 * 1024).fill(7);
+    const other = new Uint8Array(5 * 1024 * 1024).fill(8);
+    const { engine, adapter, api, key } = await makeEngine();
+    adapter.files.set("big-a.pdf", five);
+    adapter.files.set("big-b.pdf", other);
+    await engine.initialSync();
+    api.contentBatchCalls.length = 0;
+
+    const target = await bindTarget(api, key, {
+      maxConcurrent: 4,
+      exclusiveBytes: 16 * 1024 * 1024,
+    });
+
+    expect(api.contentBatchCalls.map((call) => call.length)).toEqual([1, 1]);
+    expect(target.adapter.files.get("big-a.pdf")?.byteLength).toBe(five.byteLength);
+    expect(target.adapter.files.get("big-b.pdf")?.byteLength).toBe(five.byteLength);
+  });
+
+  it("flushes a batch at the request's file cap", async () => {
+    const paths = Array.from({ length: MAX_CONTENT_BATCH_FILES }, (_, index) => ({
+      path: `cap/n-${index}.md`,
+      text: `# cap ${index}`,
+    }));
+    const { api, key } = await sourceFor(paths);
+    api.contentBatchCalls.length = 0;
+
+    // The pool may run every file at once here, which is what fills the request.
+    const target = await bindTarget(api, key, {
+      maxConcurrent: MAX_CONTENT_BATCH_FILES,
+      exclusiveBytes: 1_024,
+    });
+
+    expect(api.contentBatchCalls).toHaveLength(1);
+    expect(api.contentBatchCalls[0]).toHaveLength(MAX_CONTENT_BATCH_FILES);
+    expect(target.adapter.files.size).toBe(MAX_CONTENT_BATCH_FILES);
   });
 });
 
@@ -5998,9 +6107,12 @@ describe("SyncEngine — how much a pass runs at once", () => {
 
     await target.initialSync();
 
+    // Every version still comes back once, and the pool's concurrency now shows *inside*
+    // the content requests: three files travel together instead of three requests.
     expect(api.contentFetches).toHaveLength(9);
-    expect(api.maxInFlightContent).toBeGreaterThan(1);
-    expect(api.maxInFlightContent).toBeLessThanOrEqual(3);
+    const sizes = api.contentBatchCalls.map((call) => call.length);
+    expect(Math.max(...sizes)).toBe(3);
+    expect(sizes.every((size) => size <= 3)).toBe(true);
   });
 
   it("runs a file at or above exclusiveBytes alone", async () => {
@@ -6013,8 +6125,8 @@ describe("SyncEngine — how much a pass runs at once", () => {
     await target.initialSync();
 
     expect(api.contentFetches).toHaveLength(4);
-    // Every file is over the exclusive bound, so no two content reads may overlap.
-    expect(api.maxInFlightContent).toBe(1);
+    // Every file is over the exclusive bound, so no two reads may share a batch.
+    expect(api.contentBatchCalls.every((call) => call.length === 1)).toBe(true);
   });
 
   it("weighs a local file by its own size, not only the size the head records", async () => {
@@ -6887,6 +6999,89 @@ describe("SyncEngine — a batch of local events", () => {
     expect(syncPointOf(engine, fileId)).toBe(syncPoint);
     expect(engine.fileIdForPath("note.md")).toBeNull();
     await expectConsistent(engine, adapter, api);
+  });
+
+  it("settles a refused move by deciding again at the destination", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("old.md", encoder.encode("v1"));
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("old.md")!;
+    let raced = false;
+    // A peer edits the chain after the batch fetched it, so the move's base is stale.
+    api.onPush = async () => {
+      if (raced) return;
+      raced = true;
+      await api.remoteEdit(fileId, "peer-v2");
+    };
+
+    adapter.files.delete("old.md");
+    adapter.files.set("new.md", encoder.encode("v1"));
+    await expect(
+      engine.handleLocalEvents({ renamed: [{ from: "old.md", to: "new.md" }] }),
+    ).resolves.toBeUndefined();
+    api.onPush = null;
+
+    // The refusal is settled by deciding again from the fresh chain: the peer's version is
+    // the one this device ends up holding.
+    expect(api.chains.get(fileId)!.at(-1)!.action).toBe("modify");
+    expect(syncPointOf(engine, fileId)).not.toBeNull();
+    await expectConsistent(engine, adapter, api);
+  });
+
+  it("re-points a single move out of the scope without pushing", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("note.md", encoder.encode("keep me"));
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("note.md")!;
+    const syncPoint = syncPointOf(engine, fileId);
+    const before = api.pushCalls.length;
+
+    adapter.files.delete("note.md");
+    adapter.files.set(".obsidian/plugins/x/data.json", encoder.encode("keep me"));
+    await engine.handleLocalRename("note.md", ".obsidian/plugins/x/data.json");
+
+    expect(api.pushCalls).toHaveLength(before);
+    expect(syncPointOf(engine, fileId)).toBe(syncPoint);
+    expect(engine.fileIdForPath("note.md")).toBeNull();
+  });
+
+  it("ignores a move of an untracked file onto a path it already tracks", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("b.md", encoder.encode("b"));
+    await engine.initialSync();
+    const before = api.pushCalls.length;
+
+    // The source was never tracked and the destination is already a chain: the event
+    // cannot re-point anything, and it must not create a second chain there.
+    adapter.files.set("c.md", encoder.encode("c"));
+    await engine.handleLocalRename("c.md", "b.md");
+
+    expect(api.pushCalls).toHaveLength(before);
+    expect(engine.fileIdForPath("b.md")).not.toBeNull();
+    expect(engine.fileIdForPath("c.md")).toBeNull();
+  });
+
+  it("stops the batch when a limiter outlasts its waits", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    await engine.initialSync();
+    adapter.files.set("a.md", encoder.encode("a"));
+    adapter.files.set("b.md", encoder.encode("b"));
+    const realPush = api.push.bind(api);
+    api.push = async () => {
+      throw rateLimited();
+    };
+    try {
+      // The wait is bounded: once the limiter has outlasted it, every further batch would
+      // be refused too, so the job ends and leaves the files for the next pass.
+      await expect(engine.handleLocalEvents({ changed: ["a.md", "b.md"] })).rejects.toMatchObject({
+        status: 429,
+      });
+    } finally {
+      api.push = realPush;
+    }
+
+    expect(engine.fileIdForPath("a.md")).toBeNull();
+    expect(engine.fileIdForPath("b.md")).toBeNull();
   });
 
   it("drops the whole batch when the request never lands, and the next pass retries it", async () => {

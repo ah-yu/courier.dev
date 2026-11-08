@@ -1,6 +1,7 @@
 import type { SyncAction, SyncPushResponse, VersionChainEntry } from "@courier/shared";
 import {
   CHUNK_STORED_BYTES,
+  MAX_CONTENT_BATCH_FILES,
   MAX_PULL_BATCH_FILES,
   MAX_PUSH_BATCH_FILES,
   MAX_ENCRYPTED_PATH_LENGTH,
@@ -18,7 +19,7 @@ import {
   sha256Text,
 } from "./crypto";
 import { chunkBounds, chunkCountForSize, shouldTransferInChunks } from "./chunked-transfer";
-import type { Platform } from "./platform";
+import type { Platform, TimerHandle } from "./platform";
 import { generateFileId, generateVersionId } from "./ids";
 import { isConflictFile, conflictFilePath } from "./conflict-file";
 import { historyKindFor } from "./file-types";
@@ -459,6 +460,32 @@ interface LocalChangeRead {
 }
 
 /**
+ * How long a whole-file content read waits for other reads to travel with it (ms).
+ *
+ * Long enough for the four per-file operations of a pass or a burst to reach their reads
+ * (they all start within the same tick), short enough that a lone remote edit's download
+ * does not wait on it.
+ */
+const CONTENT_BATCH_WINDOW_MS = 5;
+
+/**
+ * Most plaintext one content batch may name.
+ *
+ * The batch holds every file's ciphertext until the request is answered, so this is what
+ * bounds a download's memory; a file above it travels alone. The server's own bound is
+ * `MAX_CONTENT_BATCH_BYTES`, twice this, so a batch built here is always accepted.
+ */
+const CONTENT_BATCH_MAX_BYTES = 8 * 1024 * 1024;
+
+/** One file waiting for the next batched content read. */
+interface PendingContent {
+  /** The version's plaintext size, for the batch's byte budget. */
+  sizeBytes: number;
+  resolve: (bytes: Uint8Array | null) => void;
+  reject: (err: unknown) => void;
+}
+
+/**
  * One burst of local vault events, as a host collects it.
  *
  * `changed` are paths whose file was created or modified; `deleted` are paths whose file
@@ -614,6 +641,12 @@ export class SyncEngine {
    * operation: the change is one job, and the next job on that path starts after it.
    */
   private readonly paths = new PathQueue();
+  /** Whole-file content reads waiting for the next batched request (see `fetchContentBatched`). */
+  private pendingContent = new Map<string, PendingContent[]>();
+  /** Plaintext bytes the pending batch would fetch, for its memory bound. */
+  private contentBatchBytes = 0;
+  /** The timer that flushes {@link pendingContent}; `null` when none is armed. */
+  private contentBatchTimer: TimerHandle | null = null;
   /**
    * Paths this engine is writing right now, so a vault event the write fires can be
    * queued without waiting for it (see `schedule`).
@@ -3179,24 +3212,98 @@ export class SyncEngine {
    * exactly what a 10 000-file first download did before this rule
    * (`docs/first-bind-performance.md`).
    */
-  private async fetchRemoteBytes(vaultId: string, contentHash: string): Promise<Uint8Array | null> {
-    let stored: Uint8Array;
-    try {
-      // The API hands back the stored ciphertext itself; there is nothing to decode
-      // first, so a pull decrypts the bytes it received and no more.
-      stored = await this.withRateLimitWaits(() =>
-        this.opts.api.getVersionContent(vaultId, contentHash),
-      );
-    } catch (err) {
-      if (isMissingContentError(err)) return null;
-      throw err;
-    }
+  private async fetchRemoteBytes(
+    vaultId: string,
+    contentHash: string,
+    plaintextSize: number,
+  ): Promise<Uint8Array | null> {
+    // The API hands back the stored ciphertext itself; there is nothing to decode first,
+    // so a pull decrypts the bytes it received and no more. Reads are batched (see
+    // `fetchContentBatched`): a pass or a notification burst fetches several versions in
+    // one request instead of one per file. A failure — a rate limit that outlasted its
+    // waits, a 5xx, a dropped connection — is a failed pull and is rethrown; only a `null`
+    // (the store holds nothing, or the bytes do not decrypt) is "nothing to apply".
+    const stored = await this.fetchContentBatched(contentHash, plaintextSize);
+    if (stored === null) return null;
     try {
       return await decryptCombinedBytes(this.opts.encryptionKey, stored);
     } catch {
       // Undecryptable: not a store a peer can use, and retrying cannot fix it.
       return null;
     }
+  }
+
+  /**
+   * The ciphertext of `contentHash`, held for at most {@link CONTENT_BATCH_WINDOW_MS} to
+   * travel with the reads other files of the same pass or burst are making.
+   *
+   * A download used to be one content request per file, and that was the last per-file cost
+   * on the sync path (`docs/first-bind-performance.md`): a first bind of 50 000 files made
+   * 50 000 requests. The engine runs four per-file operations at a time, so a short window
+   * groups their reads into one request (the server answers several versions per route, see
+   * `buildContentBatchBody`), and a lone read still costs one request.
+   *
+   * `sizeBytes` is the version's plaintext size: the batch's byte budget is what bounds the
+   * memory a batch holds, and a file big enough to fill it travels alone.
+   */
+  private fetchContentBatched(contentHash: string, sizeBytes: number): Promise<Uint8Array | null> {
+    return new Promise((resolve, reject) => {
+      // The same content is often needed by more than one file (a copy, or two chains that
+      // converged): one entry in the request answers all of them.
+      const waiting = this.pendingContent.get(contentHash);
+      if (waiting !== undefined) {
+        waiting.push({ sizeBytes, resolve, reject });
+        return;
+      }
+      if (
+        this.contentBatchBytes > 0 &&
+        this.contentBatchBytes + sizeBytes > CONTENT_BATCH_MAX_BYTES
+      ) {
+        this.flushContentBatch();
+      }
+      this.pendingContent.set(contentHash, [{ sizeBytes, resolve, reject }]);
+      this.contentBatchBytes += sizeBytes;
+      if (this.pendingContent.size >= MAX_CONTENT_BATCH_FILES) {
+        this.flushContentBatch();
+        return;
+      }
+      this.contentBatchTimer ??= this.opts.platform.after(CONTENT_BATCH_WINDOW_MS, () => {
+        this.contentBatchTimer = null;
+        this.flushContentBatch();
+      });
+    });
+  }
+
+  /** Send the held content reads as one request, and settle every waiter for each hash. */
+  private flushContentBatch(): void {
+    if (this.contentBatchTimer !== null) {
+      this.contentBatchTimer.cancel();
+      this.contentBatchTimer = null;
+    }
+    if (this.pendingContent.size === 0) return;
+    const hashes = [...this.pendingContent.keys()];
+    const waiting = this.pendingContent;
+    this.pendingContent = new Map();
+    this.contentBatchBytes = 0;
+    void this.sendContentBatch(hashes).then(
+      (results) => {
+        for (const [index, hash] of hashes.entries()) {
+          for (const waiter of waiting.get(hash) ?? []) waiter.resolve(results[index] ?? null);
+        }
+      },
+      (err: unknown) => {
+        for (const waiters of waiting.values()) for (const waiter of waiters) waiter.reject(err);
+      },
+    );
+  }
+
+  /** One content request, waiting out a limiter's window like every other bulk read. */
+  private async sendContentBatch(
+    contentHashes: readonly string[],
+  ): Promise<Array<Uint8Array | null>> {
+    return await this.withRateLimitWaits(() =>
+      this.opts.api.getVersionContents(this.opts.vaultId, [...contentHashes]),
+    );
   }
 
   /**
@@ -3363,7 +3470,7 @@ export class SyncEngine {
     plaintextSize: number,
   ): Promise<Uint8Array | null> {
     if (!shouldTransferInChunks(plaintextSize)) {
-      return this.fetchRemoteBytes(vaultId, contentHash);
+      return this.fetchRemoteBytes(vaultId, contentHash, plaintextSize);
     }
     const count = chunkCountForSize(plaintextSize);
     const plaintext = new Uint8Array(plaintextSize);

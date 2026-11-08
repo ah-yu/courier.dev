@@ -1106,6 +1106,47 @@ checking a 200 MiB version's size costs no disk I/O.
 
 ---
 
+### 11b. Get several versions' content at once
+
+```
+POST /api/vaults/:id/sync/contents
+```
+
+The batch form of §11: a bind or a live burst reads many versions, and one request per file was the last
+per-file round trip on the sync path (`docs/first-bind-performance.md`). The client names up to
+`MAX_CONTENT_BATCH_FILES` (64) content hashes and gets their ciphertext back in one **binary frame** —
+the same framing style the push body uses, so no base64 is spent on a download.
+
+**Request**
+
+```json
+{ "hashes": ["<sha256 hex>", "<sha256 hex>"] }
+```
+
+**Response** `200 OK`, `application/octet-stream`
+
+```
+"CBC1" | u32 count
+per entry: u8 status            (0 = present, 1 = missing)
+           [present] u32 length | <ciphertext>
+```
+
+`count` must equal the number of hashes asked for, and the entries are in request order. A **missing**
+entry is an ordinary answer — the blob was reclaimed, or the chain points at content no peer can fetch —
+and is what a `404` from §11 means for one version; it does not fail the batch. The answer is bounded on
+both ends: the request names at most 64 hashes (the schema refuses more), and a body over
+`MAX_CONTENT_BATCH_BYTES` (16 MiB) is refused with `413 PAYLOAD_TOO_LARGE` rather than built. The engine
+keeps its own batches under 8 MiB of plaintext, so a refusal here is a client bug.
+
+| Status | Error code          | Description                                                     |
+| ------ | ------------------- | --------------------------------------------------------------- |
+| `413`  | `PAYLOAD_TOO_LARGE` | The versions named add up to more than one answer may carry     |
+| `422`  | `VALIDATION_FAILED` | Not 1–64 hashes, or one that is not 64 lowercase hex characters |
+
+The route sits behind the **transfer** limiter (§ rate limits), like §11 and the chunk routes.
+
+---
+
 ### 11a. Chunked uploads
 
 The two endpoints behind `files[].contentChunks` (see §9, **Chunked uploads**): a large file is uploaded

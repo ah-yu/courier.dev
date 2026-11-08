@@ -45,6 +45,18 @@ export interface SyncApi {
    */
   getVersionContent(vaultId: string, contentHash: string): Promise<Uint8Array>;
 
+  /**
+   * The ciphertext of several versions in one request, in the order asked for; `null` for a
+   * hash the store does not hold (an ordinary answer, like a `404` for one version).
+   *
+   * The engine batches the content reads of a pass or a notification burst through this:
+   * a download used to cost one request per file (`docs/first-bind-performance.md`).
+   */
+  getVersionContents(
+    vaultId: string,
+    contentHashes: readonly string[],
+  ): Promise<Array<Uint8Array | null>>;
+
   /** One inclusive byte range of a version's chunk region (see `getVersionContent`). */
   getVersionContentRange(
     vaultId: string,
@@ -114,6 +126,9 @@ export function createSyncApi(client: CourierClient, getDeviceName: () => string
     },
     async getVersionContent(vaultId, contentHash) {
       return await client.getVersionContent(vaultId, contentHash);
+    },
+    async getVersionContents(vaultId, contentHashes) {
+      return await client.getVersionContents(vaultId, contentHashes);
     },
     async getVersionContentRange(vaultId, contentHash, start, end) {
       return await client.getVersionContentRange(vaultId, contentHash, start, end);

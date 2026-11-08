@@ -8,6 +8,7 @@ import {
   type TransportRequest,
   type TransportResponse,
 } from "./http";
+import { buildContentBatchBody } from "./wire";
 
 /**
  * The shared HTTP client: the one place a request is built and a failure is
@@ -278,6 +279,35 @@ describe("createCourierClient — request assembly", () => {
     }).getVersionContent("v1", "hash");
 
     expect([...content]).toEqual([9, 8, 7]);
+  });
+
+  it("asks for several versions' content in one request", async () => {
+    const first = new Uint8Array([1, 2]);
+    const second = new Uint8Array([3, 4, 5]);
+    const body = buildContentBatchBody([first, null, second]);
+    const { transport, calls } = fakeTransport({
+      status: 200,
+      arrayBuffer: body.buffer.slice(
+        body.byteOffset,
+        body.byteOffset + body.byteLength,
+      ) as ArrayBuffer,
+      json: null,
+    });
+    const hashes = ["a".repeat(64), "b".repeat(64), "c".repeat(64)];
+
+    const contents = await createCourierClient({
+      baseUrl: "http://srv",
+      getUserKey: () => "ck_x",
+      transport,
+    }).getVersionContents("v1", hashes);
+
+    expect(contents[0]).toEqual(first);
+    expect(contents[1]).toBeNull();
+    expect(contents[2]).toEqual(second);
+    expect(calls[0]!.method).toBe("POST");
+    expect(calls[0]!.url).toContain("/sync/contents");
+    expect(calls[0]!.headers["Content-Type"]).toBe("application/json");
+    expect(JSON.parse(String(calls[0]!.body))).toEqual({ hashes });
   });
 
   it("asks for one byte range of a version", async () => {
