@@ -422,6 +422,68 @@ describe("a bulk local write through a real server", () => {
     }
   }, 120_000);
 
+  it("batches a folder move the watcher reports as remove plus create", async () => {
+    // The shape the CLI's `fs.watch` and external tools produce — no `rename` event, just
+    // the old path gone and the new one created. The batch must read each pair as one
+    // content-less rename: a tombstone per moved note would double the pushes and make a
+    // peer delete the file before it is written again. The peer side of a move is covered by
+    // the `rename` case above; this one pins the sender's wire.
+    const vault = await createTestVault(server, "bulk-move-split", material);
+    const mac = await startHost(vault.id, mkdtempSync(join(tmpdir(), "bulk-mvs-")), "mac");
+
+    const notes = 60;
+    const before = (index: number) => notePath("from", index);
+    const after = (index: number) => notePath("to", index);
+    const body = (index: number) => noteBody(index, 4);
+
+    try {
+      const events = mac.adapter.handlers!;
+      for (let index = 0; index < notes; index += 1) {
+        const path = before(index);
+        mkdirSync(join(mac.dir, dirname(path)), { recursive: true });
+        writeFileSync(join(mac.dir, path), body(index));
+        events.changed(path, body(index).length);
+      }
+      await waitFor(
+        () =>
+          Array.from({ length: notes }, (_, index) => mac.host.fileIdForPath(before(index))).every(
+            (fileId) => fileId !== null,
+          ),
+        `${notes} seeded notes are tracked`,
+        60_000,
+      );
+      await mac.host.whenIdle();
+      const fileIds = Array.from({ length: notes }, (_, index) =>
+        mac.host.fileIdForPath(before(index)),
+      );
+      for (const key of Object.keys(mac.counts) as Array<keyof WireCounts>) mac.counts[key] = 0;
+
+      // Both halves of every move, reported together.
+      for (let index = 0; index < notes; index += 1) {
+        renameSync(join(mac.dir, before(index)), join(mac.dir, after(index)));
+        events.removed(before(index));
+        events.changed(after(index), body(index).length);
+      }
+      await mac.host.whenIdle();
+
+      // One chain each, at its new path, with no tombstone in between: a delete plus a
+      // rename per file would be ~120 pushes.
+      for (let index = 0; index < notes; index += 1) {
+        expect(mac.host.fileIdForPath(after(index)), after(index)).toBe(fileIds[index]);
+      }
+      expect(mac.host.fileIdForPath(before(0))).toBeNull();
+      expect(countNotes(mac.dir)).toBe(notes);
+      // Four of the one hundred and twenty events are below the burst threshold and take the
+      // single-event path (a tombstone and its rename each, for the first two moves); the rest
+      // travel as one batch. A delete plus a rename per file would be ~120 pushes.
+      expect(mac.counts.pushes).toBeLessThanOrEqual(8);
+      expect(mac.counts.rateLimited).toBe(0);
+      expect(mac.counts.indexReads).toBe(0);
+    } finally {
+      mac.host.stop();
+    }
+  }, 60_000);
+
   it("does not publish a deletion when a batch removes and rewrites one path", async () => {
     const vault = await createTestVault(server, "bulk-replace", material);
     const phone = await startHost(

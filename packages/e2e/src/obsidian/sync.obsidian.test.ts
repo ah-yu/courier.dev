@@ -261,6 +261,29 @@ async function trackedIn(vault: string, path: string): Promise<string | null> {
 }
 
 /**
+ * Poll `predicate` for a bounded time and answer whether it held, instead of throwing.
+ *
+ * Used where the test wants to *retry an action* when a state has not landed yet (a pass
+ * that ran before a peer's push was indexed, a click the dialog re-rendered under) rather
+ * than wait out one long timeout for the result.
+ */
+async function vaultStateHolds(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs = 10_000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      if (await predicate()) return true;
+    } catch {
+      // A CLI round-trip can fail while the app is writing; the loop is the retry.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return false;
+}
+
+/**
  * Wrap the running engine's adapter so every `renameFile` — the one call a
  * followed move depends on — records its outcome.
  *
@@ -922,12 +945,21 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
     );
     await vaultB.write(path, "new content");
     await reconcile(names.b);
+    // A's own passes, retried: this case is about what a restore does when the path is
+    // taken, and the dialog's precondition is A's state, not a socket notification. Each
+    // pass reads the index again, so a push that was still in flight when the previous pass
+    // looked is picked up by the next one instead of costing the five-minute periodic pass.
+    let pulledOnA = false;
+    for (let attempt = 0; attempt < 6 && !pulledOnA; attempt += 1) {
+      await reconcile(names.a);
+      pulledOnA = await vaultStateHolds(
+        async () => (await readVaultFile(names.a, path)) === "new content",
+        10_000,
+      );
+    }
+    expect(pulledOnA, "vault A never pulled the note created in B").toBe(true);
     // Two chains name this path now: the deleted one in the bin, and the note B made.
     expect(await filesAtPath(server, remote.id, material.key, path)).toHaveLength(2);
-    await waitForVaultState(
-      async () => (await readVaultFile(names.a, path)) === "new content",
-      "vault A never pulled the note created in B",
-    );
     await waitForVaultState(
       async () => (await fileIdForPath(names.a, path)) !== fileId,
       "the new note never became its own file",
@@ -951,10 +983,17 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
       await clickRecycleBinRestore(names.a, path),
       "the recycle bin dialog had no 恢复 button for the deleted note",
     ).toBe(true);
-    await waitForVaultState(
-      async () => (await readRestoreNameField(names.a)).open,
-      "the restore dialog never asked for a file name",
-    );
+    // The click is a real DOM event on a row the dialog is free to re-render while the
+    // engine answers: a lost one would look like "the dialog never opened". A user clicks
+    // again; the test does too, a bounded number of times, before failing.
+    const restoreNameFieldOpens = async (): Promise<boolean> =>
+      await vaultStateHolds(async () => (await readRestoreNameField(names.a)).open, 10_000);
+    let nameFieldOpen = await restoreNameFieldOpens();
+    for (let attempt = 0; attempt < 3 && !nameFieldOpen; attempt += 1) {
+      await clickRecycleBinRestore(names.a, path);
+      nameFieldOpen = await restoreNameFieldOpens();
+    }
+    expect(nameFieldOpen, "the restore dialog never asked for a file name").toBe(true);
     // The default name is the original plus `-1`, which is what the user is expected to
     // accept; a name that is taken as well is answered in the dialog. The field holds the
     // file name alone — the folder stays the one the note lived in.
@@ -989,7 +1028,9 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
     expect(await filesAtPath(server, remote.id, material.key, path)).toHaveLength(1);
     expect(await filesAtPath(server, remote.id, material.key, copyPath)).toEqual([fileId!]);
 
-    // And the peer gets the restored copy too.
+    // And the peer gets the restored copy too — through its own pass, for the same reason
+    // as the step above.
+    await reconcile(names.b);
     await waitForVaultState(
       async () => (await readVaultFile(names.b, copyPath)) === "old content",
       "vault B never pulled the restored copy",
