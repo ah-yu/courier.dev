@@ -526,11 +526,20 @@ export async function runDaemon(
     loseLease();
   };
 
-  const releaseLease = async (): Promise<void> => {
-    leaseHeld = false;
-    closeLeaseWatch();
-    stopRenewal();
-    await lease.release().catch(() => {});
+  // Releasing is terminal and has to be single-flight. The stop path and the run loop's
+  // own cleanup can both ask — a signal and the supervisor's pipe closing are two events —
+  // and a second call that returned at once would let the caller exit the process while the
+  // first is still deleting the lease, leaving the directory (and its owner record) behind
+  // for the plugin to wait on.
+  let releasePromise: Promise<void> | null = null;
+  const releaseLease = (): Promise<void> => {
+    releasePromise ??= (async () => {
+      leaseHeld = false;
+      closeLeaseWatch();
+      stopRenewal();
+      await lease.release().catch(() => {});
+    })();
+    return releasePromise;
   };
 
   runtime.start();

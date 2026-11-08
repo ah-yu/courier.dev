@@ -135,12 +135,13 @@ export function pidAlive(pid: number, node?: NodeSurface): boolean {
  * Whether a record is still a live claim on the vault: not past its expiry, and — when the
  * record was written on this machine — its process still exists.
  *
- * Liveness is what expiry alone cannot see. Neither application gets to run `release()` on
- * every exit: a supervisor stops the CLI by ending the process (Windows has no
- * deliverable signal), and Obsidian quits without waiting for a plugin's asynchronous
- * release to finish. In both cases the holder's record outlives it by up to the TTL, and
- * without this check every reader — the page, the other application waiting for the vault,
- * a restart — described a process that no longer exists as the writer for seconds.
+ * Liveness is what expiry alone cannot see. Not every exit runs `release()`: a SIGKILL or a
+ * crash ends the holder outright, a supervised CLI releases on its way out (the supervisor's
+ * pipe closing is one of its stop paths, and it drains first) but cannot if it is killed
+ * first, and Obsidian quits without waiting for a plugin's asynchronous release to finish.
+ * In those cases the holder's record outlives it by up to the TTL, and without this check
+ * every reader — the page, the other application waiting for the vault, a restart —
+ * described a process that no longer exists as the writer for seconds.
  *
  * A plugin lease belongs to the **renderer** that wrote it: that process dies with its
  * window (or the whole app), and no other window holds that token, so its pid is evidence

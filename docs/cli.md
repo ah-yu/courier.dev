@@ -439,6 +439,16 @@ fallback for a headless machine (the server keeps no backlog for subscribers, so
 offline are not resent), and silently turning it off is a failure the user cannot notice. `0` is the
 only spelling that means off.
 
+**Stopping with its supervisor.** A process that should not outlive whatever started it says so with
+`COURIER_DAEMON_SUPERVISED=1`: `run` then watches stdin and treats EOF — or the pipe closing — the way
+it treats `SIGTERM`. It drains, releases the lease, clears its runtime record and exits. The desktop
+app starts every daemon that way and keeps its end of the pipe open for as long as it runs, so a
+quit, a crash or a force-kill of the app stops its daemons too. macOS is the case that needs it: a
+child there is only reparented to launchd, so the pipe closing is the one way a daemon hears that its
+supervisor is gone. The variable is opt-in on purpose — a terminal `run` with stdin redirected to
+`/dev/null` reads EOF at once, and a daemon must not stop because nothing is on its stdin. Without it,
+`run` ignores stdin entirely.
+
 Behavior: scan local syncable files (md/canvas and the enabled file types, excluding conflict
 copies; the config folder is never part of this scan) → full reconcile (push/pull/conflicts) → watch
 local file events for incremental pushes → subscribe to remote changes over WebSocket and pull. There
@@ -494,14 +504,16 @@ per-vault lease:
   delete and recreate it.
 - **A record whose process is gone is stale at once, not after the TTL.** The record names the
   holder's pid and the machine that wrote it, so a pid no process holds **on that machine** proves
-  nobody is renewing, whether the holder was the CLI or the plugin. Neither application gets to run
-  `release()` on every exit: a supervisor stops a daemon by ending the process (Windows has
-  no deliverable signal), and Obsidian quits without waiting for a plugin's asynchronous release.
-  Waiting out the TTL would keep reporting a process that no longer exists as the writer — for the
-  page, for the other application that wants the vault (closing Obsidian hands it to a waiting CLI
-  at once), and for the user who restarts the same vault. A plugin lease belongs to the renderer
-  that wrote it and dies with that window or the app, so its pid is evidence in the same way.
-  Expiry remains the clock for a reader on another machine or without a process table.
+  nobody is renewing, whether the holder was the CLI or the plugin. A stop is not always a clean
+  exit: a SIGKILL, a crash, and Obsidian quitting without waiting for the plugin's asynchronous
+  release all end the process with no `release()`. A supervised daemon does release on its way out
+  (the pipe closing is one of its stop paths, and it drains first), but the rule above must hold
+  for the exits nothing can observe. Waiting out the TTL would keep reporting a process that no
+  longer exists as the writer — for the page, for the other application that wants the vault
+  (closing Obsidian hands it to a waiting CLI at once), and for the user who restarts the same
+  vault. A plugin lease belongs to the renderer that wrote it and dies with that window or the
+  app, so its pid is evidence in the same way. Expiry remains the clock for a reader on another
+  machine or without a process table.
 - **First come, first served — no application has priority.** The lease is acquired before an
   engine exists and is held until that writer stops. If the CLI holds it and Obsidian opens, the
   plugin waits; the CLI keeps syncing. If the plugin holds it and the CLI starts, the CLI waits.

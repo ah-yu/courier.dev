@@ -1,5 +1,5 @@
-import { spawn } from "child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { fileURLToPath } from "url";
@@ -19,6 +19,7 @@ import {
 import { setUserMaxFileBytes, startTestServer, type TestServer } from "./harness/server";
 import { vaultSettings } from "./harness/api";
 import { createTestVault, makeVaultMaterial } from "./harness/vault";
+import { daemonStatus, runtimePath } from "../../cli/src/runtime";
 
 /**
  * The command surface a supervising process drives.
@@ -57,6 +58,51 @@ function spawnCli(
     child.on("error", reject);
     child.on("close", (code) => resolve({ code, stdout, stderr }));
   });
+}
+
+/** A spawned daemon a case can watch, with the stdin pipe a supervisor would hold. */
+type SpawnedDaemon = {
+  child: ChildProcessWithoutNullStreams;
+  output: () => string;
+  waitForOutput: (needle: string, timeoutMs?: number) => Promise<void>;
+  exited: Promise<number | null>;
+};
+
+/**
+ * Spawn the real daemon with a pipe on stdin, the way the desktop app supervises it. Ending
+ * `child.stdin` plays the supervisor dying; the rest matches `spawnCli`.
+ */
+function spawnDaemon(args: string[], env: Record<string, string> = {}): SpawnedDaemon {
+  const child = spawn(process.execPath, [CLI_MAIN, ...args], {
+    env: { ...process.env, ...env },
+    stdio: ["pipe", "pipe", "pipe"],
+  }) as ChildProcessWithoutNullStreams;
+  let output = "";
+  child.stdout.on("data", (chunk: Buffer) => (output += String(chunk)));
+  child.stderr.on("data", (chunk: Buffer) => (output += String(chunk)));
+  const exited = new Promise<number | null>((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", (code) => resolve(code));
+  });
+  const waitForOutput = async (needle: string, timeoutMs = 30_000): Promise<void> => {
+    const deadline = Date.now() + timeoutMs;
+    while (!output.includes(needle)) {
+      if (Date.now() > deadline) {
+        throw new Error(`timed out waiting for "${needle}" in: ${output}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  };
+  return { child, output: () => output, waitForOutput, exited };
+}
+
+/** Poll a filesystem condition, so a case never depends on a fixed sleep. */
+async function until(condition: () => boolean, what: string, timeoutMs = 15_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
 }
 
 /**
@@ -146,6 +192,27 @@ describe("cli commands e2e — the contract a supervising process reads", () => 
       deviceName: "e2e",
       vaults: [],
     });
+  }
+
+  /** Bind a fresh remote vault into this suite's config; the folder is empty and owned by the case. */
+  async function bindVault(name: string): Promise<{ id: string; path: string }> {
+    const path = vaultFolder(name);
+    mkdirSync(path, { recursive: true });
+    const material = await makeVaultMaterial();
+    const remote = await createTestVault(server, name, material);
+    await run([
+      "vault",
+      "connect",
+      "--id",
+      remote.id,
+      "--path",
+      path,
+      "--device-name",
+      "e2e",
+      "--password",
+      "correct horse battery staple",
+    ]);
+    return { id: remote.id, path };
   }
 
   it("creates a remote vault, binds the folder, and logs out", async () => {
@@ -532,4 +599,79 @@ describe("cli commands e2e — the contract a supervising process reads", () => 
     // compatibility version, so it cannot be that).
     expect(identity.runtime).toMatch(/^bun\/\d+\.\d+\.\d+/);
   });
+
+  // The daemon is the process a supervisor has to be able to end: the desktop app holds the
+  // other end of this pipe and closes it when it dies, a force-kill included. macOS has no
+  // parent-death signal, so this pipe is the whole mechanism there.
+  it("stops a supervised daemon when the supervisor's pipe closes", async () => {
+    resetConfig();
+    const vault = await bindVault("supervised-daemon");
+    const leaseDir = join(vault.path, ".courier", "sync-lease");
+    const daemon = spawnDaemon(["run", "--vault", vault.id, "--interval", "0"], {
+      COURIER_DAEMON_SUPERVISED: "1",
+    });
+    try {
+      await daemon.waitForOutput(vault.id);
+      // The lease is what the Obsidian plugin waits on, so the case proves the daemon held
+      // it before the pipe closed.
+      await until(() => existsSync(leaseDir), "the daemon to take the vault lease");
+      daemon.child.stdin.end();
+      await expect(daemon.exited).resolves.toBe(0);
+    } finally {
+      if (daemon.child.exitCode === null) daemon.child.kill("SIGKILL");
+    }
+    // The lease was released and the record cleared, which is what lets the plugin take
+    // the vault over at once instead of waiting out the TTL.
+    expect(
+      existsSync(leaseDir),
+      `lease left behind: ${existsSync(leaseDir) ? readdirSync(leaseDir).join(",") : "none"}\n${daemon.output()}`,
+    ).toBe(false);
+    expect(existsSync(runtimePath(vault.id)), `runtime record: ${daemon.output()}`).toBe(false);
+  }, 120_000);
+
+  // Without the variable the daemon must not read stdin as a lifetime signal: a terminal
+  // run with stdin at /dev/null reads EOF at once, and that daemon has to keep syncing.
+  it("keeps an unsupervised daemon running when its stdin ends", async () => {
+    resetConfig();
+    const vault = await bindVault("unsupervised-daemon");
+    const daemon = spawnDaemon(["run", "--vault", vault.id, "--interval", "0"]);
+    try {
+      await daemon.waitForOutput(vault.id);
+      daemon.child.stdin.end();
+      // Give EOF the chance to be (wrongly) acted on before asserting it is still up.
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(daemon.child.exitCode).toBeNull();
+      daemon.child.kill("SIGTERM");
+      await daemon.exited;
+    } finally {
+      if (daemon.child.exitCode === null) daemon.child.kill("SIGKILL");
+    }
+  }, 120_000);
+
+  // Watching the pipe must not be the only thing keeping the daemon alive: when the run
+  // loop ends on its own — here the vault is deleted server-side — the process has to exit
+  // and clear its record, or the supervisor sees a live pid that is not syncing at all.
+  it("exits a supervised daemon whose sync path ends on its own", async () => {
+    resetConfig();
+    const vault = await bindVault("supervised-fatal");
+    const daemon = spawnDaemon(["run", "--vault", vault.id, "--interval", "0"], {
+      COURIER_DAEMON_SUPERVISED: "1",
+    });
+    try {
+      await daemon.waitForOutput(vault.id);
+      const response = await fetch(`${server.serverUrl}/api/vaults/${vault.id}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${server.userKey}` },
+      });
+      expect(response.ok).toBe(true);
+      // No input, no signal: the deletion is the only event, and the process still exits.
+      await expect(daemon.exited).resolves.toBe(0);
+    } finally {
+      if (daemon.child.exitCode === null) daemon.child.kill("SIGKILL");
+    }
+    // The record it left behind is advisory ("this is why sync stopped"): the pid is gone,
+    // so a reader reports not running and drops it, instead of showing a live pid forever.
+    expect(daemonStatus(vault.id).running).toBe(false);
+    expect(existsSync(runtimePath(vault.id))).toBe(false);
+  }, 120_000);
 });

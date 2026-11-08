@@ -804,11 +804,12 @@ describe("SyncLease.takeOver", () => {
 });
 
 /**
- * Neither application gets to run `release()` on every exit: a supervisor ends the
- * CLI's process (Windows has no deliverable signal), and Obsidian quits without waiting for a
- * plugin's asynchronous release. The record's pid is then the only evidence that nobody is
- * renewing, and waiting out the TTL would describe a process that no longer exists as the
- * writer. A plugin record is one renderer's claim, so the same rule applies to it.
+ * Not every exit runs `release()`: a SIGKILL or a crash ends the holder outright, a
+ * supervised CLI releases on its way out but cannot if it is killed first, and Obsidian
+ * quits without waiting for a plugin's asynchronous release. The record's pid is then the
+ * only evidence that nobody is renewing, and waiting out the TTL would describe a process
+ * that no longer exists as the writer. A plugin record is one renderer's claim, so the same
+ * rule applies to it.
  */
 describe("leaseIsCurrent", () => {
   const NOW = 1_000_000;
