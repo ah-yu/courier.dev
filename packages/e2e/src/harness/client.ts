@@ -61,6 +61,8 @@ class SwitchableApi implements SyncApi {
   readonly pulls: Array<{ fileIds: string[]; files: unknown[] }> = [];
   /** Every version content the engine asked the server for, by content hash. */
   readonly contentFetches: string[] = [];
+  /** Every batched content request, by the hashes it named — how a download was grouped. */
+  readonly contentBatchCalls: string[][] = [];
   /** Every chunk the engine staged, in arrival order (index per hash). */
   readonly chunkUploads: Array<{ contentHash: string; index: number }> = [];
   /** Every ranged content request — a chunked download's evidence. */
@@ -104,6 +106,16 @@ class SwitchableApi implements SyncApi {
     this.guard();
     this.contentFetches.push(contentHash);
     return await this.inner.getVersionContent(vaultId, contentHash);
+  }
+
+  async getVersionContents(
+    vaultId: string,
+    contentHashes: readonly string[],
+  ): Promise<Array<Uint8Array | null>> {
+    this.guard();
+    this.contentBatchCalls.push([...contentHashes]);
+    this.contentFetches.push(...contentHashes);
+    return await this.inner.getVersionContents(vaultId, contentHashes);
   }
 
   async getVersionContentRange(
@@ -230,6 +242,11 @@ export class TestClient {
     return this.api.contentFetches;
   }
 
+  /** Every batched content request, by the hashes it named (one request per batch). */
+  get contentBatchCalls(): ReadonlyArray<ReadonlyArray<string>> {
+    return this.api.contentBatchCalls;
+  }
+
   /** Every push's per-file verdicts, in order. */
   get pushResults(): ReadonlyArray<
     ReadonlyArray<{ fileId: string; status: string; versionId?: string; currentVersionId?: string }>
@@ -274,6 +291,7 @@ export class TestClient {
     this.api.pulls.length = 0;
     this.activities.length = 0;
     this.api.contentFetches.length = 0;
+    this.api.contentBatchCalls.length = 0;
     this.api.chunkUploads.length = 0;
     this.api.rangeFetches.length = 0;
     this.adapter.reads.clear();

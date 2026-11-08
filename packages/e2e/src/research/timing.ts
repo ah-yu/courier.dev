@@ -175,6 +175,25 @@ export class TimedApi implements SyncApi {
     }
   }
 
+  async getVersionContents(
+    vaultId: string,
+    contentHashes: readonly string[],
+  ): Promise<Array<Uint8Array | null>> {
+    const started = performance.now();
+    this.contentCalls += contentHashes.length;
+    try {
+      const contents = await this.inner.getVersionContents(vaultId, contentHashes);
+      for (const content of contents) this.contentBytes += content?.byteLength ?? 0;
+      return contents;
+    } catch (err) {
+      this.contentErrors++;
+      this.lastError = err instanceof Error ? err.message : String(err);
+      throw err;
+    } finally {
+      this.contentMs += performance.now() - started;
+    }
+  }
+
   async getVersionContent(vaultId: string, contentHash: string): Promise<Uint8Array> {
     const started = performance.now();
     this.contentCalls++;

@@ -216,6 +216,25 @@ describe("SelfEventLog — self deletes", () => {
     expect(log.consumeSelfDelete("notes/a.md")).toBe(false);
     expect(log.consumeSelfDelete("notes/b.md")).toBe(true);
   });
+
+  it("answers whether a delete is ours without consuming it", () => {
+    // The host asks this before it counts a vault event as part of a user's burst (see
+    // `SyncHost`); asking must not spend the record the event itself still needs.
+    const clock = fakeClock();
+    const log = new SelfEventLog({ now: clock.now });
+    expect(log.hasSelfDelete("notes/gone.md")).toBe(false);
+
+    log.recordSelfDelete("notes/gone.md");
+    expect(log.hasSelfDelete("notes/gone.md")).toBe(true);
+    expect(log.hasSelfDelete("notes/gone.md")).toBe(true);
+    expect(log.consumeSelfDelete("notes/gone.md")).toBe(true);
+
+    log.recordSelfDelete("notes/later.md");
+    clock.advance(10_001);
+    expect(log.hasSelfDelete("notes/later.md")).toBe(false);
+    // The expired record is dropped as it is read, so it cannot come back.
+    expect(log.hasSelfDelete("notes/later.md")).toBe(false);
+  });
 });
 
 describe("SelfEventLog — self renames", () => {
@@ -264,6 +283,23 @@ describe("SelfEventLog — self renames", () => {
 
     expect(log.consumeSelfRename("a.md", "b.md")).toBe(false);
     expect(log.consumeSelfRename("c.md", "d.md")).toBe(true);
+  });
+
+  it("answers whether a move is ours without consuming it", () => {
+    // Same pre-check as `hasSelfDelete`, asked for the *from* path of a rename event.
+    const clock = fakeClock();
+    const log = new SelfEventLog({ now: clock.now });
+    expect(log.hasSelfRename("old.md")).toBe(false);
+
+    log.recordSelfRename("old.md", "new.md");
+    expect(log.hasSelfRename("old.md")).toBe(true);
+    expect(log.hasSelfRename("old.md")).toBe(true);
+    expect(log.consumeSelfRename("old.md", "new.md")).toBe(true);
+
+    log.recordSelfRename("later.md", "after.md");
+    clock.advance(10_001);
+    expect(log.hasSelfRename("later.md")).toBe(false);
+    expect(log.hasSelfRename("later.md")).toBe(false);
   });
 });
 

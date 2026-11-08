@@ -391,3 +391,113 @@ function readHistoryKind(entry: Record<string, unknown>, index: number): History
   }
   return value as HistoryKind;
 }
+
+/**
+ * The batch content frame: several versions' ciphertext in one answer.
+ *
+ * A download used to be one request per file — the last per-file cost on the sync path
+ * (`docs/first-bind-performance.md`). This frame carries up to
+ * {@link MAX_CONTENT_BATCH_FILES} of them: `"CBC1" ‖ u32 count`, then per entry a `u8`
+ * status (`0` present, `1` missing) and — for a present entry — a `u32` length and the
+ * bytes. The client already knows the hashes it asked for, so they do not travel back; a
+ * missing entry is an ordinary answer (the blob was reclaimed, or the chain points at
+ * content no peer can fetch), exactly as a `404` is for one version.
+ *
+ * The frame is bounded on both ends: the request names at most
+ * {@link MAX_CONTENT_BATCH_FILES} hashes, and the server refuses an answer over
+ * {@link MAX_CONTENT_BATCH_BYTES} rather than building it.
+ */
+export const CONTENT_BATCH_MAGIC = "CBC1";
+
+/** Most versions one content request may name. */
+export const MAX_CONTENT_BATCH_FILES = 64;
+
+/** Largest answer one content request may carry (the server refuses past it). */
+export const MAX_CONTENT_BATCH_BYTES = 16 * 1024 * 1024;
+
+/** Header bytes: the magic plus the entry count. */
+export const CONTENT_BATCH_HEADER_BYTES = CONTENT_BATCH_MAGIC.length + 4;
+
+/** Encode the ciphertext of several versions, in the order they were asked for. */
+export function buildContentBatchBody(
+  entries: ReadonlyArray<Uint8Array | null>,
+): Uint8Array<ArrayBuffer> {
+  let total = CONTENT_BATCH_HEADER_BYTES;
+  for (const entry of entries) {
+    total += 1 + (entry === null ? 0 : 4 + entry.byteLength);
+  }
+  const body = new Uint8Array(total);
+  for (let i = 0; i < CONTENT_BATCH_MAGIC.length; i++) body[i] = CONTENT_BATCH_MAGIC.charCodeAt(i);
+  const view = new DataView(body.buffer);
+  view.setUint32(CONTENT_BATCH_MAGIC.length, entries.length, true);
+  let offset = CONTENT_BATCH_HEADER_BYTES;
+  for (const entry of entries) {
+    if (entry === null) {
+      body[offset] = 1;
+      offset += 1;
+      continue;
+    }
+    body[offset] = 0;
+    view.setUint32(offset + 1, entry.byteLength, true);
+    body.set(entry, offset + 5);
+    offset += 5 + entry.byteLength;
+  }
+  return body;
+}
+
+/**
+ * Decode a content batch, checked against the number of hashes the request named.
+ *
+ * A **view** into `body` per present entry (no copy), like `parsePushBody`. Anything
+ * malformed — a truncated body, a count that disagrees with the request, an unknown
+ * status, a length that runs past the end, trailing bytes — is a {@link WireFormatError}:
+ * a frame this client cannot read is a failed request, not "no content".
+ */
+export function parseContentBatchBody(
+  body: Uint8Array,
+  expected: number,
+): Array<Uint8Array | null> {
+  if (body.byteLength < CONTENT_BATCH_HEADER_BYTES) {
+    throw new WireFormatError("content batch is shorter than its header");
+  }
+  for (let i = 0; i < CONTENT_BATCH_MAGIC.length; i++) {
+    if (body[i] !== CONTENT_BATCH_MAGIC.charCodeAt(i)) {
+      throw new WireFormatError("content batch has no header magic");
+    }
+  }
+  const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
+  const count = view.getUint32(CONTENT_BATCH_MAGIC.length, true);
+  if (count !== expected) {
+    throw new WireFormatError(`content batch names ${count} entries, asked for ${expected}`);
+  }
+  const entries: Array<Uint8Array | null> = [];
+  let offset = CONTENT_BATCH_HEADER_BYTES;
+  for (let index = 0; index < count; index++) {
+    if (offset >= body.byteLength) {
+      throw new WireFormatError(`content batch ends before entry ${index}`);
+    }
+    const status = body[offset];
+    offset += 1;
+    if (status === 1) {
+      entries.push(null);
+      continue;
+    }
+    if (status !== 0) {
+      throw new WireFormatError(`content batch entry ${index} has status ${status}`);
+    }
+    if (offset + 4 > body.byteLength) {
+      throw new WireFormatError(`content batch entry ${index} has no length`);
+    }
+    const length = view.getUint32(offset, true);
+    offset += 4;
+    if (offset + length > body.byteLength) {
+      throw new WireFormatError(`content batch entry ${index} runs past the end`);
+    }
+    entries.push(body.subarray(offset, offset + length));
+    offset += length;
+  }
+  if (offset !== body.byteLength) {
+    throw new WireFormatError(`${body.byteLength - offset} trailing bytes after the last entry`);
+  }
+  return entries;
+}

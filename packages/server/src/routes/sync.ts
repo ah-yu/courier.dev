@@ -41,6 +41,7 @@ import {
   CONTENT_HASH_PATTERN,
   HISTORY_KINDS,
   MAX_CHUNKS,
+  MAX_CONTENT_BATCH_FILES,
   MAX_DEVICE_NAME_LENGTH,
   MAX_ENCRYPTED_PATH_LENGTH,
   MAX_ID_LENGTH,
@@ -70,6 +71,7 @@ import {
   getVaultSyncHistory,
   getVaultSyncIndex,
   handleClearDeleted,
+  handleSyncContents,
   handleSyncPull,
   handleSyncPush,
   listDeletedFiles,
@@ -134,6 +136,10 @@ const pullFileSchema = z.object({
 
 const syncPullSchema = z.object({
   files: z.array(pullFileSchema).min(0).max(MAX_PULL_BATCH_FILES),
+});
+
+const syncContentsSchema = z.object({
+  hashes: z.array(z.string().regex(CONTENT_HASH_PATTERN)).min(1).max(MAX_CONTENT_BATCH_FILES),
 });
 
 const chunkQuerySchema = z.object({
@@ -351,6 +357,23 @@ export function syncRoutes(hub: WsHub, logger: Logger): RouteTable {
       // A HEAD has the same headers as the GET and no body; Bun routes dispatch by
       // method, so it needs its own entry.
       HEAD: serveContent,
+    },
+    // Several versions' ciphertext in one answer: the batch frame from `@courier/shared`'s
+    // `wire.ts`. A bind or a burst used to cost one content request per file; this is the
+    // route that removes that per-file round trip. A hash the store no longer holds is an
+    // ordinary `missing` entry, not a failed request.
+    "/api/vaults/:id/sync/contents": {
+      POST: sync(transferLimit, async (request, { vaultId }) => {
+        const { hashes } = await parseJson(request, syncContentsSchema);
+        const body = await handleSyncContents({ vaultId, hashes }, openBlobReader);
+        return new Response(body, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/octet-stream",
+            "Content-Length": String(body.byteLength),
+          },
+        });
+      }),
     },
     // ── Chunked uploads ──
     "/api/vaults/:id/sync/blobs/:contentHash/chunks/:index": {

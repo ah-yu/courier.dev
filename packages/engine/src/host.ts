@@ -159,6 +159,42 @@ export const PUSH_NOTIFICATION_BATCH = 200;
 export const PUSH_NOTIFICATION_FLUSH_MS = 25;
 
 /**
+ * How many **local** vault events inside one window mean "a bulk write", not "an edit".
+ *
+ * An agent, a script or a folder operation writes hundreds of files in a few seconds, and
+ * the file watcher reports each one as its own event. Handled one at a time, every file is
+ * its own push request: 1 000 generated notes measured 1 000 `POST /sync/push` calls, and
+ * the sync route's 600/minute allowance refuses that burst after about a minute (the host
+ * then waits out windows and the files it could not push wait for the next pass). A burst
+ * is handed to **one pass** instead, whose creates travel 100 files per request
+ * (`createUntrackedFiles`) — 1 000 files in 10 requests.
+ *
+ * Four in {@link LOCAL_EVENT_BURST_WINDOW_MS} is eight events a second. That is a
+ * heuristic, not a request bound: one tracked edit on the unbatched path costs a chain read
+ * and a push (about three requests), so a steady stream below the threshold can still
+ * approach the allowance — it then waits out a limiter window instead of being refused
+ * (or, once it crosses the threshold, the batched job costs one request per 100 files). It
+ * is above what one save produces (Obsidian reports a
+ * create as `create` and `modify`, a rename as `delete` + `create`), so an ordinary edit
+ * keeps its immediate per-path push.
+ */
+export const LOCAL_EVENT_BURST_SIZE = 4;
+
+/** The window {@link LOCAL_EVENT_BURST_SIZE} counts events in (ms). */
+export const LOCAL_EVENT_BURST_WINDOW_MS = 500;
+
+/**
+ * How long a detected burst waits before its paths go to the engine (ms).
+ *
+ * The engine's batch job reads each file as it goes, so this is not a wait for files to
+ * land — it is how much of a burst is handed over at once. A longer window means fewer,
+ * larger batches (and fewer vault listings); a shorter one starts the sync sooner. 50 ms
+ * is below what a person notices and long enough that a watcher reporting a whole folder
+ * within one tick travels as one job.
+ */
+export const LOCAL_EVENT_BURST_FLUSH_MS = 50;
+
+/**
  * Where a host's file events come from.
  *
  * The handler set is deliberately three-way and the source answers with what it
@@ -371,6 +407,33 @@ export class SyncHost {
   private pendingPushes: PushedFileEvent[] = [];
   /** The short timer that flushes {@link pendingPushes}; `null` when none is scheduled. */
   private pushFlushTimer: TimerHandle | null = null;
+  /** Local vault events counted in the current window (see {@link LOCAL_EVENT_BURST_SIZE}). */
+  private localEventsInWindow = 0;
+  /** When the current counting window opened (`Date.now()`, the runtime's clock). */
+  private localEventWindowStart = 0;
+  /**
+   * Paths of a burst waiting for the engine's batch job.
+   *
+   * A set, because a watcher can report the same path twice for one write (`create` then
+   * `modify`); the engine re-reads the file anyway, so one entry is enough. Changes and
+   * deletions are kept apart: a change is decided by reading the file, a deletion by its
+   * absence, and mixing them would drop every tombstone in the batch.
+   */
+  private pendingBurstChanges = new Set<string>();
+  private pendingBurstDeletes = new Set<string>();
+  /** A burst's moves, keyed by their source (a later event for it wins). */
+  private pendingBurstRenames = new Map<string, string>();
+  /**
+   * A burst job is owed: paths arrived after the last hand-off (or while one ran).
+   *
+   * Set by every burst event, cleared only when a hand-off actually happens, so the host
+   * converges on the last file the burst wrote.
+   */
+  private localBurstOwed = false;
+  /** The timer that hands the collected paths to the engine; `null` when none is armed. */
+  private localBurstTimer: TimerHandle | null = null;
+  /** True while a burst job is running, so a new hand-off waits for it (single-flight). */
+  private localBurstRunning = false;
   /** True once the socket has been subscribed at least once — see `handleWsEvent`. */
   private socketHasConnected = false;
   /** True while the last settings poll failed, so an outage is reported once. */
@@ -481,13 +544,35 @@ export class SyncHost {
       // The label carries the path: a failure line has to say *which* file could not
       // be pushed, or a headless user has nothing to act on.
       changed: (path, sizeBytes) =>
-        this.runQueued(`push ${path}`, sizeBytes, () => engine.handleLocalChange(path)),
+        this.dispatchLocalEvent(
+          "changed",
+          `push ${path}`,
+          path,
+          null,
+          sizeBytes,
+          engine.hasSelfWriteHint(path),
+          () => engine.handleLocalChange(path),
+        ),
       removed: (path) =>
         // Deleting transfers no content, so it never needs to run alone.
-        this.runQueued(`delete ${path}`, 0, () => engine.handleLocalDelete(path)),
+        this.dispatchLocalEvent(
+          "deleted",
+          `delete ${path}`,
+          path,
+          null,
+          0,
+          engine.hasSelfDeleteHint(path),
+          () => engine.handleLocalDelete(path),
+        ),
       renamed: (from, to, sizeBytes) =>
-        this.runQueued(`rename ${from} → ${to}`, sizeBytes, () =>
-          engine.handleLocalRename(from, to),
+        this.dispatchLocalEvent(
+          "renamed",
+          `rename ${from} → ${to}`,
+          from,
+          to,
+          sizeBytes,
+          engine.hasSelfRenameHint(from),
+          () => engine.handleLocalRename(from, to),
         ),
     });
 
@@ -557,6 +642,8 @@ export class SyncHost {
       const idle =
         this.background === 0 &&
         !this.reconciling &&
+        !this.localBurstOwed &&
+        !this.localBurstRunning &&
         this.ops.running === 0 &&
         this.ops.queued === 0;
       if (!idle) {
@@ -571,6 +658,8 @@ export class SyncHost {
       if (
         this.background === 0 &&
         !this.reconciling &&
+        !this.localBurstOwed &&
+        !this.localBurstRunning &&
         this.ops.running === 0 &&
         this.ops.queued === 0 &&
         this.drainingEngines.size === draining
@@ -594,6 +683,18 @@ export class SyncHost {
     this.stopEvents?.();
     this.stopEvents = null;
     this.cancelBindRetry();
+    if (this.localBurstTimer !== null) {
+      this.localBurstTimer.cancel();
+      this.localBurstTimer = null;
+    }
+    // A restart's bind pass scans the whole vault, so a burst this host had not carried
+    // out yet has nothing to wait for.
+    this.localBurstOwed = false;
+    this.pendingBurstChanges.clear();
+    this.pendingBurstDeletes.clear();
+    this.pendingBurstRenames.clear();
+    this.localEventsInWindow = 0;
+    this.localEventWindowStart = 0;
     if (this.pushFlushTimer !== null) {
       this.pushFlushTimer.cancel();
       this.pushFlushTimer = null;
@@ -817,6 +918,111 @@ export class SyncHost {
     run: () => Promise<unknown> | undefined,
   ): void {
     this.ops.enqueue(label, weightForSize(this.opLimits, sizeBytes), run);
+  }
+
+  /**
+   * Hand one local vault event to the engine, or hold it for a burst batch.
+   *
+   * A single edit keeps its immediate per-path push. Once this window holds more events
+   * than {@link LOCAL_EVENT_BURST_SIZE}, the host stops pushing one file at a time and
+   * collects their paths; {@link LOCAL_EVENT_BURST_FLUSH_MS} later the engine carries them
+   * out as **one job**, whose creates travel 100 files per request
+   * (`SyncEngine.handleLocalChanges`). That is what keeps a bulk write inside the server's
+   * sync allowance without a full pass — the vault is never scanned.
+   *
+   * `own` marks an event the engine itself caused (its own pull's write). Those are queued
+   * exactly as before but never counted: a 1 000-file pull fires 1 000 `modify` events, and
+   * counting them would batch behind every large download.
+   *
+   * A held event is not queued: the batch job re-reads its file from disk and decides it
+   * exactly as the event would have (including the rename and adoption rules), so nothing
+   * is lost by waiting for the batch.
+   */
+  private dispatchLocalEvent(
+    kind: "changed" | "deleted" | "renamed",
+    label: string,
+    from: string,
+    to: string | null,
+    sizeBytes: number | null,
+    own: boolean,
+    run: () => Promise<unknown> | undefined,
+  ): void {
+    if (own) {
+      this.runQueued(label, sizeBytes, run);
+      return;
+    }
+    const now = Date.now();
+    if (now - this.localEventWindowStart > LOCAL_EVENT_BURST_WINDOW_MS) {
+      this.localEventWindowStart = now;
+      this.localEventsInWindow = 0;
+    }
+    this.localEventsInWindow += 1;
+    if (this.localEventsInWindow > LOCAL_EVENT_BURST_SIZE) {
+      if (kind === "deleted") this.pendingBurstDeletes.add(from);
+      else if (kind === "renamed" && to !== null) this.pendingBurstRenames.set(from, to);
+      else if (kind === "changed") this.pendingBurstChanges.add(from);
+      this.scheduleLocalBurst();
+      return;
+    }
+    this.runQueued(label, sizeBytes, run);
+  }
+
+  /**
+   * Ask for the collected burst paths to be carried out, once.
+   *
+   * At most one hand-off is armed, and one job runs at a time: paths that arrive while a
+   * job runs set the flag again and the job's tail arms the next hand-off, so the vault
+   * converges on the last file the burst wrote however long the burst lasts — without two
+   * jobs deciding about the same paths concurrently.
+   */
+  private scheduleLocalBurst(): void {
+    // A late event from a host that has been stopped owes nothing: nothing would run the
+    // job, and `whenIdle` would wait for it forever.
+    if (this.stopped) return;
+    this.localBurstOwed = true;
+    if (this.localBurstTimer !== null || this.localBurstRunning) return;
+    const timer = this.platform.after(LOCAL_EVENT_BURST_FLUSH_MS, () => {
+      this.localBurstTimer = null;
+      this.runLocalBurst();
+    });
+    timer.unref?.();
+    this.localBurstTimer = timer;
+  }
+
+  /** Hand the collected paths to the engine, unless a job is already running. */
+  private runLocalBurst(): void {
+    if (this.stopped || !this.localBurstOwed) return;
+    const engine = this.engineInstance;
+    if (engine === null) return;
+    if (this.localBurstRunning) return;
+    const changed = [...this.pendingBurstChanges];
+    const deleted = [...this.pendingBurstDeletes];
+    const renamed = [...this.pendingBurstRenames].map(([from, to]) => ({ from, to }));
+    this.pendingBurstChanges.clear();
+    this.pendingBurstDeletes.clear();
+    this.pendingBurstRenames.clear();
+    this.localBurstOwed = false;
+    if (changed.length === 0 && deleted.length === 0 && renamed.length === 0) return;
+    // Say how big the burst was: a host that logs this after one save is looking at a
+    // watcher that reports one save as a burst (the threshold is 4 events in 500 ms; an
+    // ordinary save is one, a create at most two).
+    this.log(
+      `local burst: ${changed.length} changed, ${deleted.length} deleted, ` +
+        `${renamed.length} renamed in one batched push`,
+    );
+    this.localBurstRunning = true;
+    // One job for the whole batch: it reads, decides and sends 100 files per request.
+    // Unknown size (null) makes it exclusive, like a notification batch — the job itself
+    // bounds how much it holds.
+    this.runQueued("local burst", null, async () => {
+      try {
+        await engine.handleLocalEvents({ changed, deleted, renamed });
+      } finally {
+        this.localBurstRunning = false;
+        // Paths that arrived while this job ran were not covered by it.
+        if (this.localBurstOwed) this.scheduleLocalBurst();
+      }
+    });
   }
 
   /**

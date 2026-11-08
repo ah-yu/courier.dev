@@ -2,10 +2,14 @@ import { describe, expect, it } from "vitest";
 import { MAX_DEVICE_NAME_LENGTH } from "./sync";
 import { CHUNKED_TRANSFER_THRESHOLD } from "./blob";
 import {
+  CONTENT_BATCH_HEADER_BYTES,
+  CONTENT_BATCH_MAGIC,
   MAX_PUSH_HEADER_BYTES,
   PUSH_HEADER_LENGTH_BYTES,
   WireFormatError,
+  buildContentBatchBody,
   buildPushBody,
+  parseContentBatchBody,
   parsePushBody,
   type PushFileFrame,
 } from "./wire";
@@ -330,5 +334,87 @@ describe("the push wire frame", () => {
     const oversized = new Uint8Array(PUSH_HEADER_LENGTH_BYTES);
     new DataView(oversized.buffer).setUint32(0, MAX_PUSH_HEADER_BYTES + 1, true);
     expect(() => parsePushBody(oversized)).toThrow(/over the/);
+  });
+});
+
+/** Write a content batch by hand, so the parser can be fed frames the builder cannot produce. */
+function handBuiltContents(
+  count: number,
+  entries: Array<{ status: number; length?: number; bytes?: Uint8Array }>,
+  trailing = 0,
+): Uint8Array {
+  const size =
+    CONTENT_BATCH_HEADER_BYTES +
+    entries.reduce(
+      (total, entry) => total + 1 + (entry.status === 0 ? 4 : 0) + (entry.bytes?.byteLength ?? 0),
+      0,
+    ) +
+    trailing;
+  const body = new Uint8Array(size);
+  for (let i = 0; i < CONTENT_BATCH_MAGIC.length; i++) body[i] = CONTENT_BATCH_MAGIC.charCodeAt(i);
+  new DataView(body.buffer).setUint32(CONTENT_BATCH_MAGIC.length, count, true);
+  let offset = CONTENT_BATCH_HEADER_BYTES;
+  for (const entry of entries) {
+    body[offset] = entry.status;
+    offset += 1;
+    if (entry.status !== 0) continue;
+    new DataView(body.buffer).setUint32(offset, entry.length ?? entry.bytes?.byteLength ?? 0, true);
+    offset += 4;
+    if (entry.bytes) {
+      body.set(entry.bytes, offset);
+      offset += entry.bytes.byteLength;
+    }
+  }
+  return body;
+}
+
+describe("the content batch frame", () => {
+  it("round-trips several versions in the order they were asked for", () => {
+    const first = bytes(40, 1);
+    const second = bytes(7, 2);
+    const parsed = parseContentBatchBody(buildContentBatchBody([first, null, second]), 3);
+    expect(parsed).toHaveLength(3);
+    expect(parsed[0]).toEqual(first);
+    expect(parsed[1]).toBeNull();
+    expect(parsed[2]).toEqual(second);
+  });
+
+  it("round-trips an empty batch and a zero-length entry", () => {
+    expect(parseContentBatchBody(buildContentBatchBody([]), 0)).toEqual([]);
+    const parsed = parseContentBatchBody(buildContentBatchBody([new Uint8Array(0)]), 1);
+    expect(parsed[0]).toEqual(new Uint8Array(0));
+  });
+
+  it("rejects a frame it cannot trust", () => {
+    // Shorter than the header.
+    expect(() => parseContentBatchBody(new Uint8Array(2), 1)).toThrow(WireFormatError);
+    // No magic.
+    const noMagic = buildContentBatchBody([bytes(4)]);
+    noMagic[0] = 0;
+    expect(() => parseContentBatchBody(noMagic, 1)).toThrow(/magic/);
+    // A count that disagrees with the request.
+    expect(() => parseContentBatchBody(buildContentBatchBody([bytes(4)]), 2)).toThrow(/asked for/);
+    // An unknown status.
+    expect(() => parseContentBatchBody(handBuiltContents(1, [{ status: 7 }]), 1)).toThrow(/status/);
+    // A length that runs past the end (the bytes are not there).
+    expect(() =>
+      parseContentBatchBody(handBuiltContents(1, [{ status: 0, length: 9 }]), 1),
+    ).toThrow(/runs past the end/);
+    // Trailing bytes nobody claimed.
+    expect(() => parseContentBatchBody(handBuiltContents(1, [{ status: 1 }], 2), 1)).toThrow(
+      /trailing bytes/,
+    );
+    // A present entry whose length field is itself cut off.
+    const truncated = new Uint8Array(CONTENT_BATCH_HEADER_BYTES + 3);
+    for (let i = 0; i < CONTENT_BATCH_MAGIC.length; i++) {
+      truncated[i] = CONTENT_BATCH_MAGIC.charCodeAt(i);
+    }
+    new DataView(truncated.buffer).setUint32(CONTENT_BATCH_MAGIC.length, 1, true);
+    truncated[CONTENT_BATCH_HEADER_BYTES] = 0;
+    expect(() => parseContentBatchBody(truncated, 1)).toThrow(/no length/);
+    // A frame that ends before a declared entry.
+    expect(() => parseContentBatchBody(handBuiltContents(2, [{ status: 1 }]), 2)).toThrow(
+      /ends before entry/,
+    );
   });
 });

@@ -14,7 +14,9 @@ import type {
   HistoryKind,
   HistoryLimits,
 } from "@courier/shared";
-import { NotFoundError } from "../lib/errors";
+import { NotFoundError, PayloadTooLargeError } from "../lib/errors";
+import type { BlobReader } from "../lib/blob-store";
+import { MAX_CONTENT_BATCH_BYTES, buildContentBatchBody } from "@courier/shared";
 
 /**
  * The sync handlers: pure functions over injected DB/fs operations.
@@ -862,4 +864,64 @@ export async function handleClearDeleted(
   }
 
   return { deletedFiles: fileIds.length, deletedBlobs };
+}
+
+/** What one batch content request asks for. */
+export interface SyncContentsInput {
+  vaultId: string;
+  /** The versions' content hashes, in the order the client wants them back. */
+  hashes: readonly string[];
+}
+
+/** Open one stored blob — `openBlobReader`, injected so the handler owns no fs call. */
+export type OpenBlobReaderFn = (
+  vaultId: string,
+  contentHash: string,
+) => Promise<BlobReader | undefined>;
+
+/**
+ * The batch content route's work: the ciphertext of several versions in one frame.
+ *
+ * A download used to be one request per file, which was the last per-file round trip on
+ * the sync path (`docs/first-bind-performance.md`). The frame is the one
+ * `buildContentBatchBody` writes; a hash the store no longer holds is an ordinary `null`
+ * entry — the same answer a `404` gives for one version — so a reclaimed blob does not fail
+ * the whole batch. The answer is bounded: the request may name
+ * `MAX_CONTENT_BATCH_FILES` hashes (the route's schema), and the bytes it may carry are
+ * capped here, before the body exists.
+ */
+export async function handleSyncContents(
+  input: SyncContentsInput,
+  openBlobReader: OpenBlobReaderFn,
+  maxBytes: number = MAX_CONTENT_BATCH_BYTES,
+): Promise<Uint8Array<ArrayBuffer>> {
+  const entries: Array<Uint8Array | null> = [];
+  let total = 0;
+  for (const contentHash of input.hashes) {
+    const reader = await openBlobReader(input.vaultId, contentHash);
+    if (reader === undefined) {
+      entries.push(null);
+      continue;
+    }
+    // Check the size **before** reading: `readAll` allocates the blob's whole length, so a
+    // request naming one file at the account's cap would buffer it just to answer 413 —
+    // the bound this route exists to enforce would be paid by the server, per request.
+    if (total + reader.stat.size > maxBytes) {
+      await reader.close();
+      throw new PayloadTooLargeError(`content batch exceeds ${maxBytes} bytes`);
+    }
+    let bytes: Uint8Array<ArrayBuffer> | undefined;
+    try {
+      bytes = await reader.readAll();
+    } finally {
+      await reader.close();
+    }
+    if (bytes === undefined) {
+      entries.push(null);
+      continue;
+    }
+    total += bytes.byteLength;
+    entries.push(bytes);
+  }
+  return buildContentBatchBody(entries);
 }

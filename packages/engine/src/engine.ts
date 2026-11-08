@@ -1,6 +1,12 @@
-import type { SyncAction, SyncPushResponse, VersionChainEntry } from "@courier/shared";
+import type {
+  SyncAction,
+  SyncPushResponse,
+  VaultSyncIndexResponse,
+  VersionChainEntry,
+} from "@courier/shared";
 import {
   CHUNK_STORED_BYTES,
+  MAX_CONTENT_BATCH_FILES,
   MAX_PULL_BATCH_FILES,
   MAX_PUSH_BATCH_FILES,
   MAX_ENCRYPTED_PATH_LENGTH,
@@ -18,7 +24,7 @@ import {
   sha256Text,
 } from "./crypto";
 import { chunkBounds, chunkCountForSize, shouldTransferInChunks } from "./chunked-transfer";
-import type { Platform } from "./platform";
+import type { Platform, TimerHandle } from "./platform";
 import { generateFileId, generateVersionId } from "./ids";
 import { isConflictFile, conflictFilePath } from "./conflict-file";
 import { historyKindFor } from "./file-types";
@@ -438,6 +444,75 @@ interface PreparedPush {
 }
 
 /**
+ * One prepared version waiting in the event batch, and how a refusal is settled.
+ *
+ * `create` is a chain this engine just generated (its refusal is retried through the
+ * version's own lost-response handling); `tracked` is an existing chain, whose refusal is
+ * decided again from the fresh chain; `delete` is a tombstone, whose refusal means a peer
+ * pushed after the point it was decided from and is settled as the deletion that raced an
+ * edit; `rename` is a move, whose refusal is decided again from the fresh chain at the
+ * destination.
+ */
+interface PendingPush {
+  prepared: PreparedPush;
+  kind: "create" | "tracked" | "delete" | "rename";
+}
+
+/** What an event read from disk before deciding: the bytes, and the stamp they came with. */
+interface LocalChangeRead {
+  bytes: Uint8Array;
+  stamp: FileStamp;
+}
+
+/**
+ * How long a whole-file content read waits for other reads to travel with it (ms).
+ *
+ * The wait only applies to a batch that is **not** full: the pool's concurrency is the most
+ * reads that can be outstanding, so a batch that many entries is flushed at once (see
+ * `fetchContentBatched`). This timer covers the tail of a pass, where fewer files are left
+ * than the pool could run.
+ *
+ * `0` — the next turn of the event loop — is deliberate: a timer here is a *sync point* in
+ * the download pipeline, and every millisecond of it is paid once per wave (250 waves for
+ * 1 000 files). Waiting longer than a turn made a 1 000-file cold bind slower than one
+ * request per file; one turn is free next to a network round trip and still groups the
+ * reads that finish together.
+ */
+const CONTENT_BATCH_WINDOW_MS = 0;
+
+/**
+ * Most plaintext one content batch may name.
+ *
+ * The batch holds every file's ciphertext until the request is answered, so this is what
+ * bounds a download's memory; a file above it travels alone. The server's own bound is
+ * `MAX_CONTENT_BATCH_BYTES`, twice this, so a batch built here is always accepted.
+ */
+const CONTENT_BATCH_MAX_BYTES = 8 * 1024 * 1024;
+
+/** One file waiting for the next batched content read. */
+interface PendingContent {
+  /** The version's plaintext size, for the batch's byte budget. */
+  sizeBytes: number;
+  resolve: (bytes: Uint8Array | null) => void;
+  reject: (err: unknown) => void;
+}
+
+/**
+ * One burst of local vault events, as a host collects it.
+ *
+ * `changed` are paths whose file was created or modified; `deleted` are paths whose file
+ * was removed; `renamed` are the moves (`from` → `to`). They are separate because each is
+ * decided from a different fact — a change by reading the file, a deletion by its absence,
+ * a move by re-pointing the chain at the destination — and mixing them would drop the
+ * tombstones, or turn a move into a delete plus a second chain.
+ */
+export interface LocalEventBatch {
+  changed?: readonly string[];
+  deleted?: readonly string[];
+  renamed?: ReadonlyArray<{ from: string; to: string }>;
+}
+
+/**
  * Most ciphertext one batched push may hold.
  *
  * A batch keeps every file's plaintext alive until the request is built, so this is
@@ -578,6 +653,12 @@ export class SyncEngine {
    * operation: the change is one job, and the next job on that path starts after it.
    */
   private readonly paths = new PathQueue();
+  /** Whole-file content reads waiting for the next batched request (see `fetchContentBatched`). */
+  private pendingContent = new Map<string, PendingContent[]>();
+  /** Plaintext bytes the pending batch would fetch, for its memory bound. */
+  private contentBatchBytes = 0;
+  /** The timer that flushes {@link pendingContent}; `null` when none is armed. */
+  private contentBatchTimer: TimerHandle | null = null;
   /**
    * Paths this engine is writing right now, so a vault event the write fires can be
    * queued without waiting for it (see `schedule`).
@@ -1163,10 +1244,22 @@ export class SyncEngine {
    * head differs (see {@link SyncPushBaseError}).
    */
   private async pushFile(request: PushRequest): Promise<void> {
-    const { fileId, plainPath } = request;
     const prepared = await this.preparePush(request);
     // A path the API cannot carry: reported by `preparePush`, and nothing to send.
     if (!prepared) return;
+    await this.pushPrepared(prepared);
+  }
+
+  /**
+   * Send one **prepared** version on its own, and settle its answer.
+   *
+   * Split from {@link pushFile} so a batch can prepare several versions and then settle
+   * each one with exactly this code (see {@link applyLocalChanges}): the refusal handling
+   * — a lost response whose bytes the head already holds, a move whose blob the store no
+   * longer has — must not exist twice.
+   */
+  private async pushPrepared(prepared: PreparedPush): Promise<void> {
+    const { fileId, plainPath } = prepared;
 
     let content: Uint8Array | null = null;
     let contentChunks = 0;
@@ -1219,8 +1312,18 @@ export class SyncEngine {
       const head = remoteHead(chain);
       // The head already holds the bytes this push was carrying: either this exact
       // push was applied and only its response was lost, or a peer converged on the
-      // same content. Nothing to write — take the head as the sync point.
-      if (head && head.contentHash === prepared.contentHash) {
+      // same content. Nothing to write — take the head as the sync point. A **delete** is
+      // settled by its action, not its content: every tombstone carries the empty-content
+      // hash, and an empty *live* file must not be mistaken for one that landed. The mirror
+      // holds too: a live push whose bytes are empty must not treat a peer's tombstone as
+      // its own head (that would resurrect a deleted file on the next pass).
+      const landed =
+        prepared.action === "delete"
+          ? head?.action === "delete"
+          : head !== undefined &&
+            head.action !== "delete" &&
+            head.contentHash === prepared.contentHash;
+      if (head && landed) {
         this.adoptRemoteIdentity(fileId, plainPath, head, prepared.stamp ?? null);
         // The head is this very version (the server stores the client's versionId), so
         // the push did land and only its response was lost. A peer that merely converged
@@ -1537,7 +1640,12 @@ export class SyncEngine {
       // `rename`, whose bytes were only proved by that stamp.
       ...(prepared.stamp === null ? {} : { stamp: prepared.stamp }),
     };
-    this.pathToFileId.set(plainPath, fileId);
+    // A delete keeps the path mapped to this chain so a file written there later is a
+    // restore — unless another chain already owns the path (a move in the same job just
+    // claimed it, and this tombstone must not take it back).
+    if (action !== "delete" || this.pathToFileId.get(plainPath) === undefined) {
+      this.pathToFileId.set(plainPath, fileId);
+    }
     this.reportActivity({
       direction: "out",
       outcome: "applied",
@@ -3131,24 +3239,105 @@ export class SyncEngine {
    * exactly what a 10 000-file first download did before this rule
    * (`docs/first-bind-performance.md`).
    */
-  private async fetchRemoteBytes(vaultId: string, contentHash: string): Promise<Uint8Array | null> {
-    let stored: Uint8Array;
-    try {
-      // The API hands back the stored ciphertext itself; there is nothing to decode
-      // first, so a pull decrypts the bytes it received and no more.
-      stored = await this.withRateLimitWaits(() =>
-        this.opts.api.getVersionContent(vaultId, contentHash),
-      );
-    } catch (err) {
-      if (isMissingContentError(err)) return null;
-      throw err;
-    }
+  private async fetchRemoteBytes(
+    vaultId: string,
+    contentHash: string,
+    plaintextSize: number,
+  ): Promise<Uint8Array | null> {
+    // The API hands back the stored ciphertext itself; there is nothing to decode first,
+    // so a pull decrypts the bytes it received and no more. Reads are batched (see
+    // `fetchContentBatched`): a pass or a notification burst fetches several versions in
+    // one request instead of one per file. A failure — a rate limit that outlasted its
+    // waits, a 5xx, a dropped connection — is a failed pull and is rethrown; only a `null`
+    // (the store holds nothing, or the bytes do not decrypt) is "nothing to apply".
+    const stored = await this.fetchContentBatched(contentHash, plaintextSize);
+    if (stored === null) return null;
     try {
       return await decryptCombinedBytes(this.opts.encryptionKey, stored);
     } catch {
       // Undecryptable: not a store a peer can use, and retrying cannot fix it.
       return null;
     }
+  }
+
+  /**
+   * The ciphertext of `contentHash`, held for at most {@link CONTENT_BATCH_WINDOW_MS} to
+   * travel with the reads other files of the same pass or burst are making.
+   *
+   * A download used to be one content request per file, and that was the last per-file cost
+   * on the sync path (`docs/first-bind-performance.md`): a first bind of 50 000 files made
+   * 50 000 requests. The engine runs four per-file operations at a time, so a short window
+   * groups their reads into one request (the server answers several versions per route, see
+   * `buildContentBatchBody`), and a lone read still costs one request.
+   *
+   * `sizeBytes` is the version's plaintext size: the batch's byte budget is what bounds the
+   * memory a batch holds, and a file big enough to fill it travels alone.
+   */
+  private fetchContentBatched(contentHash: string, sizeBytes: number): Promise<Uint8Array | null> {
+    return new Promise((resolve, reject) => {
+      // The same content is often needed by more than one file (a copy, or two chains that
+      // converged): one entry in the request answers all of them.
+      const waiting = this.pendingContent.get(contentHash);
+      if (waiting !== undefined) {
+        waiting.push({ sizeBytes, resolve, reject });
+        return;
+      }
+      if (
+        this.contentBatchBytes > 0 &&
+        this.contentBatchBytes + sizeBytes > CONTENT_BATCH_MAX_BYTES
+      ) {
+        this.flushContentBatch();
+      }
+      this.pendingContent.set(contentHash, [{ sizeBytes, resolve, reject }]);
+      this.contentBatchBytes += sizeBytes;
+      // A full wave goes out at once: the pool's concurrency is how many per-file
+      // operations can be waiting for content, so that many entries is a batch that cannot
+      // grow — waiting for the timer would only add a turn to every wave.
+      // A batch never names more hashes than the route accepts, whatever the pool runs:
+      // `opLimits` is caller-settable, and a request the schema refuses would reject every
+      // waiter and fail the pass.
+      const batchFiles = Math.min(this.passLimits.maxConcurrent, MAX_CONTENT_BATCH_FILES);
+      if (this.pendingContent.size >= batchFiles) {
+        this.flushContentBatch();
+        return;
+      }
+      this.contentBatchTimer ??= this.opts.platform.after(CONTENT_BATCH_WINDOW_MS, () => {
+        this.contentBatchTimer = null;
+        this.flushContentBatch();
+      });
+    });
+  }
+
+  /** Send the held content reads as one request, and settle every waiter for each hash. */
+  private flushContentBatch(): void {
+    if (this.contentBatchTimer !== null) {
+      this.contentBatchTimer.cancel();
+      this.contentBatchTimer = null;
+    }
+    if (this.pendingContent.size === 0) return;
+    const hashes = [...this.pendingContent.keys()];
+    const waiting = this.pendingContent;
+    this.pendingContent = new Map();
+    this.contentBatchBytes = 0;
+    void this.sendContentBatch(hashes).then(
+      (results) => {
+        for (const [index, hash] of hashes.entries()) {
+          for (const waiter of waiting.get(hash) ?? []) waiter.resolve(results[index] ?? null);
+        }
+      },
+      (err: unknown) => {
+        for (const waiters of waiting.values()) for (const waiter of waiters) waiter.reject(err);
+      },
+    );
+  }
+
+  /** One content request, waiting out a limiter's window like every other bulk read. */
+  private async sendContentBatch(
+    contentHashes: readonly string[],
+  ): Promise<Array<Uint8Array | null>> {
+    return await this.withRateLimitWaits(() =>
+      this.opts.api.getVersionContents(this.opts.vaultId, [...contentHashes]),
+    );
   }
 
   /**
@@ -3315,7 +3504,7 @@ export class SyncEngine {
     plaintextSize: number,
   ): Promise<Uint8Array | null> {
     if (!shouldTransferInChunks(plaintextSize)) {
-      return this.fetchRemoteBytes(vaultId, contentHash);
+      return this.fetchRemoteBytes(vaultId, contentHash, plaintextSize);
     }
     const count = chunkCountForSize(plaintextSize);
     const plaintext = new Uint8Array(plaintextSize);
@@ -3782,116 +3971,25 @@ export class SyncEngine {
     // The bind covers every file it scans; a deferred event that runs before it finishes
     // must not push an identity of its own.
     if (!this.initialized) return;
-    // The size cap is checked before the read, so an oversized file is never loaded.
-    if (!(await this.withinLocalSizeCap(path))) return;
-    // A streamed commit may have renamed the target already while its stamp is still
-    // being taken. Waiting here is what lets the event below avoid reading the file.
-    const pendingCommit = this.streamedCommits.get(path);
-    if (pendingCommit) await pendingCommit;
-    const stamp = await this.opts.adapter.statFile(path);
-    if (stamp === null) return;
-    // A streamed write records its stamp as well as its hash: the event this very write
-    // fires is then recognised without reading a file that was just written in chunks.
-    // A genuine edit inside the window moves the stamp and takes the ordinary path.
-    if (this.selfEvents.matchesSelfWriteStamp(path, stamp)) return;
-    const bytes = await this.opts.adapter.readFile(path);
-    if (!bytes) return;
+    const read = await this.readLocalChange(path);
+    if (!read) return;
 
-    // A write this engine performed echoes back as a vault event, and the host's
-    // handler runs before the engine's own state update lands (the write and that
-    // update are separate async hops). Treating the echo as a user edit is what
-    // produced a phantom conflict, a duplicate restore and a duplicate fileId.
-    if (await this.isOwnWrite(path, bytes)) return;
-
-    let fileId = this.pathToFileId.get(path);
-
-    // New local file — look for a rename first (same hash as a deleted file).
+    const fileId = this.pathToFileId.get(path);
     if (!fileId) {
-      const hash = await sha256Hex(bytes);
-      const renamed = this.selfEvents.matchDeletedFile(hash);
-      if (renamed) {
-        fileId = renamed.fileId;
-        const oldPath = this.state[fileId]?.plainPath;
-        if (oldPath) this.pathToFileId.delete(oldPath);
-        this.state[fileId] = { ...this.state[fileId], plainPath: path };
-        this.pathToFileId.set(path, fileId);
-        await this.pushFile({
-          fileId,
-          plainPath: path,
-          action: "rename",
-          bytes,
-          contentHash: hash,
-          baseVersionId: this.state[fileId].lastKnownVersionId,
-          stamp,
-        });
-        this.persist();
-        return;
+      const hash = await sha256Hex(read.bytes);
+      // The identity fallback's listing: one vault listing only pays for itself when the
+      // identity is genuinely unknown, and a batch computes it once for every path.
+      const localPaths = new Set(await this.opts.adapter.listSyncableFiles());
+      const outcome = await this.resolveNewLocalFile(
+        path,
+        read.bytes,
+        read.stamp,
+        hash,
+        localPaths,
+      );
+      if (outcome.kind === "prepared" || outcome.kind === "rename") {
+        await this.pushPrepared(outcome.prepared);
       }
-
-      // The server already tracks this path (or this content) under a fileId we
-      // are not tracking locally — a peer renamed or moved a file, and our vault
-      // event for the new path won the race against the state update that would
-      // have claimed it. Adopt that identity instead of forking a second chain
-      // for the same path: a second chain here is exactly the "both a.md and
-      // b.md exist" outcome.
-      //
-      // A **tombstone** is not an identity to adopt: the path holds no live version,
-      // and a file written there after the deletion is somebody's new file (the same
-      // answer `decideFile` gives for a tombstone that is this device's own sync
-      // point). Adopting it would turn "restore the parked copy" into a conflict
-      // against the deletion that had just been applied.
-      const known = this.remoteIndex.fileIdAt(path);
-      const knownHead = known ? this.remoteIndex.headOf(known) : undefined;
-      let remote =
-        known && knownHead && knownHead.action !== "delete"
-          ? { fileId: known, head: knownHead }
-          : null;
-      if (!remote) {
-        // One vault listing only pays for itself when the identity is genuinely
-        // unknown: the fallback has to know whether the chain's previous path
-        // still holds a file, or two coexisting copies would be merged.
-        const localPaths = new Set(await this.opts.adapter.listSyncableFiles());
-        remote = this.findRemoteFileIdByContent(hash, localPaths);
-      }
-      if (remote) {
-        this.adoptRemoteIdentity(remote.fileId, path, remote.head, stamp);
-        if (hash === remote.head.contentHash) {
-          // Same content at the peer's path: a rename, not an edit. The head just
-          // adopted is the base.
-          await this.pushFile({
-            fileId: remote.fileId,
-            plainPath: path,
-            action: "rename",
-            bytes,
-            contentHash: hash,
-            baseVersionId: remote.head.versionId,
-            stamp,
-          });
-        } else {
-          const chain = await this.pullChain(remote.fileId);
-          await this.handleConflict(remote.fileId, path, remoteHead(chain), true);
-        }
-        this.persist();
-        return;
-      }
-
-      fileId = generateFileId();
-      this.state[fileId] = {
-        plainPath: path,
-        lastKnownVersionId: null,
-        lastKnownContentHash: null,
-      };
-      this.pathToFileId.set(path, fileId);
-      // A fileId this engine just generated cannot have a chain: base null.
-      await this.pushFile({
-        fileId,
-        plainPath: path,
-        action: "create",
-        bytes,
-        contentHash: hash,
-        baseVersionId: null,
-        stamp,
-      });
       this.persist();
       return;
     }
@@ -3899,8 +3997,723 @@ export class SyncEngine {
     // Existing tracked file — incremental decide. The bytes just read are handed on so
     // the decision does not read (and hash) the same file a second time; it re-checks
     // the stamp before trusting them (see `decideIncremental`).
-    await this.decideIncremental(fileId, path, { bytes, stamp });
+    await this.decideIncremental(fileId, path, read);
     this.persist();
+  }
+
+  /**
+   * Carry out a batch of local vault events as **one job**.
+   *
+   * A bulk write — an agent, a script, a folder operation — reaches a host as one event
+   * per file. Handled one at a time that is one `POST /sync/push` per file, which the sync
+   * route's per-vault allowance refuses after about a minute (1 000 generated notes
+   * measured 1 000 pushes; 300 edits to existing notes measured 300 chain reads *and* 300
+   * pushes). This job makes the same per-path decisions as {@link handleLocalChange} but
+   * collects the versions they produce and sends them 100 files per request; it reads the
+   * vault listing once instead of once per new file, and fetches tracked files' chains 200
+   * per request.
+   *
+   * It is a job over every path it is given, so an event for one of those paths queues
+   * behind it rather than deciding from a half-applied batch — the same rule the pass's
+   * create batch follows (`PathQueue`).
+   *
+   * Paths need not be syncable or distinct; anything outside this device's scope is
+   * dropped here, before the listing is paid for.
+   */
+  async handleLocalEvents(batch: LocalEventBatch): Promise<void> {
+    const changed = [...new Set(batch.changed ?? [])].filter((path) => this.isSyncable(path));
+    const deleted = [...new Set(batch.deleted ?? [])].filter((path) => this.isSyncable(path));
+    // A pair is kept when either side is this device's: a move *out* of the scope still
+    // has to re-point the chain (see `rememberMoveOutOfScope`), which is what keeps a
+    // later pass from reading the old path as a deletion.
+    const renamed = (batch.renamed ?? []).filter(
+      (pair) => pair.from !== pair.to && (this.isSyncable(pair.from) || this.isSyncable(pair.to)),
+    );
+    if (changed.length === 0 && deleted.length === 0 && renamed.length === 0) return;
+    const all = [...changed, ...deleted, ...renamed.flatMap((pair) => [pair.from, pair.to])];
+    // A batch while this host has never completed a bind runs one first, exactly as the
+    // single event does — and never from inside the engine's own write (see
+    // `handleLocalChange`).
+    if (!this.initialized && !all.some((path) => this.writingPaths.has(path))) {
+      await this.initialSync({ firstBind: true });
+    }
+    if (!this.initialized) return;
+    // A pull decided for one of these files can apply at the path the head records (a
+    // peer's move), so the job claims that path too, as the single event does.
+    const claims = new Set<string>(all);
+    for (const path of all) {
+      const fileId = this.pathToFileId.get(path);
+      const recorded = fileId ? this.remoteIndex.pathOf(fileId) : null;
+      if (recorded !== null) claims.add(recorded);
+    }
+    return this.schedule([...claims], () => this.applyLocalEvents(changed, deleted, renamed));
+  }
+
+  /**
+   * The work of {@link handleLocalEvents}, running inside its paths' job.
+   *
+   * Everything from disk to a prepared version happens here (so the listing and the
+   * ciphertext are paid once), and the versions leave in batches of
+   * {@link MAX_PUSH_BATCH_FILES} / {@link MAX_PUSH_BATCH_BYTES} — the same bounds the
+   * pass's create batch uses, because the server accepts the same 100-file request.
+   */
+  private async applyLocalEvents(
+    paths: readonly string[],
+    deleted: readonly string[],
+    renamed: ReadonlyArray<{ from: string; to: string }>,
+  ): Promise<void> {
+    if (!this.initialized) return;
+    // The change list this job decides: the events it was given, plus the destination of
+    // any move whose source this device never tracked (that is a create at the new path).
+    const changes = [...paths];
+    // One listing for the whole job, read only when a decision needs it: every new file's
+    // identity fallback asks whether a chain's recorded path still holds a file, and a
+    // burst of 1 000 used to walk the vault 1 000 times for it. Lazy, because a job whose
+    // only work is an untracked move appends its destination to `changes` after the move
+    // loop — the listing has to include that file. A pure deletion batch pays nothing.
+    let localPaths: Set<string> | null = null;
+    const listing = async (): Promise<Set<string>> =>
+      (localPaths ??= new Set(await this.opts.adapter.listSyncableFiles()));
+    let firstFailure: unknown = null;
+    let rateLimitedOut = false;
+    let batch: PendingPush[] = [];
+    let batchBytes = 0;
+    /**
+     * Tombstones prepared but **not queued yet**, keyed by the chain's fileId.
+     *
+     * A batch has no arrival order to lean on, and a move the watcher reports as
+     * delete+create (the CLI's `fs.watch`, an external tool) must not publish a deletion the
+     * chain never had: the create carrying the same content is the other half of the move,
+     * and its version is a `rename` on the live head. Holding the tombstones until every
+     * change has been decided lets a matching create take its delete back — the chain never
+     * leaves the path, so nothing is sent for the old one. Whatever no create consumed goes
+     * out afterwards, in arrival order.
+     */
+    const pendingDeletes = new Map<string, PendingPush>();
+    /**
+     * Content hash → the delete this same job prepared, so its create finds it without the
+     * self-event log's time window: the window is sized for one event, and the tail of a
+     * 600-event job (hashing and preparing every file) can outlive it.
+     */
+    const pendingRenames = new Map<string, string>();
+    /**
+     * A prepared tombstone, by the path it deletes.
+     *
+     * A file that disappears and reappears with **different** bytes inside one job would be
+     * decided against a remote index that still names the live chain its tombstone is about
+     * to remove — a conflict with the very version being deleted. The change loop takes the
+     * tombstone back and decides the path as the tracked chain it still is.
+     */
+    const pendingDeleteByPath = new Map<string, { entry: PendingPush; contentHash: string }>();
+    /**
+     * Versions prepared but not yet settled (applied or forgotten).
+     *
+     * Every entry has a pending state entry written before its request went out; a throw
+     * anywhere in the job has to drop them all, or the next pass pushes them one request
+     * per file — the regression `dropPendingCreate` exists to prevent.
+     */
+    const preparedPending = new Set<PreparedPush>();
+
+    /**
+     * Forget versions that will never be sent: their push-echo records and the pending state
+     * entry a create wrote before its request. Used by the throw path and by a limiter that
+     * outlasted its waits.
+     */
+    const dropUnsent = (entries: readonly PendingPush[]): void => {
+      for (const { prepared } of entries) {
+        this.forgetPushedVersion(prepared);
+        this.dropPendingCreate(prepared);
+        preparedPending.delete(prepared);
+        pendingDeletes.delete(prepared.fileId);
+      }
+    };
+
+    /**
+     * Send the versions prepared so far, and settle each answer.
+     *
+     * A whole-request failure costs the batch (nothing landed, so every echo record and
+     * pending identity goes and the next event or pass retries the files from disk). A
+     * per-file refusal is handed to the code the single-file path already uses: a create
+     * whose response was lost, a move whose blob the store no longer holds, or a chain a
+     * peer moved — each has its own rule there, and duplicating them here is how the two
+     * paths would drift.
+     */
+    const sendBatch = async (): Promise<void> => {
+      if (batch.length === 0) return;
+      if (rateLimitedOut) {
+        // The limiter outlasted its waits: every further batch would be refused too, and
+        // trying costs another wait window while this job holds every path it claimed.
+        dropUnsent(batch);
+        batch = [];
+        batchBytes = 0;
+        return;
+      }
+      const sending = batch;
+      batch = [];
+      batchBytes = 0;
+      let results: Array<{ status: string; error?: string }>;
+      try {
+        const response = await this.withRateLimitWaits(() =>
+          this.opts.api.push(
+            this.opts.vaultId,
+            sending.map(({ prepared }) => ({ ...prepared.file, content: prepared.content })),
+          ),
+        );
+        results = response.results;
+      } catch (err) {
+        dropUnsent(sending);
+        // A limiter that outlasted its waits ends the job: every further batch would be
+        // refused too, and the files are better left for the next event or pass.
+        if (isRateLimitError(err)) rateLimitedOut = true;
+        firstFailure ??= err;
+        return;
+      }
+      for (const [index, { prepared, kind }] of sending.entries()) {
+        // Settled either way: the version is answered, and its tombstone (if it was one)
+        // must not be swept by a later throw in this job.
+        pendingDeletes.delete(prepared.fileId);
+        if (results[index]?.status === "ok") {
+          this.applyPushedVersion(prepared);
+          preparedPending.delete(prepared);
+          continue;
+        }
+        this.forgetPushedVersion(prepared);
+        this.dropPendingCreate(prepared);
+        preparedPending.delete(prepared);
+        try {
+          if (kind === "create") {
+            // The bytes may already be stored (a lost response) or the state entry was
+            // just dropped again: `pushPrepared` owns both answers.
+            await this.pushPrepared(prepared);
+          } else if (kind === "delete") {
+            // A refused tombstone is a deletion that raced a peer's push; the remote side
+            // wins and — the local file being gone — its version simply comes back.
+            try {
+              await this.pushPrepared(prepared);
+            } catch (err) {
+              if (!(err instanceof SyncPushBaseError)) throw err;
+              await this.handleConflict(
+                prepared.fileId,
+                prepared.plainPath,
+                remoteHead(err.chain),
+                false,
+              );
+            }
+          } else if (kind === "rename") {
+            // The move is already on disk, so a refused `rename` is decided again from the
+            // chain the server showed us — the same answer the single event gives.
+            try {
+              await this.pushPrepared(prepared);
+            } catch (err) {
+              if (!(err instanceof SyncPushBaseError)) throw err;
+              await this.decideIncremental(prepared.fileId, prepared.plainPath);
+            }
+          } else {
+            // A tracked chain: decide again from the fresh chain, exactly as the single
+            // event does on a refusal.
+            await this.decideIncremental(prepared.fileId, prepared.plainPath);
+          }
+        } catch (err) {
+          firstFailure ??= err;
+        }
+      }
+      this.persist();
+    };
+
+    /**
+     * Put one prepared version in the batch, or on the wire if it cannot share a request.
+     *
+     * The bounds are the pass's create batch's (`MAX_PUSH_BATCH_FILES` /
+     * `MAX_PUSH_BATCH_BYTES`): the server accepts the same 100-file request, and a file
+     * above the byte bound travels alone so the batch never holds two large payloads.
+     */
+    const addToBatch = async (prepared: PreparedPush, kind: PendingPush["kind"]): Promise<void> => {
+      // Track the version until it is settled: a throw between here and its answer (an
+      // encryption failure, a chunk upload, a chain read) must not leave its pending state
+      // entry behind — the next pass would push it one request per file.
+      preparedPending.add(prepared);
+      // Whatever has to travel on its own first can drain the limiter; a version that will
+      // be refused is dropped here rather than paying another wait window.
+      const abandon = (): void => {
+        this.forgetPushedVersion(prepared);
+        this.dropPendingCreate(prepared);
+        preparedPending.delete(prepared);
+      };
+      if (prepared.chunkCount > 0) {
+        // A version above the chunking threshold stages its chunks through their own
+        // endpoints and then names the upload: it travels alone, after the batch.
+        await sendBatch();
+        if (rateLimitedOut) {
+          abandon();
+          return;
+        }
+        await this.pushPrepared(prepared);
+        preparedPending.delete(prepared);
+        return;
+      }
+      // A version the store already holds the bytes for — a move — sends no payload, so it
+      // never pays for the ciphertext either (the single-file path skips the same step).
+      if (!prepared.reusesStoredContent) prepared.content = await this.contentFor(prepared);
+      const size = prepared.content?.byteLength ?? 0;
+      if (size > MAX_PUSH_BATCH_BYTES) {
+        await sendBatch();
+        if (rateLimitedOut) {
+          abandon();
+          return;
+        }
+        batch.push({ prepared, kind });
+        batchBytes = size;
+        await sendBatch();
+        return;
+      }
+      if (batch.length >= MAX_PUSH_BATCH_FILES || batchBytes + size > MAX_PUSH_BATCH_BYTES) {
+        await sendBatch();
+        if (rateLimitedOut) {
+          abandon();
+          return;
+        }
+      }
+      batch.push({ prepared, kind });
+      batchBytes += size;
+    };
+
+    // Tracked paths wait for one bulk chain read: a burst of edits to existing notes used
+    // to cost one `POST /sync/pull` *and* one push per file.
+    const tracked: Array<{ fileId: string; path: string; read: LocalChangeRead }> = [];
+
+    // Moves first: a move re-points its chain, so the destination is this chain's path
+    // from here on — which is also what keeps the delete pass below from reading the old
+    // path as a deletion. A move whose source this device never tracked is a create at the
+    // destination, so it joins the change list instead of paying for a job of its own.
+    const pendingChanges = new Set(changes);
+    // A path this job deletes **and** a move lands on: the file that was there is gone, so
+    // its chain's tombstone must reach the server before the move's version — otherwise a
+    // peer writes the moved bytes and then applies a delete at the same path. Captured up
+    // front, because the move re-points the mapping for the destination.
+    const replacedDestinations = new Map<string, string>();
+    for (const path of deleted) {
+      const fileId = this.pathToFileId.get(path);
+      if (fileId !== undefined) replacedDestinations.set(path, fileId);
+    }
+    const consumedDeletes = new Set<string>();
+    try {
+      for (const pair of renamed) {
+        if (rateLimitedOut) break;
+        if (!this.isSyncable(pair.to)) {
+          // The file left this device's sync set: keep its chain, remember where it went,
+          // push nothing. A tracked chain whose recorded path went stale would look like a
+          // local deletion (and a tombstone) once the folder comes back into scope.
+          this.rememberMoveOutOfScope(pair.from, pair.to);
+          this.persist();
+          continue;
+        }
+        // The engine following a peer's move fires this same event.
+        if (this.consumeSelfRename(pair.from, pair.to)) continue;
+        const replaced = replacedDestinations.get(pair.to);
+        if (replaced !== undefined) {
+          // The destination's chain is going away, and the move writes over it: the
+          // tombstone must reach the server **before** the move's version, or a peer applies
+          // the rename and then deletes the bytes at the same path. It is pushed on its own
+          // here, so the move is only prepared when the destination really is retired — a
+          // refused or failed tombstone leaves the destination chain live, and the local file
+          // is settled against it by the next pass instead of forking a second chain.
+          const tombstone = await this.resolveLocalDelete(pair.to, replaced);
+          replacedDestinations.delete(pair.to);
+          consumedDeletes.add(pair.to);
+          if (tombstone.kind === "prepared") {
+            try {
+              await this.pushPrepared(tombstone.prepared);
+            } catch (err) {
+              // The destination's chain did not retire, so it keeps the path: roll the local
+              // deletion bookkeeping back first (the state still names it at P, and the path
+              // mapping must too), then let the single-event rule settle the local file
+              // against that chain — a peer's version wins and the moved bytes are parked.
+              this.selfEvents.forgetDelete(replaced);
+              if (this.state[replaced] !== undefined) delete this.state[replaced].deletedAtMs;
+              this.pathToFileId.set(pair.to, replaced);
+              if (err instanceof SyncPushBaseError) {
+                const head = remoteHead(err.chain);
+                // The refused head may already hold exactly the bytes on disk (the two
+                // devices converged): identical bytes are never a conflict, so adopt it
+                // instead of parking a copy of the same content.
+                const localBytes = await this.opts.adapter.readFile(pair.to);
+                const localHash = localBytes === null ? null : await sha256Hex(localBytes);
+                if (head && localHash !== null && localHash === head.contentHash) {
+                  this.adoptRemoteIdentity(replaced, pair.to, head, null);
+                } else {
+                  const applied = await this.handleConflict(replaced, pair.to, head, true);
+                  // A peer version that cannot be applied is a failed push, not a settled
+                  // one: the pass is the retry (the same rule the delete refusal follows).
+                  if (!applied) firstFailure ??= err;
+                }
+              } else {
+                // An uncertain failure (a transport error, a limiter): the tombstone may or
+                // may not have landed. Report it so the pass retries the decision.
+                if (isRateLimitError(err)) rateLimitedOut = true;
+                firstFailure ??= err;
+              }
+              this.persist();
+              continue;
+            }
+            // The tombstone landed: the path is free, and the moved bytes are a new chain at
+            // it (or, when they are the deleted content, a take-back rename below).
+            this.pathToFileId.delete(pair.to);
+          }
+        }
+        const outcome = await this.resolveLocalRename(pair.from, pair.to);
+        if (outcome.kind === "handled") {
+          this.persist();
+          continue;
+        }
+        if (outcome.kind === "change") {
+          if (!pendingChanges.has(pair.to)) {
+            changes.push(pair.to);
+            pendingChanges.add(pair.to);
+          }
+          continue;
+        }
+        await addToBatch(outcome.prepared, "rename");
+      }
+
+      // Deletions next. A batch has no arrival order to lean on, and a delete that raced the
+      // create replacing its file (a temp-file save, a folder move, the CLI's `fs.watch`)
+      // must be recorded before the create is decided: that record is how a moved file is
+      // recognised as a rename instead of a second chain. A path that is also in this batch's
+      // change list is not a deletion at all (see the guard below). The tombstone itself is
+      // only *prepared* here — it is queued once every change has been decided, so a create
+      // that turns out to be the other half of the move can take it back (see
+      // `pendingDeletes`).
+      for (const path of deleted) {
+        if (rateLimitedOut) break;
+        // A destination this job already tombstoned for a move (above): the path now holds
+        // the moved chain, and resolving it again would tombstone that one.
+        if (consumedDeletes.has(path)) continue;
+        // The engine applying a peer's delete fires this same event; it must not be echoed
+        // back to the server as a second tombstone.
+        if (this.consumeSelfDelete(path)) continue;
+        // A removal and a rewrite of the same path can share a window (a tool replacing a
+        // file, a watcher that reports both halves of a move). A path this batch is also
+        // rewriting is not a deletion — but only while the file is **still there**: a write
+        // followed by a delete inside one window leaves the change unreadable, and then the
+        // tombstone is the only record of what happened. The single-event path keeps its own
+        // rule (it sees the two events in order, tombstone included).
+        if (pendingChanges.has(path) && (await this.opts.adapter.statFile(path)) !== null) {
+          continue;
+        }
+        const outcome = await this.resolveLocalDelete(path);
+        if (outcome.kind === "handled") {
+          this.persist();
+          continue;
+        }
+        const entry: PendingPush = { prepared: outcome.prepared, kind: "delete" };
+        pendingDeletes.set(entry.prepared.fileId, entry);
+        const contentHash = this.state[entry.prepared.fileId]?.lastKnownContentHash ?? "";
+        if (contentHash !== "") pendingRenames.set(contentHash, entry.prepared.fileId);
+        pendingDeleteByPath.set(path, { entry, contentHash });
+      }
+
+      for (const path of changes) {
+        if (rateLimitedOut) break;
+        const read = await this.readLocalChange(path);
+        if (!read) continue;
+
+        const knownFileId = this.pathToFileId.get(path);
+        if (knownFileId) {
+          tracked.push({ fileId: knownFileId, path, read });
+          continue;
+        }
+
+        // The file reappeared after this job prepared the tombstone of the chain that used
+        // to sit here, with different bytes (a write and a delete in one window). Take the
+        // tombstone back and decide the path as the tracked chain it still is: deciding it as
+        // a new file would read the remote index's stale live head and park the new bytes as
+        // a conflict with the version this job was going to delete.
+        const pendingDelete = pendingDeleteByPath.get(path);
+        if (
+          pendingDelete !== undefined &&
+          pendingDeletes.get(pendingDelete.entry.prepared.fileId) === pendingDelete.entry &&
+          this.state[pendingDelete.entry.prepared.fileId]?.plainPath === path
+        ) {
+          const fileId = pendingDelete.entry.prepared.fileId;
+          pendingDeleteByPath.delete(path);
+          pendingDeletes.delete(fileId);
+          if (pendingRenames.get(pendingDelete.contentHash) === fileId) {
+            pendingRenames.delete(pendingDelete.contentHash);
+          }
+          this.selfEvents.forgetDelete(fileId);
+          if (this.state[fileId] !== undefined) delete this.state[fileId].deletedAtMs;
+          this.pathToFileId.set(path, fileId);
+          tracked.push({ fileId, path, read });
+          continue;
+        }
+
+        const hash = await sha256Hex(read.bytes);
+        const outcome = await this.resolveNewLocalFile(
+          path,
+          read.bytes,
+          read.stamp,
+          hash,
+          await listing(),
+          pendingDeletes,
+          pendingRenames,
+          pendingDeleteByPath,
+        );
+        if (outcome.kind === "handled") {
+          this.persist();
+          continue;
+        }
+        await addToBatch(outcome.prepared, outcome.kind === "rename" ? "rename" : "create");
+      }
+
+      if (tracked.length > 0 && !rateLimitedOut) {
+        const chains = await this.pullChains(tracked.map((entry) => entry.fileId));
+        // One index read for every restore in the job: the owner check asks the server which
+        // chain holds a recreated path, and a burst of recreates must not cost one read each.
+        let restoreIndex: Promise<VaultSyncIndexResponse> | null = null;
+        const loadRestoreIndex = (): Promise<VaultSyncIndexResponse> =>
+          (restoreIndex ??= this.withRateLimitWaits(() =>
+            this.opts.api.getVaultSyncIndex(this.opts.vaultId),
+          ));
+        for (const { fileId, path, read } of tracked) {
+          if (rateLimitedOut) break;
+          const outcome = await this.decideTrackedPush(
+            fileId,
+            path,
+            chains.get(fileId) ?? [],
+            read,
+            loadRestoreIndex,
+          );
+          if (outcome.kind === "retry") {
+            // The file moved while the chain was being fetched: the single-file path
+            // re-reads it and decides again (it fetches that one chain itself).
+            await this.decideIncremental(fileId, path);
+            this.persist();
+            continue;
+          }
+          if (outcome.kind === "handled") {
+            this.persist();
+            continue;
+          }
+          const prepared = await this.preparePush(outcome.request);
+          if (!prepared) continue;
+          await addToBatch(prepared, "tracked");
+        }
+      }
+
+      // The tombstones no move consumed go out now, in the order the deletions arrived.
+      for (const entry of pendingDeletes.values()) {
+        if (rateLimitedOut) break;
+        await addToBatch(entry.prepared, entry.kind);
+      }
+
+      await sendBatch();
+      if (firstFailure !== null) {
+        // A host's failure path reads the error's status/code (a dead credential stops it),
+        // so a rare non-Error throw is wrapped rather than stringified.
+        throw firstFailure instanceof Error
+          ? firstFailure
+          : new Error("local event batch failed", { cause: firstFailure });
+      }
+    } catch (err) {
+      // Anything that throws outside `sendBatch` — a chain read, a prepare, an encryption,
+      // a chunk upload, the restore-owner check — leaves the versions prepared so far
+      // unsent. Their state entries were recorded before the request (so a concurrent
+      // event adopts the identity), and a pass that finds them would push them **one
+      // request per file**: the regression `dropPendingCreate` exists to prevent. Drop
+      // every one of them, and persist the state without them — `sendBatch` may already
+      // have written the whole state, this entry included.
+      for (const prepared of preparedPending) {
+        this.forgetPushedVersion(prepared);
+        this.dropPendingCreate(prepared);
+      }
+      for (const { prepared } of pendingDeletes.values()) {
+        this.forgetPushedVersion(prepared);
+        this.dropPendingCreate(prepared);
+      }
+      this.persist();
+      throw err;
+    }
+  }
+
+  /**
+   * The chains of several files in as few requests as the protocol allows
+   * ({@link MAX_PULL_BATCH_FILES} per request).
+   *
+   * A refused request is waited out like any other bulk read: a burst that trips the sync
+   * allowance at its chain reads must not fail the whole batch.
+   */
+  private async pullChains(fileIds: readonly string[]): Promise<Map<string, VersionChainEntry[]>> {
+    const chains = new Map<string, VersionChainEntry[]>();
+    for (let start = 0; start < fileIds.length; start += MAX_PULL_BATCH_FILES) {
+      const chunk = fileIds.slice(start, start + MAX_PULL_BATCH_FILES);
+      const response = await this.withRateLimitWaits(() =>
+        this.opts.api.pull(this.opts.vaultId, [...chunk]),
+      );
+      for (const file of response.files) chains.set(file.fileId, file.versions);
+    }
+    return chains;
+  }
+
+  /**
+   * Everything an event needs from disk before it decides: the size cap, a streamed
+   * commit still landing, the file's stamp, and the two checks that keep the engine's own
+   * write from being read as a user edit.
+   *
+   * Null means "this event has nothing to do": over the cap, gone, or the echo of a write
+   * this engine performed. Shared by the single event and the batch so the two cannot
+   * drift on the rules that keep an engine's own write out of its own sync.
+   */
+  private async readLocalChange(path: string): Promise<LocalChangeRead | null> {
+    // The size cap is checked before the read, so an oversized file is never loaded.
+    if (!(await this.withinLocalSizeCap(path))) return null;
+    // A streamed commit may have renamed the target already while its stamp is still
+    // being taken. Waiting here is what lets the event below avoid reading the file.
+    const pendingCommit = this.streamedCommits.get(path);
+    if (pendingCommit) await pendingCommit;
+    const stamp = await this.opts.adapter.statFile(path);
+    if (stamp === null) return null;
+    // A streamed write records its stamp as well as its hash: the event this very write
+    // fires is then recognised without reading a file that was just written in chunks.
+    // A genuine edit inside the window moves the stamp and takes the ordinary path.
+    if (this.selfEvents.matchesSelfWriteStamp(path, stamp)) return null;
+    const bytes = await this.opts.adapter.readFile(path);
+    if (!bytes) return null;
+
+    // A write this engine performed echoes back as a vault event, and the host's
+    // handler runs before the engine's own state update lands (the write and that
+    // update are separate async hops). Treating the echo as a user edit is what
+    // produced a phantom conflict, a duplicate restore and a duplicate fileId.
+    if (await this.isOwnWrite(path, bytes)) return null;
+    return { bytes, stamp };
+  }
+
+  /**
+   * What a local file with no known fileId becomes: a rename on a chain this device
+   * deleted, an adoption of a remote chain at that path (or one already holding these
+   * bytes), or a **new chain's create** — prepared, and returned rather than sent so a
+   * batch can put up to 100 of them in one request.
+   *
+   * The versions on an existing chain are returned as `rename` (the batch queues them like
+   * any other version, so a burst's moves travel together); only the conflict branch acts
+   * here, because it writes to disk as part of deciding.
+   *
+   * The identity rules are the ones the single event has always applied, moved here
+   * unchanged: a second chain for a path the server already tracks is the "both a.md and
+   * b.md exist" bug, and a tombstone is deliberately not an identity to adopt.
+   */
+  private async resolveNewLocalFile(
+    path: string,
+    bytes: Uint8Array,
+    stamp: FileStamp,
+    hash: string,
+    localPaths: Set<string>,
+    pendingDeletes?: Map<string, PendingPush>,
+    pendingRenames?: Map<string, string>,
+    pendingDeleteByPath?: Map<string, { entry: PendingPush; contentHash: string }>,
+  ): Promise<
+    | { kind: "prepared"; prepared: PreparedPush }
+    | { kind: "rename"; prepared: PreparedPush }
+    | { kind: "handled" }
+  > {
+    // New local file — look for a rename first (same content as a deleted file). A delete
+    // this same job prepared is matched from the job's own map: the self-event log's window
+    // is sized for one event, and a burst's tail can outlive it.
+    const localDelete = pendingRenames?.get(hash);
+    const renamed =
+      localDelete !== undefined ? { fileId: localDelete } : this.selfEvents.matchDeletedFile(hash);
+    if (renamed) {
+      const { fileId } = renamed;
+      const oldPath = this.state[fileId]?.plainPath;
+      if (oldPath) this.pathToFileId.delete(oldPath);
+      this.state[fileId] = { ...this.state[fileId], plainPath: path };
+      this.pathToFileId.set(path, fileId);
+      // The chain never left the tree: the delete event this create is the other half of
+      // must not reach the server, so its tombstone is taken back (and the moment it was
+      // decided goes with it — a later deletion dates itself then).
+      pendingDeletes?.delete(fileId);
+      pendingRenames?.delete(hash);
+      // Consumed whichever map answered: one delete explains one new file.
+      this.selfEvents.forgetDelete(fileId);
+      if (pendingDeleteByPath !== undefined) {
+        for (const [deletedPath, pending] of pendingDeleteByPath) {
+          if (pending.entry.prepared.fileId === fileId) pendingDeleteByPath.delete(deletedPath);
+        }
+      }
+      if (this.state[fileId] !== undefined) delete this.state[fileId].deletedAtMs;
+      const prepared = await this.preparePush({
+        fileId,
+        plainPath: path,
+        action: "rename",
+        bytes,
+        contentHash: hash,
+        baseVersionId: this.state[fileId].lastKnownVersionId,
+        stamp,
+      });
+      return prepared === null ? { kind: "handled" } : { kind: "rename", prepared };
+    }
+
+    // The server already tracks this path (or this content) under a fileId we are not
+    // tracking locally — a peer renamed or moved a file, and our vault event for the new
+    // path won the race against the state update that would have claimed it. Adopt that
+    // identity instead of forking a second chain for the same path.
+    //
+    // A **tombstone** is not an identity to adopt: the path holds no live version, and a
+    // file written there after the deletion is somebody's new file (the same answer
+    // `decideFile` gives for a tombstone that is this device's own sync point).
+    const known = this.remoteIndex.fileIdAt(path);
+    const knownHead = known ? this.remoteIndex.headOf(known) : undefined;
+    let remote =
+      known && knownHead && knownHead.action !== "delete"
+        ? { fileId: known, head: knownHead }
+        : null;
+    if (!remote) {
+      // The fallback has to know whether the chain's previous path still holds a file, or
+      // two coexisting copies would be merged; the caller supplies the listing.
+      remote = this.findRemoteFileIdByContent(hash, localPaths);
+    }
+    if (remote) {
+      this.adoptRemoteIdentity(remote.fileId, path, remote.head, stamp);
+      if (hash === remote.head.contentHash) {
+        // Same content at the peer's path: a rename, not an edit. The head just adopted
+        // is the base.
+        const prepared = await this.preparePush({
+          fileId: remote.fileId,
+          plainPath: path,
+          action: "rename",
+          bytes,
+          contentHash: hash,
+          baseVersionId: remote.head.versionId,
+          stamp,
+        });
+        return prepared === null ? { kind: "handled" } : { kind: "rename", prepared };
+      }
+      const chain = await this.pullChain(remote.fileId);
+      await this.handleConflict(remote.fileId, path, remoteHead(chain), true);
+      return { kind: "handled" };
+    }
+
+    // A fileId this engine just generated cannot have a chain: base null. The state entry
+    // is written **before** the request so an event that lands while the batch is in
+    // flight adopts this identity instead of forking a second chain; a refusal drops it
+    // again (`dropPendingCreate`).
+    const fileId = generateFileId();
+    const prepared = await this.preparePush({
+      fileId,
+      plainPath: path,
+      action: "create",
+      bytes,
+      contentHash: hash,
+      baseVersionId: null,
+      stamp,
+    });
+    if (!prepared) return { kind: "handled" };
+    this.state[fileId] = {
+      plainPath: path,
+      lastKnownVersionId: null,
+      lastKnownContentHash: null,
+    };
+    this.pathToFileId.set(path, fileId);
+    return { kind: "prepared", prepared };
   }
 
   /**
@@ -3931,109 +4744,20 @@ export class SyncEngine {
 
     for (let attempt = 0; attempt < 2; attempt++) {
       chain ??= await this.pullChain(fileId);
-      const head = remoteHead(chain);
       // Only the first attempt may reuse the prefetched bytes: a `stale_base` retry
       // fetched the chain again, so they have had another network round trip to age.
-      const candidate = attempt === 0 ? prefetched : undefined;
-      const read =
-        candidate !== undefined &&
-        candidate.stamp !== null &&
-        (await this.currentStampIfUnchanged(path, candidate.stamp)) !== null
-          ? candidate
-          : await this.readWithStamp(path);
-      // Only an event-driven pass reaches here without bytes, and a change event
-      // for a file that cannot be read is not evidence of a deletion (the host's
-      // delete event is). Stay put rather than pushing a tombstone.
-      if (!read) return;
-      const { bytes: readBytes, stamp: readStamp } = read;
-      let hash = await sha256Hex(readBytes);
-      let decision = decideFile(
-        decideInputFrom({
-          entry: this.state[fileId],
-          // The file is on disk (read above), so this cannot be a deletion.
-          localExists: true,
-          localContentHash: hash,
-          remoteChain: chain,
-          // An incremental event is never a bind: a tombstone applies the deletion.
-          tombstone: "apply-remote-delete",
-          headPathHasLocalFile: false,
-          emptyHash: await this.emptyContentHash(),
-        }),
+      const outcome = await this.decideTrackedPush(
+        fileId,
+        path,
+        chain,
+        attempt === 0 ? prefetched : undefined,
       );
-      let bytes = readBytes;
-      let stamp = readStamp;
-
-      // A non-push decision acts on the file (it may overwrite it, or adopt the remote
-      // head as synced), so it must be taken from bytes read **now**, not from the
-      // caller's pre-fetch that the chain request has had time to age. A same-size edit
-      // inside one mtime tick is exactly what the stamp check cannot see; the reconcile
-      // re-reads before every pull/conflict for the same reason. If the file moved, the
-      // decision is taken again from disk, once.
-      if (decision.action !== "push" && read === candidate) {
-        const fresh = await this.readWithStamp(path);
-        if (!fresh) return;
-        const freshHash = await sha256Hex(fresh.bytes);
-        if (freshHash !== hash) {
-          return await this.decideIncremental(fileId, path);
-        }
-        bytes = fresh.bytes;
-        stamp = fresh.stamp;
-        hash = freshHash;
-      }
-
-      // A `restore` resurrects a chain this device deleted, so before pushing one the engine
-      // asks the server whether another chain already owns the path. The in-memory index can
-      // be stale (a peer's `file_pushed` never arrived and no pass has run since), and this is
-      // the event push worth one index read: an untracked create cannot afford it on every new
-      // note, which is why the check lives here and not on that branch. A chain the index names
-      // wins the path exactly as it would on a pass: this device's tombstone is retired, and
-      // the local copy is adopted or parked.
-      if (decision.action === "push" && decision.pushAction === "restore") {
-        const other = await this.findLiveChainAtPath(path, fileId);
-        if (other) {
-          const applied = await this.resolveRecreateAgainstOwner(other, fileId, path, hash, stamp);
-          if (!applied) {
-            // A failed apply must be visible, not swallowed: the pass is the retry (the same
-            // rule the notification path follows). The local file is still on disk.
-            throw new Error(`Could not read the content of ${path} (${other.head.contentHash})`);
-          }
-          return;
-        }
-      }
-
+      if (outcome.kind === "handled") return;
+      // The file moved while its chain was being read: decide again from disk (which
+      // fetches that one chain itself), as this path always has.
+      if (outcome.kind === "retry") return await this.decideIncremental(fileId, path);
       try {
-        if (decision.action === "push") {
-          // The stamp travels with the push, so the sync point it records is one the
-          // next pass can trust without reading the file back. This is the path every
-          // edit a user makes takes — and the hash it just computed is the one the
-          // version carries, so `preparePush` does not hash the file a third time.
-          await this.pushFile({
-            fileId,
-            plainPath: path,
-            action: decision.pushAction,
-            bytes,
-            contentHash: hash,
-            baseVersionId: head?.versionId ?? null,
-            stamp,
-          });
-        } else if (decision.action === "synced") {
-          // The head already holds the bytes on disk, while our sync point is behind it:
-          // another operation on this path pushed them and this decision fetched the chain
-          // before that push's response landed (see `decideFile`). Take the head as the
-          // sync point — a tombstone has no live identity to adopt, and a delete head with
-          // a local file on disk never decides as verifiable-synced anyway.
-          if (
-            head &&
-            head.action !== "delete" &&
-            this.state[fileId]?.lastKnownVersionId !== head.versionId
-          ) {
-            this.adoptRemoteIdentity(fileId, path, head, stamp);
-          }
-        } else if (decision.action === "conflict") {
-          await this.handleConflict(fileId, path, head, true);
-        } else if (decision.action === "pull" && head) {
-          await this.pullRemote(fileId, path, head, hash);
-        }
+        await this.pushFile(outcome.request);
         return;
       } catch (err) {
         if (!(err instanceof SyncPushBaseError) || attempt === 1) throw err;
@@ -4053,12 +4777,21 @@ export class SyncEngine {
    * leaves). The read is the request a pass starts with, and the scan decrypts each live
    * head's path — O(chains) crypto, paid once per recreate, not on ordinary edits. A failed
    * read is a failed event, retried by the next pass.
+   *
+   * `loadIndex` lets one job answer every restore it decides from **one** read (a bulk
+   * recreate is a bulk write, and one index request per file would spend the allowance the
+   * batch exists to stay inside); without it the read waits out a limiter window like every
+   * other bulk read.
    */
   private async findLiveChainAtPath(
     path: string,
     exceptFileId: string,
+    loadIndex?: () => Promise<VaultSyncIndexResponse>,
   ): Promise<{ fileId: string; head: VersionChainEntry } | null> {
-    const index = await this.opts.api.getVaultSyncIndex(this.opts.vaultId);
+    const index = await (
+      loadIndex ??
+      (() => this.withRateLimitWaits(() => this.opts.api.getVaultSyncIndex(this.opts.vaultId)))
+    )();
     for (const entry of index.files) {
       if (entry.fileId === exceptFileId) continue;
       if (entry.head.action === "delete") continue;
@@ -4108,6 +4841,128 @@ export class SyncEngine {
     return true;
   }
 
+  /**
+   * Decide what one **tracked** file's change is, without sending anything.
+   *
+   * The whole of `decideIncremental` except the push itself: the version to send is
+   * *returned*, so a batch can put it in the same request as the burst's creates, and
+   * everything a decision can do to the file (adopt the head as synced, pull the remote
+   * version, resolve a conflict) happens here.
+   *
+   * Three outcomes: `push` carries the version and its base, `handled` means the decision
+   * already acted on the file or had nothing to do, and `retry` means the bytes moved while
+   * the chain was read — the caller decides again from disk (a prefetched read is only
+   * trusted while its stamp still holds, and a non-push decision must be taken from the
+   * file as it is *now*, because it may overwrite it).
+   */
+  private async decideTrackedPush(
+    fileId: string,
+    path: string,
+    chain: VersionChainEntry[],
+    prefetched?: { bytes: Uint8Array; stamp: FileStamp | null },
+    loadRestoreIndex?: () => Promise<VaultSyncIndexResponse>,
+  ): Promise<{ kind: "push"; request: PushRequest } | { kind: "handled" } | { kind: "retry" }> {
+    const head = remoteHead(chain);
+    const read =
+      prefetched !== undefined &&
+      prefetched.stamp !== null &&
+      (await this.currentStampIfUnchanged(path, prefetched.stamp)) !== null
+        ? prefetched
+        : await this.readWithStamp(path);
+    // Only an event-driven pass reaches here without bytes, and a change event for a file
+    // that cannot be read is not evidence of a deletion (the host's delete event is). Stay
+    // put rather than pushing a tombstone.
+    if (!read) return { kind: "handled" };
+    const { bytes: readBytes, stamp: readStamp } = read;
+    let hash = await sha256Hex(readBytes);
+    let decision = decideFile(
+      decideInputFrom({
+        entry: this.state[fileId],
+        // The file is on disk (read above), so this cannot be a deletion.
+        localExists: true,
+        localContentHash: hash,
+        remoteChain: chain,
+        // An incremental event is never a bind: a tombstone applies the deletion.
+        tombstone: "apply-remote-delete",
+        headPathHasLocalFile: false,
+        emptyHash: await this.emptyContentHash(),
+      }),
+    );
+    let bytes = readBytes;
+    let stamp = readStamp;
+
+    // A non-push decision acts on the file (it may overwrite it, or adopt the remote head
+    // as synced), so it must be taken from bytes read **now**, not from the caller's
+    // pre-fetch that the chain request has had time to age. A same-size edit inside one
+    // mtime tick is exactly what the stamp check cannot see; the reconcile re-reads before
+    // every pull/conflict for the same reason. If the file moved, the caller decides again.
+    if (decision.action !== "push" && read === prefetched) {
+      const fresh = await this.readWithStamp(path);
+      if (!fresh) return { kind: "handled" };
+      const freshHash = await sha256Hex(fresh.bytes);
+      if (freshHash !== hash) return { kind: "retry" };
+      bytes = fresh.bytes;
+      stamp = fresh.stamp;
+      hash = freshHash;
+    }
+
+    if (decision.action === "push") {
+      // A `restore` resurrects a chain this device deleted, so before pushing one the engine
+      // asks the server whether another chain already owns the path. The in-memory index can
+      // be stale (a peer's `file_pushed` never arrived and no pass has run since), and this is
+      // the event push worth one index read: an untracked create cannot afford it on every new
+      // note, which is why the check lives here and not on that branch. A chain the index names
+      // wins the path exactly as it would on a pass: this device's tombstone is retired, and
+      // the local copy is adopted or parked.
+      if (decision.pushAction === "restore") {
+        const other = await this.findLiveChainAtPath(path, fileId, loadRestoreIndex);
+        if (other) {
+          const applied = await this.resolveRecreateAgainstOwner(other, fileId, path, hash, stamp);
+          if (!applied) {
+            // A failed apply must be visible, not swallowed: the pass is the retry (the same
+            // rule the notification path follows). The local file is still on disk.
+            throw new Error(`Could not read the content of ${path} (${other.head.contentHash})`);
+          }
+          return { kind: "handled" };
+        }
+      }
+      // The stamp travels with the push, so the sync point it records is one the next pass
+      // can trust without reading the file back — and the hash it just computed is the one
+      // the version carries, so `preparePush` does not hash the file a third time.
+      return {
+        kind: "push",
+        request: {
+          fileId,
+          plainPath: path,
+          action: decision.pushAction,
+          bytes,
+          contentHash: hash,
+          baseVersionId: head?.versionId ?? null,
+          stamp,
+        },
+      };
+    }
+    if (decision.action === "synced") {
+      // The head already holds the bytes on disk, while our sync point is behind it:
+      // another operation on this path pushed them and this decision fetched the chain
+      // before that push's response landed (see `decideFile`). Take the head as the sync
+      // point — a tombstone has no live identity to adopt, and a delete head with a local
+      // file on disk never decides as verifiable-synced anyway.
+      if (
+        head &&
+        head.action !== "delete" &&
+        this.state[fileId]?.lastKnownVersionId !== head.versionId
+      ) {
+        this.adoptRemoteIdentity(fileId, path, head, stamp);
+      }
+    } else if (decision.action === "conflict") {
+      await this.handleConflict(fileId, path, head, true);
+    } else if (decision.action === "pull" && head) {
+      await this.pullRemote(fileId, path, head, hash);
+    }
+    return { kind: "handled" };
+  }
+
   async handleLocalDelete(path: string): Promise<void> {
     if (!this.isSyncable(path)) return;
     // The engine applying a peer's delete fires this same event; it must not be
@@ -4118,8 +4973,37 @@ export class SyncEngine {
 
   /** The work of {@link handleLocalDelete}, running inside its path job. */
   private async applyLocalDelete(path: string): Promise<void> {
-    const fileId = this.pathToFileId.get(path);
-    if (!fileId) return;
+    const outcome = await this.resolveLocalDelete(path);
+    if (outcome.kind === "handled") {
+      this.persist();
+      return;
+    }
+    try {
+      await this.pushPrepared(outcome.prepared);
+    } catch (err) {
+      if (!(err instanceof SyncPushBaseError)) throw err;
+      // A peer pushed after the point this delete was decided from, so the tombstone
+      // would have removed a version this device never saw: a **deletion that raced
+      // an edit**. The remote side wins, and — because the local file is already gone
+      // — there is nothing to park; the peer's version simply comes back.
+      await this.handleConflict(outcome.prepared.fileId, path, remoteHead(err.chain), false);
+    }
+    this.persist();
+  }
+
+  /**
+   * Prepare the tombstone one deleted path needs, or null when it needs none.
+   *
+   * The single delete and the burst share this: the move-out-of-scope rule, the
+   * rename-by-hash record and the `deletedAtMs` a peer compares are all decided here, so
+   * a batched tombstone cannot differ from an unbatched one.
+   */
+  private async resolveLocalDelete(
+    path: string,
+    explicitFileId?: string,
+  ): Promise<{ kind: "prepared"; prepared: PreparedPush } | { kind: "handled" }> {
+    const fileId = explicitFileId ?? this.pathToFileId.get(path);
+    if (!fileId) return { kind: "handled" };
     // A delete event can be half of a move the host could not report as a rename (an
     // external tool, the CLI's `fs.watch`, a plugin that was not running). When the
     // destination is inside a folder this device excludes, the created half never
@@ -4136,47 +5020,39 @@ export class SyncEngine {
       );
       if (movedTo !== null) {
         this.recordLocalPathMove(path, movedTo);
-        this.persist();
-        return;
+        return { kind: "handled" };
       }
     }
     // Remember the delete so a file that appears with this content can be read as its
     // rename rather than as a brand-new chain.
     this.selfEvents.rememberDelete(fileId, this.state[fileId]?.lastKnownContentHash ?? "");
-    this.pathToFileId.delete(path);
-    // The state entry survives until the server accepts the tombstone (`pushFile`
-    // then rewrites it to the delete version). Dropping it here would leave a
-    // failed push — the network is down, or the app is closed before the next
-    // attempt — with a fileId the engine no longer tracks but the server still
-    // holds live, and the next reconcile would read that as "a remote file this
-    // device is missing" and pull the deletion back.
+    // Only drop the mapping while it still names this chain: a move can have taken the path
+    // in the same job, and the tombstone of the chain that used to be there must not remove
+    // the new owner's mapping.
+    if (this.pathToFileId.get(path) === fileId) this.pathToFileId.delete(path);
+    // The state entry survives until the server accepts the tombstone (`applyPushedVersion`
+    // then rewrites it to the delete version). Dropping it here would leave a failed push
+    // — the network is down, or the app is closed before the next attempt — with a fileId
+    // the engine no longer tracks but the server still holds live, and the next reconcile
+    // would read that as "a remote file this device is missing" and pull the deletion back.
     //
     // When the deletion was decided rides along with it: a tombstone has no file to
     // stamp, and a peer compares its `mtimeMs` with its own file's modification time.
-    // Reading the clock again on a retry (the next pass, possibly hours later) would
-    // let a deletion made *before* a peer's edit outrank that edit.
+    // Reading the clock again on a retry (the next pass, possibly hours later) would let a
+    // deletion made *before* a peer's edit outrank that edit.
     const entry = this.state[fileId];
     const deletedAtMs = entry?.deletedAtMs ?? Date.now();
     if (entry) entry.deletedAtMs = deletedAtMs;
-    try {
-      await this.pushFile({
-        fileId,
-        plainPath: path,
-        action: "delete",
-        bytes: undefined,
-        baseVersionId: this.state[fileId]?.lastKnownVersionId ?? null,
-        stamp: null,
-        mtimeMs: deletedAtMs,
-      });
-    } catch (err) {
-      if (!(err instanceof SyncPushBaseError)) throw err;
-      // A peer pushed after the point this delete was decided from, so the tombstone
-      // would have removed a version this device never saw: a **deletion that raced
-      // an edit**. The remote side wins, and — because the local file is already gone
-      // — there is nothing to park; the peer's version simply comes back.
-      await this.handleConflict(fileId, path, remoteHead(err.chain), false);
-    }
-    this.persist();
+    const prepared = await this.preparePush({
+      fileId,
+      plainPath: path,
+      action: "delete",
+      bytes: undefined,
+      baseVersionId: this.state[fileId]?.lastKnownVersionId ?? null,
+      stamp: null,
+      mtimeMs: deletedAtMs,
+    });
+    return prepared === null ? { kind: "handled" } : { kind: "prepared", prepared };
   }
 
   async handleLocalRename(oldPath: string, newPath: string): Promise<void> {
@@ -4244,62 +5120,81 @@ export class SyncEngine {
 
   /** The work of {@link handleLocalRename}, running inside its two paths' job. */
   private async applyLocalRename(oldPath: string, newPath: string): Promise<void> {
-    const fileId = this.pathToFileId.get(oldPath);
-    if (!fileId) {
-      // Untracked — treat as a plain create path.
-      if (this.pathToFileId.has(newPath)) return;
-      // Uninitialised, this would push a create without the remote index; the bind
-      // (or the next pass) creates the file instead.
-      if (!this.initialized) return;
-      // Directly: this job already holds `newPath`, so scheduling the event would
-      // wait for the job that is waiting for it.
+    const trackedFileId = this.pathToFileId.get(oldPath) ?? null;
+    const outcome = await this.resolveLocalRename(oldPath, newPath);
+    if (outcome.kind === "change") {
+      // Untracked source: the destination is a plain create. Called directly, because this
+      // job already holds `newPath` — scheduling the event would wait for the job that is
+      // waiting for it.
       await this.applyLocalChange(newPath);
       return;
+    }
+    if (outcome.kind === "handled") {
+      // The chain was re-pointed (or there was nothing to record); a move is a disk fact.
+      this.persist();
+      return;
+    }
+    try {
+      await this.pushPrepared(outcome.prepared);
+    } catch (err) {
+      if (!(err instanceof SyncPushBaseError)) throw err;
+      await this.decideIncremental(trackedFileId ?? outcome.prepared.fileId, newPath);
+    } finally {
+      this.persist();
+    }
+  }
+  /**
+   * What one move needs, decided without sending anything.
+   *
+   * The single rename and the burst share this: the chain is re-pointed at the destination
+   * (the state records it even when the push fails, because the move is already on disk),
+   * the version carries the content hash the sync point already holds (so a move of a large
+   * attachment is one small request, not a second upload), and a source this device never
+   * tracked becomes a `change` at the destination — the batch decides that one with the
+   * rest of its changes, where the single event creates it on the spot.
+   */
+  private async resolveLocalRename(
+    oldPath: string,
+    newPath: string,
+  ): Promise<
+    { kind: "prepared"; prepared: PreparedPush } | { kind: "handled" } | { kind: "change" }
+  > {
+    const fileId = this.pathToFileId.get(oldPath);
+    if (!fileId) {
+      // Untracked: a plain create at the new path, once this host has bound.
+      if (this.pathToFileId.has(newPath)) return { kind: "handled" };
+      // Uninitialised, this would push a create without the remote index; the bind (or the
+      // next pass) creates the file instead.
+      if (!this.initialized) return { kind: "handled" };
+      return { kind: "change" };
     }
     this.pathToFileId.delete(oldPath);
     this.pathToFileId.set(newPath, fileId);
     this.state[fileId] = { ...this.state[fileId], plainPath: newPath };
-    // Read the file so the version can record the content's hash (and its size, which a
-    // peer applies its own cap to). The bytes themselves are usually *not* sent: the
-    // chain's head already holds this content, so `pushFile` reuses it — a move of a
-    // large attachment is one small request rather than a second upload.
+    // The version records the content's hash (and its size, which a peer applies its own
+    // cap to). The bytes themselves are usually *not* sent: the chain's head already holds
+    // this content, so the push reuses it.
     //
     // A move changes neither content nor stamp, so the sync point's recorded hash is
-    // already the answer: reading (and hashing) 40 MiB only to decide not to send it
-    // was the whole cost of a move. `cachedHashFor` requires the size *and* mtime it
-    // recorded, and a stamp that moved (edited and renamed with no event in between)
-    // falls back to reading the file.
+    // already the answer: reading (and hashing) 40 MiB only to decide not to send it was
+    // the whole cost of a move. `cachedHashFor` requires the size *and* mtime it recorded,
+    // and a stamp that moved (edited and renamed with no event in between) falls back to
+    // reading the file.
     const stamp = await this.opts.adapter.statFile(newPath);
     const knownHash = stamp === null ? null : this.cachedHashFor(newPath, stamp);
     const read = knownHash === null ? await this.readWithStamp(newPath) : null;
-    try {
-      await this.pushFile({
-        fileId,
-        plainPath: newPath,
-        action: "rename",
-        bytes: read?.bytes,
-        ...(knownHash === null || stamp === null
-          ? {}
-          : { contentHash: knownHash, sizeBytes: stamp.sizeBytes }),
-        baseVersionId: this.state[fileId]?.lastKnownVersionId ?? null,
-        stamp: knownHash === null || stamp === null ? (read?.stamp ?? null) : stamp,
-      });
-    } catch (err) {
-      if (!(err instanceof SyncPushBaseError)) throw err;
-      // A peer pushed while the move was being recorded: decide again from the chain
-      // the server just showed us, which either records the move on top of their
-      // version or turns the two into a conflict — never a rename built on a version
-      // this device never saw.
-      await this.decideIncremental(fileId, newPath);
-    } finally {
-      // The move already happened on disk, so the state has to record it even when
-      // the push fails. Leaving the old path behind (the push is what would have
-      // persisted it) makes a later pass read the chain as "deleted locally" plus
-      // "this path is a brand-new file" — one note, two chains, and a duplicate on
-      // every peer. With the new path recorded, the reconcile sees the chain's
-      // recorded path disagree and pushes the rename.
-      this.persist();
-    }
+    const prepared = await this.preparePush({
+      fileId,
+      plainPath: newPath,
+      action: "rename",
+      bytes: read?.bytes,
+      ...(knownHash === null || stamp === null
+        ? {}
+        : { contentHash: knownHash, sizeBytes: stamp.sizeBytes }),
+      baseVersionId: this.state[fileId]?.lastKnownVersionId ?? null,
+      stamp: knownHash === null || stamp === null ? (read?.stamp ?? null) : stamp,
+    });
+    return prepared === null ? { kind: "handled" } : { kind: "prepared", prepared };
   }
 
   /**
@@ -4313,6 +5208,29 @@ export class SyncEngine {
    */
   consumeOwnPush(versionId: string): boolean {
     return this.selfEvents.consumePushedVersion(versionId);
+  }
+
+  /**
+   * Whether `path` carries a live record of a **write** this engine performed.
+   *
+   * A cheap hint, not a decision: the engine still matches the bytes (or the stamp) before
+   * it ignores an event. A host uses it to tell a burst of the user's writes from the vault
+   * events its own pull fires — a 1 000-file pull produces 1 000 `modify` events, and a
+   * host that counted them as a burst would run a pass behind every large download (see
+   * `SyncHost`'s local-burst rule).
+   */
+  hasSelfWriteHint(path: string): boolean {
+    return this.selfEvents.hasSelfWrite(path);
+  }
+
+  /** The same for a delete this engine performed (see {@link hasSelfWriteHint}). */
+  hasSelfDeleteHint(path: string): boolean {
+    return this.selfEvents.hasSelfDelete(path);
+  }
+
+  /** The same for a move this engine performed out of `path` (see {@link hasSelfWriteHint}). */
+  hasSelfRenameHint(path: string): boolean {
+    return this.selfEvents.hasSelfRename(path);
   }
 
   /** Remote change notification (WS `file_pushed`). */
