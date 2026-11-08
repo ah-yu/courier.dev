@@ -24,7 +24,7 @@ import {
   vaultSettings,
   versionDeviceNames,
 } from "../harness/api";
-import { waitForAsync } from "../harness/wait";
+import { expectEventually, waitForAsync } from "../harness/wait";
 import { conflictCopyOf } from "../harness/conflict";
 import {
   DEFAULT_FILE_TYPES,
@@ -894,7 +894,18 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
     ]);
     expect(view.rows.filter((row) => row.selected)).toHaveLength(1);
     expect(view.rows[0]!.selected).toBe(true);
-    expect(view.pane).toContain("third");
+    // The list is drawn before the pane's bytes arrive: `paintPane` paints the head
+    // synchronously and only then fetches the selected version's bytes, so the body is
+    // still empty when the rows first appear. (The tab's debounced re-read is the same
+    // hazard on a later paint, though no write follows this one.) Assert the settled
+    // reading rather than the snapshot the list's wait happened to catch.
+    await expectEventually(
+      async () => {
+        expect((await readVersionHistoryView(names.a)).pane).toContain("third");
+      },
+      "the version pane never showed the head's content",
+      30_000,
+    );
     // Only the list scrolls: the pane's foot stays inside the tab.
     expect(view.inside, "the history overflowed its own tab").toBe(true);
 
