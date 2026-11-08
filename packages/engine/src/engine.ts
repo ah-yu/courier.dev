@@ -4087,6 +4087,15 @@ export class SyncEngine {
      */
     const pendingRenames = new Map<string, string>();
     /**
+     * A prepared tombstone, by the path it deletes.
+     *
+     * A file that disappears and reappears with **different** bytes inside one job would be
+     * decided against a remote index that still names the live chain its tombstone is about
+     * to remove — a conflict with the very version being deleted. The change loop takes the
+     * tombstone back and decides the path as the tracked chain it still is.
+     */
+    const pendingDeleteByPath = new Map<string, { entry: PendingPush; contentHash: string }>();
+    /**
      * Versions prepared but not yet settled (applied or forgotten).
      *
      * Every entry has a pending state entry written before its request went out; a throw
@@ -4213,10 +4222,21 @@ export class SyncEngine {
       // encryption failure, a chunk upload, a chain read) must not leave its pending state
       // entry behind — the next pass would push it one request per file.
       preparedPending.add(prepared);
+      // Whatever has to travel on its own first can drain the limiter; a version that will
+      // be refused is dropped here rather than paying another wait window.
+      const abandon = (): void => {
+        this.forgetPushedVersion(prepared);
+        this.dropPendingCreate(prepared);
+        preparedPending.delete(prepared);
+      };
       if (prepared.chunkCount > 0) {
         // A version above the chunking threshold stages its chunks through their own
         // endpoints and then names the upload: it travels alone, after the batch.
         await sendBatch();
+        if (rateLimitedOut) {
+          abandon();
+          return;
+        }
         await this.pushPrepared(prepared);
         preparedPending.delete(prepared);
         return;
@@ -4227,6 +4247,10 @@ export class SyncEngine {
       const size = prepared.content?.byteLength ?? 0;
       if (size > MAX_PUSH_BATCH_BYTES) {
         await sendBatch();
+        if (rateLimitedOut) {
+          abandon();
+          return;
+        }
         batch.push({ prepared, kind });
         batchBytes = size;
         await sendBatch();
@@ -4234,6 +4258,10 @@ export class SyncEngine {
       }
       if (batch.length >= MAX_PUSH_BATCH_FILES || batchBytes + size > MAX_PUSH_BATCH_BYTES) {
         await sendBatch();
+        if (rateLimitedOut) {
+          abandon();
+          return;
+        }
       }
       batch.push({ prepared, kind });
       batchBytes += size;
@@ -4273,14 +4301,30 @@ export class SyncEngine {
         if (this.consumeSelfRename(pair.from, pair.to)) continue;
         const replaced = replacedDestinations.get(pair.to);
         if (replaced !== undefined) {
-          // The destination's chain is going away: free the path for the move, and queue the
-          // tombstone **first** so the server (and every peer) applies the deletion before
-          // the version that writes the moved bytes there.
-          this.pathToFileId.delete(pair.to);
+          // The destination's chain is going away, and the move writes over it: the
+          // tombstone must reach the server **before** the move's version, or a peer applies
+          // the rename and then deletes the bytes at the same path. It is pushed on its own
+          // here, so the move is only prepared when the destination really is retired — a
+          // refused or failed tombstone leaves the destination chain live, and the local file
+          // is settled against it by the next pass instead of forking a second chain.
           const tombstone = await this.resolveLocalDelete(pair.to, replaced);
           replacedDestinations.delete(pair.to);
           consumedDeletes.add(pair.to);
-          if (tombstone.kind === "prepared") await addToBatch(tombstone.prepared, "delete");
+          if (tombstone.kind === "prepared") {
+            try {
+              await this.pushPrepared(tombstone.prepared);
+            } catch {
+              // A peer edited the destination, or the push did not land: the destination
+              // chain stays live and keeps the path. Leave the move undecided; the local
+              // file (the moved bytes) and the moved-away source are what the next pass
+              // decides against that live chain.
+              this.persist();
+              continue;
+            }
+            // The tombstone landed: the path is free, and the moved bytes are a new chain at
+            // it (or, when they are the deleted content, a take-back rename below).
+            this.pathToFileId.delete(pair.to);
+          }
         }
         const outcome = await this.resolveLocalRename(pair.from, pair.to);
         if (outcome.kind === "handled") {
@@ -4331,6 +4375,7 @@ export class SyncEngine {
         pendingDeletes.set(entry.prepared.fileId, entry);
         const contentHash = this.state[entry.prepared.fileId]?.lastKnownContentHash ?? "";
         if (contentHash !== "") pendingRenames.set(contentHash, entry.prepared.fileId);
+        pendingDeleteByPath.set(path, { entry, contentHash });
       }
 
       for (const path of changes) {
@@ -4341,6 +4386,24 @@ export class SyncEngine {
         const knownFileId = this.pathToFileId.get(path);
         if (knownFileId) {
           tracked.push({ fileId: knownFileId, path, read });
+          continue;
+        }
+
+        // The file reappeared after this job prepared the tombstone of the chain that used
+        // to sit here, with different bytes (a write and a delete in one window). Take the
+        // tombstone back and decide the path as the tracked chain it still is: deciding it as
+        // a new file would read the remote index's stale live head and park the new bytes as
+        // a conflict with the version this job was going to delete.
+        const pendingDelete = pendingDeleteByPath.get(path);
+        if (pendingDelete !== undefined) {
+          const fileId = pendingDelete.entry.prepared.fileId;
+          pendingDeleteByPath.delete(path);
+          pendingDeletes.delete(fileId);
+          if (pendingDelete.contentHash !== "") pendingRenames.delete(pendingDelete.contentHash);
+          this.selfEvents.forgetDelete(fileId);
+          if (this.state[fileId] !== undefined) delete this.state[fileId].deletedAtMs;
+          this.pathToFileId.set(path, fileId);
+          tracked.push({ fileId, path, read });
           continue;
         }
 
