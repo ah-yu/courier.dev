@@ -473,7 +473,10 @@ describe("a bulk local write through a real server", () => {
       }
       expect(mac.host.fileIdForPath(before(0))).toBeNull();
       expect(countNotes(mac.dir)).toBe(notes);
-      expect(mac.counts.pushes).toBeLessThanOrEqual(3);
+      // Four of the one hundred and twenty events are below the burst threshold and take the
+      // single-event path (a tombstone and its rename each, for the first two moves); the rest
+      // travel as one batch. A delete plus a rename per file would be ~120 pushes.
+      expect(mac.counts.pushes).toBeLessThanOrEqual(8);
       expect(mac.counts.rateLimited).toBe(0);
       expect(mac.counts.indexReads).toBe(0);
     } finally {
