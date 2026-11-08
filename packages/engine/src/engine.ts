@@ -1314,11 +1314,15 @@ export class SyncEngine {
       // push was applied and only its response was lost, or a peer converged on the
       // same content. Nothing to write — take the head as the sync point. A **delete** is
       // settled by its action, not its content: every tombstone carries the empty-content
-      // hash, and an empty *live* file must not be mistaken for one that landed.
+      // hash, and an empty *live* file must not be mistaken for one that landed. The mirror
+      // holds too: a live push whose bytes are empty must not treat a peer's tombstone as
+      // its own head (that would resurrect a deleted file on the next pass).
       const landed =
         prepared.action === "delete"
           ? head?.action === "delete"
-          : head !== undefined && head.contentHash === prepared.contentHash;
+          : head !== undefined &&
+            head.action !== "delete" &&
+            head.contentHash === prepared.contentHash;
       if (head && landed) {
         this.adoptRemoteIdentity(fileId, plainPath, head, prepared.stamp ?? null);
         // The head is this very version (the server stores the client's versionId), so
@@ -4328,7 +4332,20 @@ export class SyncEngine {
               if (this.state[replaced] !== undefined) delete this.state[replaced].deletedAtMs;
               this.pathToFileId.set(pair.to, replaced);
               if (err instanceof SyncPushBaseError) {
-                await this.handleConflict(replaced, pair.to, remoteHead(err.chain), true);
+                const head = remoteHead(err.chain);
+                // The refused head may already hold exactly the bytes on disk (the two
+                // devices converged): identical bytes are never a conflict, so adopt it
+                // instead of parking a copy of the same content.
+                const localBytes = await this.opts.adapter.readFile(pair.to);
+                const localHash = localBytes === null ? null : await sha256Hex(localBytes);
+                if (head && localHash !== null && localHash === head.contentHash) {
+                  this.adoptRemoteIdentity(replaced, pair.to, head, null);
+                } else {
+                  const applied = await this.handleConflict(replaced, pair.to, head, true);
+                  // A peer version that cannot be applied is a failed push, not a settled
+                  // one: the pass is the retry (the same rule the delete refusal follows).
+                  if (!applied) firstFailure ??= err;
+                }
               } else {
                 // An uncertain failure (a transport error, a limiter): the tombstone may or
                 // may not have landed. Report it so the pass retries the decision.

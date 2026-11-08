@@ -7219,6 +7219,31 @@ describe("SyncEngine — a batch of local events", () => {
     expect(engine.fileIdForPath("src.md")).toBe(srcId);
   });
 
+  it("adopts a refused destination whose bytes already match the moved file", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("dest.md", encoder.encode("old dest"));
+    adapter.files.set("src.md", encoder.encode("moved bytes"));
+    await engine.initialSync();
+    const destId = engine.fileIdForPath("dest.md")!;
+    // The peer converged on exactly the moved bytes: the tombstone is refused, but there is
+    // nothing to conflict over.
+    await api.remoteEdit(destId, "moved bytes");
+    const before = api.pushed.length;
+
+    adapter.files.delete("dest.md");
+    adapter.files.delete("src.md");
+    adapter.files.set("dest.md", encoder.encode("moved bytes"));
+    await engine.handleLocalEvents({
+      deleted: ["dest.md"],
+      renamed: [{ from: "src.md", to: "dest.md" }],
+    });
+
+    expect(api.pushed.slice(before).filter((push) => push.action === "rename")).toHaveLength(0);
+    expect(adapter.files.has(conflictFilePath("dest.md"))).toBe(false);
+    expect(engine.fileIdForPath("dest.md")).toBe(destId);
+    expect(new TextDecoder().decode(adapter.files.get("dest.md"))).toBe("moved bytes");
+  });
+
   it("does not move onto a destination when the tombstone hits the limiter", async () => {
     const { engine, adapter, api } = await makeEngine();
     adapter.files.set("dest.md", encoder.encode("old dest"));

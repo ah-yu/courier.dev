@@ -589,7 +589,11 @@ file now lives at.
     content takes it back, so the batch publishes one content-less `rename` — never a tombstone
     followed by a rename racing it. A move onto a path the same job also deletes (a replace) queues
     the destination's tombstone **before** the move, so a peer removes the old file before writing the
-    moved bytes there, and one chain stays live at that path. A move whose source this device never
+    moved bytes there, and one chain stays live at that path. If that tombstone does not land the
+    destination's chain keeps the path and the move is withheld: a refusal settles the local file by
+    the single-event rule (identical bytes adopt the peer's head, a divergence parks the moved bytes),
+    and an uncertain failure reports the push and leaves the decision to the next pass — two chains
+    never end up live at one path. A move whose source this device never
     tracked becomes a create at the destination, and a move that leaves this device's scope re-points
     the chain and publishes nothing (see `rememberMoveOutOfScope`); both are decided inside the job, so
     a folder rename is batch-sized too.
