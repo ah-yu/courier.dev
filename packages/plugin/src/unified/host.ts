@@ -21,6 +21,7 @@ import {
   type WsConnectionState,
 } from "@courier/engine";
 import { ObsidianVaultAdapter } from "./adapter";
+import { desktopHostname } from "./lease";
 import { watchLeaseDirectory } from "./lease-watch";
 import type { HistoryLimits } from "@courier/shared";
 import type { CourierSettings } from "../shared/settings";
@@ -378,7 +379,11 @@ export class EngineHost {
     // this guard exists to prevent, and a hidden row is the lesser harm.
     const node = pluginPlatform.process;
     const self = node?.pid;
-    const here = currentHost(node);
+    // The same fallback the record is written with (`main.ts`): a renderer launched from a
+    // GUI often carries no hostname in its environment, and the record it writes then names
+    // the machine through `node:os`. Comparing against the environment alone would call
+    // this window's own record "another machine".
+    const here = currentHost(node) || desktopHostname();
     if (holder?.owner === "plugin" && holder.pid > 0 && holder.pid === self) {
       return holder.host !== undefined && holder.host !== here;
     }

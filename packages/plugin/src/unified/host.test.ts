@@ -196,6 +196,19 @@ async function withRendererProcess<T>(value: unknown, body: () => Promise<T>): P
   }
 }
 
+/** The same, for the renderer's `require` (desktop only), which is how `node:os` is reached. */
+async function withRendererRequire<T>(value: unknown, body: () => Promise<T>): Promise<T> {
+  const target = window as unknown as { require?: unknown };
+  const previous = Object.getOwnPropertyDescriptor(target, "require");
+  target.require = value;
+  try {
+    return await body();
+  } finally {
+    if (previous) Object.defineProperty(target, "require", previous);
+    else delete target.require;
+  }
+}
+
 /**
  * A lease store over memory, with its record map exposed.
  *
@@ -574,6 +587,39 @@ describe("EngineHost", () => {
         expect(await host.takeOverLease()).toBe(false);
         expect(host.engine).toBeNull();
       });
+    });
+
+    it("treats a record naming this machine through node:os as this window's own", async () => {
+      const now = Date.now();
+      const store = memoryStore(now).store;
+      const self = currentPID();
+      // The shape the plugin actually writes on a desktop launched from a GUI: the
+      // environment carries no hostname, so the record's machine comes from `node:os`.
+      // Comparing against the environment alone would call this our own record "another".
+      await withRendererRequire(
+        (id: string) => (id === "node:os" ? { hostname: () => "studio-mac" } : undefined),
+        () =>
+          withRendererProcess({ pid: self, env: {} }, async () => {
+            const draining = new SyncLease({
+              store,
+              owner: "plugin",
+              token: "draining-token",
+              now: () => now,
+              process,
+              pid: self,
+              host: "studio-mac",
+            });
+            expect(await draining.acquire()).toBe(true);
+
+            const next = new SyncLease({ store, owner: "plugin", token: "next-token", process });
+            const settings = baseSettings({ connectedVaultId: "vault-1" });
+            const { host } = await newHost(settings, undefined, {}, { lease: next });
+            track(host);
+
+            await host.start();
+            expect(await host.canTakeOver()).toBe(false);
+          }),
+      );
     });
 
     it("treats a matching pid with no recorded machine as this window's own", async () => {

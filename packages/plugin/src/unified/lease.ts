@@ -65,7 +65,15 @@ export class AdapterLeaseStore implements SyncLeaseStore {
   async readFile(path: string): Promise<string | null> {
     try {
       return await this.adapter.read(path);
-    } catch {
+    } catch (error) {
+      // "Not there" is the only failure that means "no record". Everything else — a
+      // permission error, a locked file, a drive that went away — is a read that failed,
+      // and the lease has to be able to tell them apart: `stillOwner` stops the engine on
+      // a missing record and keeps the vault on a failed read. Asking the adapter whether
+      // the file is really gone is what makes that distinction without guessing at error
+      // codes the app's own adapter does not standardise.
+      const exists = await this.adapter.exists(path).catch(() => true);
+      if (exists) throw error;
       return null;
     }
   }

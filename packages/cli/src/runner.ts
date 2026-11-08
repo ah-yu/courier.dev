@@ -59,6 +59,13 @@ export interface RunOptions {
   /** Lease retry period; shorter in tests. */
   leaseRetryMs?: number;
   /**
+   * Lease TTL; shorter in tests.
+   *
+   * The renewal period is derived from it, so a test can watch several renewals inside a
+   * pass that would otherwise outlast the record.
+   */
+  leaseTtlMs?: number;
+  /**
    * Take the vault from the writer that holds it, once, the first time it is refused.
    *
    * This is the headless half of the plugin's takeover: it exists for a writer the user
@@ -284,6 +291,7 @@ export async function runOnceSync(
     // Recorded so a reader can tell whether this pid is evidence on its own machine.
     host: hostname(),
     process: cliPlatform.process,
+    ...(opts.leaseTtlMs === undefined ? {} : { ttlMs: opts.leaseTtlMs }),
   });
   let acquired: boolean;
   try {
@@ -303,6 +311,15 @@ export async function runOnceSync(
     throw new Error(t("cli.error.leaseFailed", { error: errorMessage(err) }), { cause: err });
   }
   if (!acquired) throw new Error(t("cli.error.syncLocked"));
+  // A one-shot pass has no loop to renew from, and a pass over a large vault runs for
+  // minutes. Without this the record expires after its TTL and the writer this run
+  // displaced — still waiting, still retrying — takes the vault back mid-push: two engines
+  // on one folder, which is the rule the lease exists to keep. The period is a quarter of
+  // the TTL so a slow pass cannot let the record lapse between two renewals.
+  const renewal = setInterval(
+    () => void lease.renew().catch(() => false),
+    Math.max(25, Math.floor(lease.ttlMs / 4)),
+  );
   try {
     const maxFileBytes = await accountMaxFileBytes(config, vault, opts);
     const engine = await buildEngine(config, vault, opts, maxFileBytes, api);
@@ -310,6 +327,7 @@ export async function runOnceSync(
     return engine;
   } finally {
     // The one-shot pass is done; the engine is not going to run a loop.
+    clearInterval(renewal);
     await lease.release();
   }
 }

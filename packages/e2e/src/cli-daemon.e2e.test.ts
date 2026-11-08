@@ -464,9 +464,15 @@ describe("cli daemon e2e — the headless host over a real server", () => {
       writeAtomically(vaultPath, "once.md", "written by --once --take-over");
       await runOnceSync(config, vault, {
         takeOver: true,
+        // Short enough that a pass over this vault outlives one record: without the
+        // one-shot renewal the displaced daemon takes the vault back mid-push.
+        leaseTtlMs: 400,
         onLog: (message) => logs.push(message),
       });
       expect(logs.some((message) => message.includes("--take-over"))).toBe(true);
+      // The displaced process never got the vault back while the pass was running: it is
+      // still waiting, not syncing over the one-shot writer.
+      expect(holder.engine, "the displaced process synced over the one-shot pass").toBeNull();
       await waitForAsync(
         async () => (await filesAtPath(server, remote.id, material.key, "once.md")).length > 0,
         "the one-shot pass never pushed its file",
