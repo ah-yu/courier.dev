@@ -27,8 +27,9 @@ was done about them — are the record below.
 ## Empty local vault, large remote
 
 The other direction of the same first connect: this device has nothing, the remote holds the vault. It is
-one content request per file (content addressing has nothing to batch at the route level), pulled four at
-a time by the pass's `WorkPool`.
+one content request per file in the pipeline below — the batch content route (`POST …/sync/contents`)
+now carries a wave's four reads in one request, but a round trip still carries four files, because the
+pass runs four at a time (the measurement is under **Download**).
 
 | 50 000 files, 115 MiB | Before                                                                                        | After                               |
 | --------------------- | --------------------------------------------------------------------------------------------- | ----------------------------------- |
@@ -38,10 +39,10 @@ a time by the pass's `WorkPool`.
 
 Two things changed: the transfer allowance is now sized for a download (60 000/min, so the limiter stops
 being the ceiling at this size), and a refused content read **waits out the window** instead of failing
-the pass. What remains is the per-file pipeline — one request, one decrypt, one write, one stat, four at
-a time — which is why 50 000 files settle at ~2.8 ms each. A batch content route (N hashes per request)
-or higher per-pass concurrency is the next lever; neither is needed to _finish_, which is what the
-failure used to prevent.
+the pass. The per-file pipeline — one decrypt, one write, one stat, four at a time — is why 50 000 files
+settle at ~2.8 ms each. The requests a first download costs are four times fewer than that pipeline
+suggests (see **Download**); the wall clock is unchanged, because the waves are the same. Moving the
+clock needs a prefetch that puts more than four files in one round trip — the plan under **Planned next**.
 
 ## Method
 
@@ -377,5 +378,6 @@ job, changes / deletions / moves are their own lists) is in
 [sync-engine.md](sync-engine.md#pass-order-and-concurrency); the cases are `bulk-write.e2e.test.ts`, run
 against the deployed 600/minute allowance rather than the harness's raised one.
 
-Two limits stay: a **download** is still one content request per file, and a first bind still scans the
-vault — the levers listed under Remaining work.
+Two limits stay: a **download** still pays one round trip per wave of four files (its request count is
+four times lower, its wall clock is not — see **Download**), and a first bind still scans the vault —
+the levers listed under Remaining work.

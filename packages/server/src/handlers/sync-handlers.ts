@@ -903,6 +903,13 @@ export async function handleSyncContents(
       entries.push(null);
       continue;
     }
+    // Check the size **before** reading: `readAll` allocates the blob's whole length, so a
+    // request naming one file at the account's cap would buffer it just to answer 413 —
+    // the bound this route exists to enforce would be paid by the server, per request.
+    if (total + reader.stat.size > maxBytes) {
+      await reader.close();
+      throw new PayloadTooLargeError(`content batch exceeds ${maxBytes} bytes`);
+    }
     let bytes: Uint8Array<ArrayBuffer> | undefined;
     try {
       bytes = await reader.readAll();
@@ -914,9 +921,6 @@ export async function handleSyncContents(
       continue;
     }
     total += bytes.byteLength;
-    if (total > maxBytes) {
-      throw new PayloadTooLargeError(`content batch exceeds ${maxBytes} bytes`);
-    }
     entries.push(bytes);
   }
   return buildContentBatchBody(entries);

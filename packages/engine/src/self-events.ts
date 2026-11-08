@@ -299,4 +299,16 @@ export class SelfEventLog {
     }
     return null;
   }
+
+  /**
+   * Drop the record of a delete **the caller matched itself**, so the same delete cannot
+   * explain a second new file.
+   *
+   * A batch keeps its own hash → fileId map for the deletes it prepares in one job (the
+   * time window is sized for one event, not for a 600-event burst's tail), and consumes
+   * the record here once its create has adopted the chain.
+   */
+  forgetDelete(fileId: string): void {
+    this.pendingDeletes.delete(fileId);
+  }
 }

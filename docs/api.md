@@ -1135,7 +1135,9 @@ per entry: u8 status            (0 = present, 1 = missing)
 entry is an ordinary answer — the blob was reclaimed, or the chain points at content no peer can fetch —
 and is what a `404` from §11 means for one version; it does not fail the batch. The answer is bounded on
 both ends: the request names at most 64 hashes (the schema refuses more), and a body over
-`MAX_CONTENT_BATCH_BYTES` (16 MiB) is refused with `413 PAYLOAD_TOO_LARGE` rather than built. The engine
+`MAX_CONTENT_BATCH_BYTES` (16 MiB) is refused with `413 PAYLOAD_TOO_LARGE` before the blobs are read —
+each version's stored size is checked first, so a request naming one file at the account's cap is not
+buffered just to be refused. The engine
 keeps its own batches under 8 MiB of plaintext, so a refusal here is a client bug.
 
 | Status | Error code          | Description                                                     |

@@ -5877,6 +5877,22 @@ describe("SyncEngine — batched content reads", () => {
     expect(target.adapter.files.get("big-b.pdf")?.byteLength).toBe(five.byteLength);
   });
 
+  it("never names more hashes than the route accepts, whatever the pool runs", async () => {
+    // `opLimits` is caller-settable: a host may run more per-file operations than the
+    // content route accepts. The batch must still stop at 64.
+    const paths = Array.from({ length: 70 }, (_, index) => ({
+      path: `wide/n-${index}.md`,
+      text: `# wide ${index}`,
+    }));
+    const { api, key } = await sourceFor(paths);
+    api.contentBatchCalls.length = 0;
+
+    const target = await bindTarget(api, key, { maxConcurrent: 80, exclusiveBytes: 1_024 });
+
+    expect(api.contentBatchCalls.map((call) => call.length)).toEqual([64, 6]);
+    expect(target.adapter.files.size).toBe(paths.length);
+  });
+
   it("sends a partial wave on the next turn rather than waiting for a full batch", async () => {
     // Three reads against a pool that could run eight: the batch is not full, so the timer
     // (one turn) is what carries it, and the pass does not keep the files waiting.
@@ -7094,6 +7110,129 @@ describe("SyncEngine — a batch of local events", () => {
 
     expect(api.pushCalls).toHaveLength(before);
     expect(engine.fileIdForPath(".obsidian/app.json")).toBeNull();
+  });
+
+  it("turns a move the watcher reports as delete+create into one rename", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("old.md", encoder.encode("moved bytes"));
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("old.md")!;
+    const before = api.pushed.length;
+
+    // The CLI's `fs.watch` (and an external tool) reports a move as its two halves: the
+    // old path gone and a new path created. The chain never left the tree, so the batch
+    // must send one content-less rename — not a tombstone the rename then races.
+    adapter.files.delete("old.md");
+    adapter.files.set("new.md", encoder.encode("moved bytes"));
+    await engine.handleLocalEvents({ changed: ["new.md"], deleted: ["old.md"] });
+
+    const pushed = api.pushed.slice(before);
+    expect(pushed.map((push) => push.action)).toEqual(["rename"]);
+    expect(pushed[0]!.fileId).toBe(fileId);
+    expect(pushed[0]!.content).toBeNull();
+    expect(engine.fileIdForPath("new.md")).toBe(fileId);
+    expect(engine.fileIdForPath("old.md")).toBeNull();
+    expect(api.chains.get(fileId)!.map((version) => version.action)).toEqual(["create", "rename"]);
+    expect(adapter.files.has(conflictFilePath("new.md"))).toBe(false);
+    await expectConsistent(engine, adapter, api);
+  });
+
+  it("leaves no pending identity when the job fails outside the request", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("tracked.md", encoder.encode("v1"));
+    await engine.initialSync();
+    adapter.files.set("tracked.md", encoder.encode("v2"));
+    adapter.files.set("new.md", encoder.encode("new"));
+
+    // The create is prepared and its identity recorded before the tracked chains are read;
+    // that read failing must take the identity back, or the next pass pushes the create
+    // one request at a time instead of through the batch.
+    const realPull = api.pull.bind(api);
+    api.pull = async () => {
+      throw new Error("pull failed");
+    };
+    try {
+      await expect(engine.handleLocalEvents({ changed: ["tracked.md", "new.md"] })).rejects.toThrow(
+        "pull failed",
+      );
+    } finally {
+      api.pull = realPull;
+    }
+
+    expect(engine.fileIdForPath("new.md")).toBeNull();
+    await engine.initialSync();
+    expect(engine.fileIdForPath("new.md")).not.toBeNull();
+    await expectConsistent(engine, adapter, api);
+  });
+
+  it("reports a recreate it could not hand to the owning chain", async () => {
+    const { engine, adapter, api, key } = await makeEngine();
+    adapter.files.set("reborn.md", encoder.encode("first life"));
+    await engine.initialSync();
+    const mine = engine.fileIdForPath("reborn.md")!;
+    adapter.files.delete("reborn.md");
+    await engine.handleLocalDelete("reborn.md");
+
+    const peerAdapter = new FakeAdapter();
+    const peer = new SyncEngine({
+      platform: realPlatform,
+      vaultId: "vault-1",
+      adapter: peerAdapter,
+      api,
+      encryptionKey: key,
+    });
+    peerAdapter.files.set("reborn.md", encoder.encode("theirs"));
+    await peer.initialSync();
+    const theirs = peer.fileIdForPath("reborn.md")!;
+    // The owning chain's bytes are gone from the store, so the apply cannot succeed.
+    api.blobs.delete(api.chains.get(theirs)!.at(-1)!.contentHash);
+
+    adapter.files.set("reborn.md", encoder.encode("second life"));
+    await expect(engine.handleLocalEvents({ changed: ["reborn.md"] })).rejects.toThrow(
+      /Could not read the content of reborn\.md/,
+    );
+    // Nothing was published for this device's dead chain, and the local copy survives for
+    // the next pass to retry.
+    expect(api.chains.get(mine)!.map((version) => version.action)).toEqual(["create", "delete"]);
+    expect(new TextDecoder().decode(adapter.files.get("reborn.md"))).toBe("second life");
+  });
+
+  it("does not resurrect a chain whose path another chain already owns", async () => {
+    const { engine, adapter, api, key } = await makeEngine();
+    adapter.files.set("reborn.md", encoder.encode("first life"));
+    await engine.initialSync();
+    const mine = engine.fileIdForPath("reborn.md")!;
+    adapter.files.delete("reborn.md");
+    await engine.handleLocalDelete("reborn.md");
+
+    // A peer creates a *different* chain at the same path while this device's chain is a
+    // tombstone (the shape an offline delete + a peer's new note makes).
+    const peerAdapter = new FakeAdapter();
+    const peer = new SyncEngine({
+      platform: realPlatform,
+      vaultId: "vault-1",
+      adapter: peerAdapter,
+      api,
+      encryptionKey: key,
+    });
+    peerAdapter.files.set("reborn.md", encoder.encode("theirs"));
+    await peer.initialSync();
+    const theirs = peer.fileIdForPath("reborn.md")!;
+    expect(theirs).not.toBe(mine);
+
+    // The recreate arrives in a batch: the restore must ask who owns the path, exactly as
+    // the single event does — the owner keeps it, and this device's tombstone is retired.
+    adapter.files.set("reborn.md", encoder.encode("second life"));
+    await engine.handleLocalEvents({ changed: ["reborn.md"] });
+
+    expect(api.pushed.filter((push) => push.action === "restore")).toHaveLength(0);
+    expect(new TextDecoder().decode(adapter.files.get("reborn.md"))).toBe("theirs");
+    expect(new TextDecoder().decode(adapter.files.get(conflictFilePath("reborn.md")))).toBe(
+      "second life",
+    );
+    expect(api.chains.get(mine)!.map((version) => version.action)).toEqual(["create", "delete"]);
+    expect(engine.fileIdForPath("reborn.md")).toBe(theirs);
+    await expectConsistent(engine, adapter, api);
   });
 
   it("stops the batch when a limiter outlasts its waits", async () => {

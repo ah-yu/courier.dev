@@ -142,9 +142,10 @@ export function syncRateLimitOptions(): RateLimitOptions {
  * budget is per vault like the sync one, but high enough that a full download plus a
  * retry fits in a minute; the push itself still uses the sync limiter.
  *
- * It is also the ceiling on a **first download**: one request per remote file, so
- * 60 000/min is what lets a 50 000-file remote vault arrive in about a minute instead
- * of being truncated silently (see `docs/first-bind-performance.md`). A client that is
+ * It is also the ceiling on a **first download**: a content request carries a wave of
+ * reads (four today, up to 64 when the client's prefetch pipeline lands), so 60 000/min
+ * is what lets a 50 000-file remote vault arrive without being truncated silently (see
+ * `docs/first-bind-performance.md`). A client that is
  * refused anyway waits the window out (the engine does), so this number bounds how long
  * a download takes, not whether it completes.
  *

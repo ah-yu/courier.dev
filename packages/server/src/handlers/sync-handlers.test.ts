@@ -28,14 +28,19 @@ import { PayloadTooLargeError } from "../lib/errors";
 import type { BlobReader } from "../lib/blob-store";
 import { parseContentBatchBody } from "@courier/shared";
 
-/** A blob reader that answers `payload` (or `undefined`) and records its close. */
-function blobReader(
-  payload: Uint8Array | undefined,
-): BlobReader & { close: ReturnType<typeof vi.fn> } {
+/** A blob reader that answers `payload` (or `undefined`) and records its calls. */
+function blobReader(payload: Uint8Array | undefined): BlobReader & {
+  readAll: ReturnType<typeof vi.fn>;
+  close: ReturnType<typeof vi.fn>;
+} {
   return {
-    readAll: async () => payload,
+    stat: { size: payload?.byteLength ?? 0 },
+    readAll: vi.fn(async () => payload),
     close: vi.fn(async () => {}),
-  } as unknown as BlobReader & { close: ReturnType<typeof vi.fn> };
+  } as unknown as BlobReader & {
+    readAll: ReturnType<typeof vi.fn>;
+    close: ReturnType<typeof vi.fn>;
+  };
 }
 import { NotFoundError } from "../lib/errors";
 
@@ -1543,7 +1548,7 @@ describe("handleSyncContents", () => {
     expect(opened.close).toHaveBeenCalledTimes(1);
   });
 
-  it("refuses to build an answer over its byte bound, without leaking the handle", async () => {
+  it("refuses an answer over its byte bound without reading the blob", async () => {
     const opened = blobReader(new Uint8Array(64));
     const run = handleSyncContents(
       { vaultId: "v1", hashes: ["a".repeat(64)] },
@@ -1551,6 +1556,9 @@ describe("handleSyncContents", () => {
       32,
     );
     await expect(run).rejects.toBeInstanceOf(PayloadTooLargeError);
+    // The size is checked before the read: a blob at the cap must not be buffered just to
+    // answer 413, and the handle must still be closed.
+    expect(opened.readAll).not.toHaveBeenCalled();
     expect(opened.close).toHaveBeenCalledTimes(1);
   });
 });
