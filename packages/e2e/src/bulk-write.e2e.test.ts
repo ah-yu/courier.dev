@@ -58,6 +58,8 @@ interface WireCounts {
   pullRequests: number;
   indexReads: number;
   rateLimited: number;
+  /** Content requests (a read-ahead groups many versions into one). */
+  contentRequests: number;
 }
 
 function countingFetch(counts: WireCounts): typeof fetch {
@@ -66,6 +68,7 @@ function countingFetch(counts: WireCounts): typeof fetch {
     if (url.includes("/sync/push")) counts.pushes += 1;
     else if (url.includes("/sync/pull")) counts.pullRequests += 1;
     else if (url.includes("/sync/index")) counts.indexReads += 1;
+    else if (url.includes("/sync/contents")) counts.contentRequests += 1;
     const response = await fetch(input, init);
     if (response.status === 429) counts.rateLimited += 1;
     return response;
@@ -144,7 +147,13 @@ describe("a bulk local write through a real server", () => {
   });
 
   async function startHost(vaultId: string, dir: string, label: string): Promise<TestHost> {
-    const counts: WireCounts = { pushes: 0, pullRequests: 0, indexReads: 0, rateLimited: 0 };
+    const counts: WireCounts = {
+      pushes: 0,
+      pullRequests: 0,
+      indexReads: 0,
+      rateLimited: 0,
+      contentRequests: 0,
+    };
     const adapter = new EchoingAdapter(dir, normalizeScope({ configDir: ".obsidian" }));
     let state: string | null = null;
     let bindCompleted = false;
@@ -240,8 +249,58 @@ describe("a bulk local write through a real server", () => {
       // A pull's own vault events are not a user burst: the peer runs its bind pass and
       // nothing else (`indexReads` is that pass's one `GET /sync/index`).
       expect(phone.counts.indexReads).toBe(1);
+      // The receiving half is batched too: the read-ahead puts 64 versions in one content
+      // request, so 700 files cost ~11 reads instead of one per wave of four (~175).
+      expect(phone.counts.contentRequests).toBeLessThanOrEqual(20);
     } finally {
       phone.host.stop();
+      mac.host.stop();
+    }
+  }, 120_000);
+
+  it("downloads a full remote in a handful of wide content requests", async () => {
+    // The receiving direction of the same lesson. A cold download used to pay one
+    // content request per wave of four files — 100 round trips for 400 notes, whatever
+    // the wave batcher grouped — because the pool's concurrency, not the batch, decided
+    // how many files a round trip could carry. The read-ahead puts 64 versions in one
+    // request, so what is left of a first bind is the per-file write, not the network.
+    const vault = await createTestVault(server, "bulk-download", material);
+    const mac = await startHost(vault.id, mkdtempSync(join(tmpdir(), "bulk-dl-mac-")), "mac");
+    let phone: TestHost | null = null;
+
+    const notes = 400;
+    const bodies = new Map<string, string>();
+    try {
+      const events = mac.adapter.handlers!;
+      for (let index = 0; index < notes; index += 1) {
+        const path = notePath("downloaded", index);
+        const body = noteBody(index, 1);
+        bodies.set(path, body);
+        mkdirSync(join(mac.dir, dirname(path)), { recursive: true });
+        writeFileSync(join(mac.dir, path), body);
+        events.changed(path, Buffer.byteLength(body));
+      }
+      // Let the writer settle, so the reader meets a full remote rather than a stream of
+      // notifications: this is the *bind* download, not the live one.
+      await mac.host.whenIdle();
+
+      phone = await startHost(vault.id, mkdtempSync(join(tmpdir(), "bulk-dl-phone-")), "phone");
+      await waitFor(
+        () => countNotes(phone!.dir) === notes,
+        `${notes} notes on the fresh device`,
+        60_000,
+      );
+      await phone.host.whenIdle();
+
+      expect(countNotes(phone.dir)).toBe(notes);
+      for (const [path, body] of bodies) {
+        expect(readFileSync(join(phone.dir, path), "utf-8"), path).toBe(body);
+      }
+      // ceil(400 / 64) = 7 requests, plus the tail a wave read may still make.
+      expect(phone.counts.contentRequests).toBeLessThanOrEqual(10);
+      expect(phone.counts.rateLimited).toBe(0);
+    } finally {
+      phone?.host.stop();
       mac.host.stop();
     }
   }, 120_000);

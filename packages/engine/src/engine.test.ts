@@ -5834,6 +5834,10 @@ describe("SyncEngine — batched content reads", () => {
       adapter,
       api,
       encryptionKey: key,
+      // These cases are about the **wave** batcher — how the pool's concurrency sizes one
+      // request — so the read-ahead beside it is off here. It is measured and pinned on
+      // its own in "download read-ahead".
+      contentPrefetch: false,
       ...(opLimits === undefined ? {} : { opLimits }),
     });
     await engine.initialSync();
@@ -5927,6 +5931,171 @@ describe("SyncEngine — batched content reads", () => {
     expect(api.contentBatchCalls).toHaveLength(1);
     expect(api.contentBatchCalls[0]).toHaveLength(MAX_CONTENT_BATCH_FILES);
     expect(target.adapter.files.size).toBe(MAX_CONTENT_BATCH_FILES);
+  });
+});
+
+describe("SyncEngine — download read-ahead", () => {
+  /** A source vault of `count` notes already bound to the fake store. */
+  async function seedRemote(count: number) {
+    const { engine, adapter, api, key } = await makeEngine();
+    for (let index = 0; index < count; index++) {
+      adapter.files.set(`wide/n-${index}.md`, encoder.encode(`# note ${index}`));
+    }
+    await engine.initialSync();
+    return { api, key };
+  }
+
+  /** A fresh device against the same store; the read-ahead is on unless stated. */
+  function newDevice(
+    api: FakeApi,
+    key: CryptoKey,
+    options: { contentPrefetch?: false } = {},
+  ): { engine: SyncEngine; adapter: FakeAdapter } {
+    const adapter = new FakeAdapter();
+    const engine = new SyncEngine({
+      platform: realPlatform,
+      vaultId: "vault-1",
+      adapter,
+      api,
+      encryptionKey: key,
+      ...options,
+    });
+    return { engine, adapter };
+  }
+
+  it("reads a cold download 64 files per request instead of one wave", async () => {
+    // 70 files, a pool of four: the wave batcher would need 18 requests, whatever it
+    // grouped; the read-ahead puts sixteen waves in each round trip.
+    const { api, key } = await seedRemote(70);
+    api.contentBatchCalls.length = 0;
+
+    const { engine, adapter } = newDevice(api, key);
+    await engine.initialSync();
+
+    const sizes = api.contentBatchCalls.map((call) => call.length);
+    expect(Math.max(...sizes)).toBe(64);
+    // 64 + 6 covers 70 files; a third would be a tail wave read, and none should happen.
+    expect(sizes.length).toBeLessThanOrEqual(2);
+    expect(adapter.files.size).toBe(70);
+    expect(engine.fileIdForPath("wide/n-69.md")).not.toBeNull();
+  });
+
+  it("falls back to the wave read when a read-ahead request fails", async () => {
+    const { api, key } = await seedRemote(40);
+    const real = api.getVersionContents.bind(api);
+    let failed = false;
+    api.getVersionContents = async (vaultId, contentHashes) => {
+      if (!failed) {
+        failed = true;
+        throw new Error("the connection dropped");
+      }
+      return await real(vaultId, contentHashes);
+    };
+    api.contentBatchCalls.length = 0;
+
+    const { engine, adapter } = newDevice(api, key);
+    // A speculative read that did not happen must not fail the pass, and must not be
+    // mistaken for "the store holds nothing": every file still lands.
+    await expect(engine.initialSync()).resolves.toBeUndefined();
+    expect(adapter.files.size).toBe(40);
+    // The failed batch's hashes were read the old way, in waves, behind the retry.
+    expect(api.contentBatchCalls.length).toBeGreaterThan(2);
+    await expectConsistent(engine, adapter, api);
+  });
+
+  it("turns the read-ahead off with `contentPrefetch: false`", async () => {
+    const { api, key } = await seedRemote(16);
+    api.contentBatchCalls.length = 0;
+
+    const { engine, adapter } = newDevice(api, key, { contentPrefetch: false });
+    await engine.initialSync();
+
+    // Without it, a request names one wave — the pool's four — and nothing more.
+    const sizes = api.contentBatchCalls.map((call) => call.length);
+    expect(Math.max(...sizes)).toBe(4);
+    expect(adapter.files.size).toBe(16);
+  });
+
+  it("does not read ahead a chain this device does not sync", async () => {
+    const { engine, adapter, api, key } = await makeEngine(undefined, undefined, scopeWith());
+    await engine.initialSync();
+    // A peer's settings file: this device's scope keeps it out of the config folder, so
+    // the burst must not spend bytes reading it ahead (invariant 8).
+    const bytes = encoder.encode("{}");
+    const contentHash = await sha256Hex(bytes);
+    api.blobs.set(contentHash, await encryptCombinedBytes(key, bytes as Uint8Array<ArrayBuffer>));
+    const fileId = generateFileId();
+    const versionId = generateVersionId();
+    const encryptedPath = await encryptString(key, ".obsidian/app.json");
+    api.paths.set(fileId, encryptedPath);
+    api.chains.set(fileId, [
+      {
+        versionId,
+        contentHash,
+        encryptedPath,
+        action: "create",
+        sizeBytes: bytes.byteLength,
+        mtimeMs: 0,
+        createdAt: new Date().toISOString(),
+      },
+    ]);
+    api.contentFetches.length = 0;
+
+    await engine.handleFilePushedBatch([{ fileId, versionId }]);
+
+    expect(api.contentFetches).toEqual([]);
+    expect(adapter.files.has(".obsidian/app.json")).toBe(false);
+  });
+
+  it("normalizes a host's limits instead of stalling on them", async () => {
+    // `concurrency: 0` would leave the read-ahead's queue unmoving and the pass waiting
+    // on it forever; a batch wider than the route accepts would reject every read in it.
+    const { api, key } = await seedRemote(3);
+    api.contentBatchCalls.length = 0;
+    const adapter = new FakeAdapter();
+    const engine = new SyncEngine({
+      platform: realPlatform,
+      vaultId: "vault-1",
+      adapter,
+      api,
+      encryptionKey: key,
+      contentPrefetch: { concurrency: 0, batchFiles: 1000 },
+    });
+
+    await engine.initialSync();
+
+    expect(adapter.files.size).toBe(3);
+    expect(api.contentBatchCalls.every((call) => call.length <= MAX_CONTENT_BATCH_FILES)).toBe(
+      true,
+    );
+  });
+
+  it("reads ahead for a notification burst", async () => {
+    const { api, key } = await seedRemote(70);
+    const { engine: peer, adapter: peerAdapter } = newDevice(api, key);
+    await peer.initialSync();
+    expect(peerAdapter.files.size).toBe(70);
+
+    // The peer edits all 70 notes: the burst's apply loop is four files at a time. Each
+    // edit is distinct, because two files sharing content share one read (and one entry).
+    const paths = Array.from({ length: 70 }, (_, index) => `wide/n-${index}.md`);
+    for (const path of paths) {
+      await api.remoteEdit(peer.fileIdForPath(path)!, `updated ${path}`);
+    }
+    api.contentBatchCalls.length = 0;
+    const events = paths.map((path) => {
+      const fileId = peer.fileIdForPath(path)!;
+      return { fileId, versionId: api.chains.get(fileId)!.at(-1)!.versionId };
+    });
+
+    await peer.handleFilePushedBatch(events);
+
+    const sizes = api.contentBatchCalls.map((call) => call.length);
+    expect(Math.max(...sizes)).toBe(64);
+    expect(sizes.length).toBeLessThanOrEqual(3);
+    expect(new TextDecoder().decode(peerAdapter.files.get("wide/n-0.md"))).toBe(
+      "updated wide/n-0.md",
+    );
   });
 });
 
@@ -6119,6 +6288,9 @@ describe("SyncEngine — how much a pass runs at once", () => {
       api,
       encryptionKey: key,
       opLimits,
+      // The cases below measure the pool's concurrency *inside* the wave batch, which a
+      // read-ahead would answer from its store; its own bound is pinned separately.
+      contentPrefetch: false,
     });
     // The bind gives the target a sync point (and a local copy) for every file.
     await target.initialSync();

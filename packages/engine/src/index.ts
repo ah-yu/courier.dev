@@ -8,6 +8,7 @@ export * from "./file-types";
 export * from "./op-queue";
 export * from "./platform";
 export * from "./rate-limit";
+export * from "./content-prefetch";
 export * from "./sync-scope";
 export * from "./decide";
 export * from "./engine";
