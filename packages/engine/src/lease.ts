@@ -90,8 +90,8 @@ export const LEASE_FILE = `${LEASE_DIR}/owner.json`;
 /** A token is also a file name, so keep it to a conservative portable alphabet. */
 const TOKEN_PATTERN = /^[A-Za-z0-9._-]{1,200}$/;
 
-function heartbeatPath(token: string): string {
-  return `${LEASE_DIR}/${token}.hb`;
+function heartbeatPath(token: string, dir: string = LEASE_DIR): string {
+  return `${dir}/${token}.hb`;
 }
 
 /** A lease record is stale once its holder has not renewed for this long. */
@@ -173,7 +173,18 @@ export function leaseIsCurrent(
 
 /** Read a lease record without owning it. Used by status and diagnostics. */
 export async function readSyncLease(store: SyncLeaseStore): Promise<SyncLeaseInfo | null> {
-  const raw = await store.readFile(LEASE_FILE);
+  return readLeaseIn(store, LEASE_DIR);
+}
+
+/**
+ * Read the record inside `dir`.
+ *
+ * `release()` needs this on the directory it just renamed aside: deciding from a record
+ * read **after** the rename is what keeps a release from deleting a takeover that landed
+ * in between.
+ */
+async function readLeaseIn(store: SyncLeaseStore, dir: string): Promise<SyncLeaseInfo | null> {
+  const raw = await store.readFile(`${dir}/owner.json`);
   if (raw === null) return null;
   try {
     const parsed = JSON.parse(raw) as Partial<SyncLeaseInfo>;
@@ -198,7 +209,12 @@ export async function readSyncLease(store: SyncLeaseStore): Promise<SyncLeaseInf
     };
     // The heartbeat is the current expiry. A missing or malformed one only falls back to
     // the initial record, which still expires without a live renewer.
-    const heartbeat = await store.readFile(heartbeatPath(owner.token)).catch(() => null);
+    let heartbeat: string | null = null;
+    try {
+      heartbeat = await store.readFile(heartbeatPath(owner.token, dir));
+    } catch {
+      // Unreadable heartbeat: the owner record's own expiry stands.
+    }
     if (heartbeat !== null) {
       try {
         const beat = JSON.parse(heartbeat) as Partial<SyncLeaseInfo>;
@@ -214,6 +230,64 @@ export async function readSyncLease(store: SyncLeaseStore): Promise<SyncLeaseInf
   } catch {
     return null;
   }
+}
+
+/**
+ * Read a record, treating a store failure as "no record".
+ *
+ * Every caller of the read path has the same rule: a lease that cannot be read is not
+ * evidence of who holds it, and a failed read must never crash a host. Keeping that in one
+ * place is also what stops a `.catch(() => null)` from being repeated — and silently
+ * diverging — at each of the six call sites.
+ */
+async function readQuietly(
+  store: SyncLeaseStore,
+  dir: string = LEASE_DIR,
+): Promise<SyncLeaseInfo | null> {
+  try {
+    return await readLeaseIn(store, dir);
+  } catch {
+    return null;
+  }
+}
+
+/** Rename, answering false instead of throwing when the store refuses. */
+async function renameQuietly(store: SyncLeaseStore, from: string, to: string): Promise<boolean> {
+  try {
+    return await store.tryRename(from, to);
+  } catch {
+    return false;
+  }
+}
+
+/** Run a cleanup the caller cannot act on; a failure here must not fail the caller. */
+async function ignoreFailure(work: Promise<unknown>): Promise<void> {
+  try {
+    await work;
+  } catch {
+    // Nothing to do: the caller is already on its way out.
+  }
+}
+
+/**
+ * Whether `current` is the same writer as `displaced`, possibly on a new token.
+ *
+ * A displaced holder can re-acquire before a takeover's own mkdir lands — its watcher
+ * fires on the rename and its loop asks for the lease again immediately. That is the same
+ * writer coming back, not a rival takeover, and retrying against it is what makes the
+ * user's click win. A different writer (another pid, another machine, or no record at
+ * all) must not be displaced a second time.
+ */
+function isSameWriter(current: SyncLeaseInfo | null, displaced: SyncLeaseInfo | null): boolean {
+  if (current === null) return true;
+  if (displaced === null) return false;
+  if (current.token === displaced.token) return true;
+  return (
+    current.owner === displaced.owner &&
+    current.pid > 0 &&
+    current.pid === displaced.pid &&
+    current.host === displaced.host
+  );
 }
 
 /**
@@ -289,11 +363,95 @@ export class SyncLease {
     return false;
   }
 
+  /**
+   * Take the vault from its current holder, whatever that holder believes.
+   *
+   * This is deliberately **not** `acquire()`: it does not consult the record's expiry, its
+   * pid or its heartbeat, so it takes over a lease that is still live. It exists for the one
+   * case the ordinary rules cannot resolve — a holder the user cannot end, because the
+   * process was started by something they cannot find — and the two entry points that reach
+   * it are both explicit user actions: the plugin's waiting status menu and
+   * `courier-cli run --take-over`.
+   *
+   * The rename is the same atomic step `acquire()` uses for a stale directory, and the
+   * record is read back afterwards: a takeover that loses a race with another one reports
+   * `false` instead of claiming a vault whose record is already somebody else's.
+   * The previous holder is **not** killed; it stops when it next reads a record that is
+   * not its own — within milliseconds through the lease-directory watcher, or at the next
+   * renewal where no watcher is available — and until then it may still be writing.
+   */
+  async takeOver(): Promise<boolean> {
+    if (this.held) return this.renew();
+    const store = this.opts.store;
+    await store.ensureDir(".courier");
+    // What this takeover sets out to displace. It is not a permission check — takeover is
+    // unconditional on purpose — but it is what lets a **second** takeover notice that the
+    // first one already landed, instead of displacing a record nobody asked about.
+    const displaced = await readQuietly(store);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const quarantine = `${LEASE_DIR}.taken-${this.token}`;
+      let created: boolean;
+      if (await renameQuietly(store, LEASE_DIR, quarantine)) {
+        // Create this takeover's own directory **before** cleaning up the quarantined one.
+        // The gap between the rename and this mkdir is the only window in which the
+        // displaced holder can slip back in — and it is already reacting to the rename
+        // through its own watcher — so the window must be one await, not three.
+        created = await store.tryCreateDir(LEASE_DIR);
+        await ignoreFailure(store.removeDir(quarantine));
+      } else {
+        // Nothing to move: the lease directory was not there at all (or has just gone).
+        created = await store.tryCreateDir(LEASE_DIR);
+      }
+      if (created) return this.createRecord();
+      // Something is in the directory again. That is either the writer this call set out
+      // to displace (re-acquired through its watcher while the rename was landing) or a
+      // different takeover that already won. Only the first is a reason to try again.
+      const current = await readQuietly(store);
+      if (!isSameWriter(current, displaced)) return false;
+    }
+    return false;
+  }
+
+  /**
+   * Read the current record without owning it, for a surface that names the holder.
+   *
+   * `null` means "no record, or it could not be read": this is a display path, and a
+   * vault whose lease cannot be read should show no holder rather than throw at the
+   * caller that is drawing a menu.
+   */
+  async read(): Promise<SyncLeaseInfo | null> {
+    return readQuietly(this.opts.store);
+  }
+
+  /**
+   * Re-read the record without writing: does this instance still hold the lease?
+   *
+   * The read-only half of `renew()`, for a host that watches the lease directory. A
+   * takeover renames the directory and writes its own record, so the watcher fires and
+   * this answer stops the engine in milliseconds instead of at the next renewal.
+   *
+   * It deliberately **never writes**: `renew()` is what keeps this host's record fresh for
+   * every other reader, and a watcher that renewed would be woken by its own heartbeat.
+   *
+   * A store that **cannot be read** rejects rather than answering "lost": callers treat a
+   * failed read as "no evidence yet" and keep the vault until the next renewal. A record
+   * that is simply not there is still `false` — somebody deletes it to take the vault.
+   */
+  async stillOwner(): Promise<boolean> {
+    if (!this.held) return false;
+    const existing = await readLeaseIn(this.opts.store, LEASE_DIR);
+    if (existing?.token !== this.token) {
+      this.held = false;
+      return false;
+    }
+    return true;
+  }
+
   /** Extend the lease. False means another host now owns it and this one must stop. */
   async renew(): Promise<boolean> {
     if (!this.held) return false;
     const store = this.opts.store;
-    const existing = await readSyncLease(store).catch(() => null);
+    const existing = await readQuietly(store);
     if (!existing || existing.token !== this.token) {
       this.held = false;
       return false;
@@ -302,7 +460,7 @@ export class SyncLease {
     // after a takeover may therefore leave a stale heartbeat, but cannot replace the new
     // owner record; the read-back below catches that it lost the lease.
     if (!(await this.writeHeartbeat())) return false;
-    const after = await readSyncLease(store).catch(() => null);
+    const after = await readQuietly(store);
     if (!after || after.token !== this.token) {
       this.held = false;
       return false;
@@ -315,15 +473,28 @@ export class SyncLease {
     if (!this.held) return;
     this.held = false;
     const store = this.opts.store;
-    const existing = await readSyncLease(store).catch(() => null);
+    const existing = await readQuietly(store);
     // Never remove a directory we cannot prove is ours. A missing record is either a
     // contender's just-created lease (owner.json not written yet) or a damaged one; both
     // are safer to leave for the TTL than to delete under the new holder. An expired
     // record may already be taken over, so the stale holder must not remove it either.
     if (!existing || existing.token !== this.token || existing.expiresAt <= this.now()) return;
-    await store.removeFile(heartbeatPath(this.token)).catch(() => {});
-    await store.removeFile(LEASE_FILE).catch(() => {});
-    await store.removeDir(LEASE_DIR).catch(() => {});
+    // Rename the directory aside **first** and decide from the record inside it: a takeover
+    // that lands between the read above and the delete below would otherwise have its fresh
+    // record deleted by the writer it displaced, silently undoing a takeover the user just
+    // asked for. The moved record is the authority because it is what this call actually
+    // took off the lease path.
+    const quarantine = `${LEASE_DIR}.released-${this.token}`;
+    if (!(await renameQuietly(store, LEASE_DIR, quarantine))) return;
+    const moved = await readQuietly(store, quarantine);
+    if (moved?.token !== this.token) {
+      // Not ours any more: put it back rather than destroy the writer that beat this
+      // release. A rename that cannot land leaves the directory aside, which nothing reads
+      // and the TTL sweep ignores — strictly better than deleting a live record.
+      await renameQuietly(store, quarantine, LEASE_DIR);
+      return;
+    }
+    await ignoreFailure(store.removeDir(quarantine));
   }
 
   private async createRecord(): Promise<boolean> {
@@ -331,7 +502,14 @@ export class SyncLease {
     this.held = true;
     if (!(await this.writeOwner()) || !(await this.writeHeartbeat())) {
       this.held = false;
-      await this.opts.store.removeDir(LEASE_DIR).catch(() => {});
+      await ignoreFailure(this.opts.store.removeDir(LEASE_DIR));
+      return false;
+    }
+    // Read back before claiming the vault: a takeover that lands between the mkdir and this
+    // write leaves this instance holding a record somebody else has already replaced.
+    const mine = await readQuietly(this.opts.store);
+    if (mine?.token !== this.token) {
+      this.held = false;
       return false;
     }
     return true;

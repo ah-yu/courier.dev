@@ -49,6 +49,7 @@ export const zh = {
   "cli.option.historyLimitAttachments": "远程库为其他每个文件保留的历史版本数（默认 10）",
   "cli.option.once": "只执行一次 reconcile 后退出",
   "cli.option.interval": "完整 reconcile 的间隔，单位分钟（默认 30）",
+  "cli.option.takeOver": "在第一次被拒时，从占用者手中接管这个 Vault（只尝试一次）",
   "cli.option.json": "以 JSON 输出",
 
   "cli.error.invalidLanguage": "不支持的语言「{value}」。可选值：zh、en。",
@@ -73,6 +74,7 @@ export const zh = {
     "本地文件夹「{path}」与已绑定的 {other} 重叠。一个文件夹只能属于一个 Vault，请换一个路径。",
   "cli.error.syncLocked":
     "另一个同步进程（Obsidian 插件或其他 CLI）正在写这个 Vault。等它停止后再试。",
+  "cli.error.takeOverFailed": "无法从对方手中接管这个 Vault（--take-over）。",
   "cli.error.leaseFailed":
     "无法访问同步锁：{error}。这是文件系统错误（权限、空间或文件损坏），不是另一个同步进程。",
 
@@ -177,6 +179,13 @@ export const zh = {
   "cli.log.obsidianResumed": "Obsidian 已关闭或插件已暂停；「{vault}」的 CLI 继续同步。",
   "cli.log.leaseWaiting": "另一个同步进程持有「{vault}」的同步锁；本进程等待，不会启动引擎。",
   "cli.log.leaseResumed": "同步锁已释放；「{vault}」的 CLI 继续同步。",
+  "cli.log.takingOver":
+    "正在从{holder}接管「{vault}」的同步锁（--take-over）。对方会在数秒内停止，但它已经开始的那一趟同步会先跑完。",
+  "cli.lease.holderUnknown": "另一个同步进程",
+  "cli.lease.ownerCli": "CLI 进程",
+  "cli.lease.ownerPlugin": "Obsidian 插件",
+  "cli.lease.pid": "进程号 {pid}",
+  "cli.lease.host": "位于 {host}",
   "cli.log.coexistenceFailed": "无法判断 Obsidian 是否在同步（{error}）；按未打开处理。",
   "cli.log.startFailed": "同步进程启动失败（{error}）；稍后重试。",
 } as const;

@@ -155,9 +155,11 @@ bun run version:snapshot
   vault's lease first; if another writer already has it, the process waits without an engine.
 - **One writer per vault is a lease, first come first served.** The plugin and CLI both acquire
   `<vault>/.courier/sync-lease` before building a host; the loser waits without an engine, and
-  neither application has priority. The holder releases only after the engine drains. The
-  Obsidian state is reported as context, never used to hand the vault over. See
-  [cli.md](docs/cli.md#running-while-obsidian-has-the-same-vault-open).
+  neither application has priority. The only overrides are a person's explicit **接管同步** in the
+  waiting status menu and `courier-cli run --take-over`, for a holder whose process cannot be
+  ended. The holder releases only after the engine drains. The Obsidian state is reported as
+  context, never used to hand the vault over.
+  See [cli.md](docs/cli.md#running-while-obsidian-has-the-same-vault-open).
 - **The server is stateless about content.** It stores version chains and content-addressed
   encrypted blobs; conflict detection is client-side. Deleted = chains whose last action is
   `delete`; restore = push `action:"restore"`.

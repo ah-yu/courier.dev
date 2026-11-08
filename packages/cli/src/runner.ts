@@ -11,6 +11,7 @@ import {
   type FileTooLargeEvent,
   type SyncApi,
   type SyncEventSource,
+  type SyncLeaseInfo,
   type SyncScope,
 } from "@courier/engine";
 import { httpToWsUrl } from "@courier/shared";
@@ -58,6 +59,22 @@ export interface RunOptions {
   /** Lease retry period; shorter in tests. */
   leaseRetryMs?: number;
   /**
+   * Lease TTL; shorter in tests.
+   *
+   * The renewal period is derived from it, so a test can watch several renewals inside a
+   * pass that would otherwise outlast the record.
+   */
+  leaseTtlMs?: number;
+  /**
+   * Take the vault from the writer that holds it, once, the first time it is refused.
+   *
+   * This is the headless half of the plugin's takeover: it exists for a writer the user
+   * cannot end, and it is never implicit. It happens **once per process** — a run that
+   * loses the vault afterwards waits for it like any other, so two `--take-over` daemons
+   * cannot end up taking it back from each other forever.
+   */
+  takeOver?: boolean;
+  /**
    * Called when a failure after the first attempt stops the daemon (the CLI exits
    * non-zero). A failure before the first attempt rejects `runDaemon` instead.
    */
@@ -83,6 +100,21 @@ function log(opts: RunOptions, message: string): void {
 /** The message of an unknown thrown value, for a translated log/error line. */
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * The writer a takeover is about to displace, in words.
+ *
+ * A headless takeover prints it **before** the record is replaced: the log is the only
+ * place a user can find out afterwards whose process was ended, and a `--take-over` that
+ * silently displaced the wrong writer is a support question with no evidence left.
+ */
+function leaseHolderLabel(info: SyncLeaseInfo | null): string {
+  if (info === null) return t("cli.lease.holderUnknown");
+  const parts = [t(info.owner === "cli" ? "cli.lease.ownerCli" : "cli.lease.ownerPlugin")];
+  if (info.pid > 0) parts.push(t("cli.lease.pid", { pid: String(info.pid) }));
+  if (info.host) parts.push(t("cli.lease.host", { host: info.host }));
+  return parts.join(" · ");
 }
 
 /**
@@ -259,14 +291,28 @@ export async function runOnceSync(
     // Recorded so a reader can tell whether this pid is evidence on its own machine.
     host: hostname(),
     process: cliPlatform.process,
+    ...(opts.leaseTtlMs === undefined ? {} : { ttlMs: opts.leaseTtlMs }),
   });
   let acquired: boolean;
   try {
     acquired = await lease.acquire();
+    if (!acquired && opts.takeOver) {
+      log(
+        opts,
+        t("cli.log.takingOver", {
+          holder: leaseHolderLabel(await lease.read()),
+          vault: vaultLabel(vault),
+        }),
+      );
+      acquired = await lease.takeOver();
+      if (!acquired) log(opts, t("cli.error.takeOverFailed"));
+    }
   } catch (err) {
     throw new Error(t("cli.error.leaseFailed", { error: errorMessage(err) }), { cause: err });
   }
   if (!acquired) throw new Error(t("cli.error.syncLocked"));
+  // A one-shot pass has no loop to renew from; see `keepLeaseFresh`.
+  const renewDuringPass = keepLeaseFresh(lease);
   try {
     const maxFileBytes = await accountMaxFileBytes(config, vault, opts);
     const engine = await buildEngine(config, vault, opts, maxFileBytes, api);
@@ -274,8 +320,27 @@ export async function runOnceSync(
     return engine;
   } finally {
     // The one-shot pass is done; the engine is not going to run a loop.
+    renewDuringPass();
     await lease.release();
   }
+}
+
+/**
+ * Keep a one-shot pass's lease fresh until its pass ends, and answer the function that
+ * stops it.
+ *
+ * `run --once` has no loop to renew from, and a pass over a large vault runs for minutes —
+ * far longer than the record's TTL. Without this the writer the takeover displaced, still
+ * waiting and still retrying, takes the vault back in the middle of the pushes: two engines
+ * on one folder, which is exactly the rule the lease exists to keep. The period is a
+ * quarter of the TTL so a slow pass cannot let the record lapse between two renewals.
+ */
+export function keepLeaseFresh(lease: SyncLease): () => void {
+  const timer = setInterval(
+    () => void lease.renew().catch(() => false),
+    Math.max(25, Math.floor(lease.ttlMs / 4)),
+  );
+  return () => clearInterval(timer);
 }
 
 /**
@@ -325,6 +390,8 @@ export async function runDaemon(
   let startupError: Error | null = null;
   let leaseHeld = false;
   let leaseWaiting = false;
+  /** `--take-over` asks once and is spent by that answer; see the loop below. */
+  let takeOverAsked = false;
   /** Cleared once, when this run first gets the vault: the history describes this run. */
   let historyStarted = false;
   let renewal: ReturnType<typeof setInterval> | null = null;
@@ -338,12 +405,31 @@ export async function runDaemon(
   };
 
   /**
-   * Wake the waiting loop when the lease directory changes, instead of waiting for the
-   * next poll. The timer remains as a fallback for filesystems that do not report it.
+   * One watcher, two roles: wake a waiter when the holder releases, and let the holder
+   * notice a takeover in milliseconds instead of at its next renewal.
+   *
+   * The holder branch only **reads** the record (`stillOwner`); the five-second renewal
+   * stays what keeps this process's record fresh for every other writer. A watcher that
+   * renewed would be woken by its own heartbeat on every tick.
+   */
+  const onLeaseDirectoryChange = (): void => {
+    if (leaseHeld) {
+      void checkLeaseOwnership();
+      return;
+    }
+    wakeLeaseWait?.();
+  };
+
+  /**
+   * The watcher, installed for whichever role this process is in.
+   *
+   * While waiting it is what turns a release into an immediate start; while holding it is
+   * what turns a takeover into an immediate stop. The timer paths (500 ms retry, 5 s
+   * renewal) stay as the fallback for a filesystem that reports nothing.
    */
   const watchLease = (): void => {
     if (leaseWatchStop) return;
-    leaseWatchStop = watchLeaseRelease(vaultPath, () => wakeLeaseWait?.());
+    leaseWatchStop = watchLeaseRelease(vaultPath, onLeaseDirectoryChange);
   };
 
   const waitForLease = (ms: number): Promise<void> =>
@@ -402,17 +488,42 @@ export async function runDaemon(
       wakeHostWait = finish;
     });
 
-  const renewLease = async (): Promise<void> => {
-    if (!leaseHeld) return;
-    const renewed = await lease.renew().catch(() => false);
-    if (!leaseHeld) return; // released while the renewal was in flight
-    if (renewed) return;
+  /**
+   * The vault is gone: stop the engine before it writes anything else, and go back to
+   * waiting. Shared by the renewal and by the watcher's read-only check, because both are
+   * answering the same question and a second copy of this sequence would drift.
+   */
+  const loseLease = (): void => {
     leaseHeld = false;
     stopRenewal();
     host?.stop();
     clearHost();
     runtime.set({ phase: "waiting", reason: "other-writer", lastError: "" });
     log(opts, t("cli.log.leaseWaiting", { vault: vaultLabel(vault) }));
+  };
+
+  /**
+   * Ask the record whether this process still holds the vault, without renewing it.
+   *
+   * This is what the directory watcher runs. It is the fast path only: a missed event
+   * costs one renewal period, never correctness, and the 5-second renewal remains the
+   * thing that keeps the record fresh for the other writers.
+   */
+  const checkLeaseOwnership = async (): Promise<void> => {
+    if (!leaseHeld) return;
+    // A failed read is not evidence of a takeover: only a record that was read and
+    // belongs to somebody else ends this run's ownership.
+    if (await lease.stillOwner().catch(() => true)) return;
+    if (!leaseHeld) return;
+    loseLease();
+  };
+
+  const renewLease = async (): Promise<void> => {
+    if (!leaseHeld) return;
+    const renewed = await lease.renew().catch(() => false);
+    if (!leaseHeld) return; // released while the renewal was in flight
+    if (renewed) return;
+    loseLease();
   };
 
   const releaseLease = async (): Promise<void> => {
@@ -595,6 +706,23 @@ export async function runDaemon(
         let acquired: boolean;
         try {
           acquired = await lease.acquire();
+          // `--take-over` asks **once**, on the first refusal, and is spent by that answer
+          // either way. A daemon that kept taking the vault back would fight every other
+          // writer forever, and a refused rename retried every half second is the same
+          // fight with a slower clock. A refusal is reported and the process then waits
+          // like any other.
+          if (!acquired && opts.takeOver && !takeOverAsked) {
+            takeOverAsked = true;
+            log(
+              opts,
+              t("cli.log.takingOver", {
+                holder: leaseHolderLabel(await lease.read()),
+                vault: vaultLabel(vault),
+              }),
+            );
+            acquired = await lease.takeOver();
+            if (!acquired) log(opts, t("cli.error.takeOverFailed"));
+          }
         } catch (err) {
           // A filesystem failure is not another writer. Waiting would hide it forever:
           // the daemon would sit in the "other-writer" phase with no way to recover.
@@ -621,12 +749,15 @@ export async function runDaemon(
           await waitForLease(retryMs);
           continue;
         }
-        closeLeaseWatch();
+        // Keep the watcher: while holding, an event means somebody is taking the vault
+        // (see `onLeaseDirectoryChange`). It replaces the one the wait installed.
         leaseHeld = true;
         if (leaseWaiting) {
           leaseWaiting = false;
           log(opts, t("cli.log.leaseResumed", { vault: vaultLabel(vault) }));
         }
+        closeLeaseWatch();
+        watchLease();
         stopRenewal();
         renewal = setInterval(() => void renewLease(), LEASE_RENEW_MS);
       }

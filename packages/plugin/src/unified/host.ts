@@ -4,6 +4,7 @@ import {
   LEASE_RENEW_MS,
   SyncHost,
   SyncLease,
+  currentHost,
   normalizeScope,
   type AuthFailureReason,
   type ConflictResolvedEvent,
@@ -13,12 +14,14 @@ import {
   type SyncActivityEvent,
   type SyncApi,
   type SyncEventSource,
+  type SyncLeaseInfo,
   type SyncProgress,
   type SyncScope,
   type SyncScopeInput,
   type WsConnectionState,
 } from "@courier/engine";
 import { ObsidianVaultAdapter } from "./adapter";
+import { desktopHostname } from "./lease";
 import { watchLeaseDirectory } from "./lease-watch";
 import type { HistoryLimits } from "@courier/shared";
 import type { CourierSettings } from "../shared/settings";
@@ -210,7 +213,18 @@ export class EngineHost {
    * timer still covers the lease.
    */
   private leaseWatchPending = false;
+  /** The watcher that runs while this host **holds** the lease (see `startHoldWatch`). */
+  private leaseHoldWatch: (() => void) | null = null;
+  private leaseHoldWatchPending = false;
   private waitingForLease = false;
+  /**
+   * A takeover is in flight.
+   *
+   * The takeover awaits filesystem calls, and the wait's retry timer fires inside that
+   * window. `start()` begins with a teardown that would release the record the takeover
+   * just took, so a start that lands mid-takeover is dropped rather than raced.
+   */
+  private takingOver = false;
 
   constructor(private readonly opts: EngineHostOptions) {
     // Normalized once, here: every scope consumer (the engine, the adapter) then
@@ -229,6 +243,11 @@ export class EngineHost {
   /** True while this vault's lease belongs to the CLI (or another writer). */
   get leaseWaiting(): boolean {
     return this.waitingForLease;
+  }
+
+  /** The writer that currently holds this vault, for the takeover confirmation. */
+  async leaseHolder(): Promise<SyncLeaseInfo | null> {
+    return (await this.opts.lease?.read()) ?? null;
   }
 
   /**
@@ -275,6 +294,9 @@ export class EngineHost {
 
   /** Start (or restart) the engine + vault event wiring. */
   async start(): Promise<void> {
+    // A takeover owns the lease for the duration of its own start; a retry that lands in
+    // that window would tear the record down before the host is built (see `takingOver`).
+    if (this.takingOver) return;
     const settings = this.opts.getSettings();
     const userKey = settings.userKey;
     if (!userKey) throw new Error("Missing user key");
@@ -311,8 +333,9 @@ export class EngineHost {
       }
       if (generation !== this.generation) {
         // A pause/disconnect landed while the lease was being acquired; do not leave it
-        // held by a host that is no longer starting.
-        if (acquired) await this.opts.lease.release();
+        // held by a host that is no longer starting. A takeover that ran meanwhile owns the
+        // record this instance would be releasing, so it is left alone.
+        if (acquired && !this.takingOver) await this.opts.lease.release();
         return;
       }
       if (!acquired) {
@@ -329,6 +352,97 @@ export class EngineHost {
     }
 
     await this.startHost(generation);
+  }
+
+  /**
+   * Whether taking the vault here would displace somebody **else**.
+   *
+   * The waiting state alone is not enough. A host this window replaced can still be
+   * finishing its last pass, and its record names **this process** (same pid): taking that
+   * one would put two engines of this plugin on the vault — the handoff `whenIdle()` and
+   * the drain keep-alive exist to prevent — while the confirmation described the holder as
+   * another window. Only a holder that is not us can be taken over.
+   */
+  async canTakeOver(): Promise<boolean> {
+    if (!this.opts.lease || !this.waitingForLease || this.host !== null || this.takingOver) {
+      return false;
+    }
+    // This instance is still handing the vault back: its own record is live and its pass
+    // may still be writing.
+    if (this.leaseRelease !== null) return false;
+    const holder = await this.leaseHolder();
+    // A pid is evidence only on the machine that wrote the record (`leaseIsCurrent`'s rule):
+    // on a shared folder another machine's plugin can own a pid this process also has, and
+    // hiding the row then would take away the only escape from a writer nobody can end.
+    // Without a recorded machine nothing can be proven either way, so a matching pid is
+    // treated as this window's own: two engines of one plugin on the vault is the failure
+    // this guard exists to prevent, and a hidden row is the lesser harm.
+    const node = pluginPlatform.process;
+    const self = node?.pid;
+    // The same fallback the record is written with (`main.ts`): a renderer launched from a
+    // GUI often carries no hostname in its environment, and the record it writes then names
+    // the machine through `node:os`. Comparing against the environment alone would call
+    // this window's own record "another machine".
+    const here = currentHost(node) || desktopHostname();
+    if (holder?.owner === "plugin" && holder.pid > 0 && holder.pid === self) {
+      return holder.host !== undefined && holder.host !== here;
+    }
+    return true;
+  }
+
+  /**
+   * Take the vault from whoever holds it and start syncing here now.
+   *
+   * Only meaningful while this host is waiting for the lease: a running host is not
+   * touched. The wait's retry timer and watcher belong to a state that is over, so they
+   * are cleared before the engine is built; the generation bump invalidates the retry
+   * callback the timer may already have queued.
+   *
+   * Returns false when there is no lease, one is already held, or the takeover failed.
+   */
+  async takeOverLease(): Promise<boolean> {
+    const lease = this.opts.lease;
+    if (!lease) return false;
+    // Captured before the first await: a stop that lands while the holder is being read
+    // must win, exactly like one that lands during the takeover itself.
+    const generationAtStart = this.generation;
+    // `takeOverLease` is only meaningful for a host that is *waiting* for the vault, and
+    // only against a holder that is not this process (see `canTakeOver`).
+    if (!(await this.canTakeOver())) return false;
+    if (generationAtStart !== this.generation) return false;
+    this.takingOver = true;
+    try {
+      const taken = await lease.takeOver().catch(() => false);
+      // A stop(), pause, unbind or restart landed while the takeover was in flight: it
+      // wins. The record this call took is handed back so the next host can take it, and
+      // nothing is scheduled — the stop already invalidated this generation, and a retry
+      // armed with the *old* generation would be rejected by its own guard.
+      if (generationAtStart !== this.generation) {
+        if (taken) await lease.release();
+        return false;
+      }
+      // A start that was already in flight when the user confirmed owns the vault now: it
+      // acquired the same record this attempt renewed, or built the host first. The user's
+      // goal — this window syncing the vault — is met, so this is a success, and arming a
+      // retry here would tear that healthy host down half a second later.
+      if (this.host !== null) return true;
+      if (!taken) {
+        // Still waiting with no state change: put the retry back, because the tick that
+        // was in flight when this takeover began was dropped by `start()`.
+        this.scheduleLeaseRetry(generationAtStart);
+        return false;
+      }
+      if (this.leaseRetry) window.clearTimeout(this.leaseRetry);
+      this.leaseRetry = null;
+      this.closeLeaseWatch();
+      this.setLeaseWaiting(false);
+      const generation = ++this.generation;
+      this.startLeaseRenewal(generation);
+      await this.startHost(generation);
+      return true;
+    } finally {
+      this.takingOver = false;
+    }
   }
 
   private async startHost(generation: number): Promise<void> {
@@ -422,9 +536,9 @@ export class EngineHost {
       // local flag alone is not evidence of ownership; re-check before keeping the host.
       host.stop();
       if (this.host === host) this.host = null;
-      this.setLeaseWaiting(true);
-      void this.startLeaseWatch(generation);
-      this.scheduleLeaseRetry(generation);
+      // The same teardown a lost renewal performs, so the hold watcher this start opened
+      // does not outlive the ownership that justified it.
+      this.loseLease(generation);
     }
   }
 
@@ -472,6 +586,69 @@ export class EngineHost {
     this.leaseRenewal = window.setInterval(() => {
       void this.renewLease(generation);
     }, LEASE_RENEW_MS);
+    // The renewal keeps this host's record fresh for every other reader; the watcher is
+    // what lets a takeover be noticed in milliseconds instead of at the next tick.
+    void this.startHoldWatch(generation);
+  }
+
+  /**
+   * Watch the lease directory while this host **holds** it.
+   *
+   * A takeover renames the directory and writes its own record, so the event lands here
+   * and `verifyLease` re-reads it. Desktop only — `watchLeaseDirectory` is a no-op where
+   * there is no filesystem watcher — and the five-second renewal stays regardless: it is
+   * what keeps the record fresh, which no event can do.
+   */
+  private async startHoldWatch(generation: number): Promise<void> {
+    if (this.leaseHoldWatch || this.leaseHoldWatchPending) return;
+    this.leaseHoldWatchPending = true;
+    try {
+      const stop = await watchLeaseDirectory(this.opts.vault.adapter, () => {
+        if (generation !== this.generation) return;
+        void this.verifyLease(generation);
+      });
+      if (generation !== this.generation) {
+        stop();
+        return;
+      }
+      this.leaseHoldWatch = stop;
+    } finally {
+      this.leaseHoldWatchPending = false;
+    }
+  }
+
+  private closeHoldWatch(): void {
+    this.leaseHoldWatch?.();
+    this.leaseHoldWatch = null;
+  }
+
+  /**
+   * Re-read the record on a lease-directory event: are we still the holder?
+   *
+   * Read-only by design (`stillOwner`): a watcher that renewed would be woken by its own
+   * heartbeat every five seconds. Losing the lease takes the same path a failed renewal
+   * does, so the wait the two of them end in cannot drift apart.
+   */
+  private async verifyLease(generation: number): Promise<void> {
+    const lease = this.opts.lease;
+    if (!lease || generation !== this.generation) return;
+    // A read that failed is not a takeover; only a record that was read and belongs to
+    // somebody else ends this host's ownership.
+    if (await lease.stillOwner().catch(() => true)) return;
+    if (generation !== this.generation) return;
+    this.loseLease(generation);
+  }
+
+  /** The one way this host gives the vault up while its engine is running. */
+  private loseLease(generation: number): void {
+    this.host?.stop();
+    this.host = null;
+    if (this.leaseRenewal) window.clearInterval(this.leaseRenewal);
+    this.leaseRenewal = null;
+    this.closeHoldWatch();
+    this.setLeaseWaiting(true);
+    void this.startLeaseWatch(generation);
+    this.scheduleLeaseRetry(generation);
   }
 
   private async renewLease(generation: number): Promise<void> {
@@ -480,13 +657,7 @@ export class EngineHost {
     if (generation !== this.generation || renewed) return;
     // Another writer took over (or the lease file vanished). Stop before doing any more
     // engine work, then wait for the retry loop.
-    this.host?.stop();
-    this.host = null;
-    if (this.leaseRenewal) window.clearInterval(this.leaseRenewal);
-    this.leaseRenewal = null;
-    this.setLeaseWaiting(true);
-    void this.startLeaseWatch(generation);
-    this.scheduleLeaseRetry(generation);
+    this.loseLease(generation);
   }
 
   /**
@@ -521,6 +692,7 @@ export class EngineHost {
     if (this.leaseRetry) window.clearTimeout(this.leaseRetry);
     this.leaseRetry = null;
     this.closeLeaseWatch();
+    this.closeHoldWatch();
     if (this.leaseRenewal) window.clearInterval(this.leaseRenewal);
     this.leaseRenewal = null;
     const stoppedHost = this.host;
