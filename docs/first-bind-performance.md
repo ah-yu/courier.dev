@@ -16,8 +16,10 @@ it to a remote vault for the first time. What does that first pass cost, and is 
 
 Per-file cost is ~1.7 ms up and ~2.8 ms down on this machine (localhost, WAL, four concurrent small
 files). The upload number is about twice as fast as the earlier measurement because batch preparation and
-the request now overlap; the download is dominated by one content request plus one write per file, not by
-a limit.
+the request now overlap; the download was measured at one content request plus one write per file, and
+since 2026-11-08 a read-ahead makes it one content request per **64** files instead (see
+[that section](#2026-11-08-a-download-read-ahead-measured)) — so a download's cost is now the write, not
+the round trip.
 
 Before the fixes the same 10 000-file bind took 28.1 s, a 12 500-file vault **failed** after 33 s and
 needed ~25 minutes of five-minute retries to finish, a 50 000-file bind needed ~26 hours of extrapolated
@@ -26,10 +28,11 @@ was done about them — are the record below.
 
 ## Empty local vault, large remote
 
-The other direction of the same first connect: this device has nothing, the remote holds the vault. It is
-one content request per file in the pipeline below — the batch content route (`POST …/sync/contents`)
-now carries a wave's four reads in one request, but a round trip still carries four files, because the
-pass runs four at a time (the measurement is under **Download**).
+The other direction of the same first connect: this device has nothing, the remote holds the vault. The
+pipeline below is the **wave** read — one content request for a wave's four files — and since
+2026-11-08 a read-ahead puts 64 versions in one request, so the round trip no longer decides how many
+files a pass can take (the measurements are under **Download** and
+[2026-11-08](#2026-11-08-a-download-read-ahead-measured)).
 
 | 50 000 files, 115 MiB | Before                                                                                        | After                               |
 | --------------------- | --------------------------------------------------------------------------------------------- | ----------------------------------- |
@@ -40,9 +43,9 @@ pass runs four at a time (the measurement is under **Download**).
 Two things changed: the transfer allowance is now sized for a download (60 000/min, so the limiter stops
 being the ceiling at this size), and a refused content read **waits out the window** instead of failing
 the pass. The per-file pipeline — one decrypt, one write, one stat, four at a time — is why 50 000 files
-settle at ~2.8 ms each. The requests a first download costs are four times fewer than that pipeline
-suggests (see **Download**); the wall clock is unchanged, because the waves are the same. Moving the
-clock needs a prefetch that puts more than four files in one round trip — the plan under **Planned next**.
+settle at ~2.8 ms each on localhost; the reads feeding it are now 64 to a request (measured: 1 001 files
+went from 10.1 s to 0.76 s at an injected 30 ms, and 5 001 from 46.6 s to 2.1 s), so what is left at that
+size is the local half, not the network.
 
 ## Method
 
@@ -54,18 +57,21 @@ latency is absent** and the numbers below are optimistic for a deployed server; 
 well. The database is in WAL mode, which is what `courier migrate` does in production; the e2e harness's
 own schema setup leaves SQLite's default rollback journal, where the same bind is ~1.6× slower.
 
-Two opt-in benchmarks (`COURIER_BENCH=1`):
+Opt-in benchmarks (`COURIER_BENCH=1`):
 
-| File                                                        | What it measures                                                           |
-| ----------------------------------------------------------- | -------------------------------------------------------------------------- |
-| `packages/e2e/src/research/first-bind.bench.test.ts`        | upload bind, steady-state pass, download bind                              |
-| `packages/e2e/src/research/first-bind-limits.bench.test.ts` | server marginal cost, the deployed limiters, a bind larger than one window |
+| File                                                          | What it measures                                                           |
+| ------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `packages/e2e/src/research/first-bind.bench.test.ts`          | upload bind, steady-state pass, download bind                              |
+| `packages/e2e/src/research/first-bind-limits.bench.test.ts`   | server marginal cost, the deployed limiters, a bind larger than one window |
+| `packages/e2e/src/research/download-read-ahead.bench.test.ts` | a cold download with the read-ahead on and off, at 0 and 30 ms per request |
 
 ```bash
 COURIER_BENCH=1 COURIER_BENCH_WAL=1 COURIER_BENCH_FILES=10000 \
   bun --bun vitest run packages/e2e/src/research/first-bind.bench.test.ts
 COURIER_BENCH=1 COURIER_BENCH_FILES=12500 \
   bun --bun vitest run packages/e2e/src/research/first-bind-limits.bench.test.ts
+COURIER_BENCH=1 COURIER_BENCH_FILES=1000 COURIER_BENCH_RTT=30 \
+  bun --bun vitest run packages/e2e/src/research/download-read-ahead.bench.test.ts
 ```
 
 The refused-batch reproduction that used to sit beside them was removed once the fix landed: what it
@@ -112,21 +118,24 @@ One request per remote file, so the transfer allowance used to be the ceiling (2
 60 000/min — above what the per-file pipeline can use — and a refusal is waited out instead of ending the
 pass. The numbers above are the **per-file** pipeline at four concurrent files; since the batch content
 route (`POST …/sync/contents`, [api.md](api.md#11b-get-several-versions-content-at-once)) the reads of a
-wave travel together.
+wave travel together, and a read-ahead puts **several waves** in each request (see
+[the 2026-11-08 section](#2026-11-08-a-download-read-ahead-measured)).
 
-**What the batch actually buys, measured** (1 000 files, L1, RTT injected on the client's transport):
+**What each step buys, measured** (1 001 files / 3.3 MiB, L1; the round trip is injected on the client's
+transport, and each row is one run of the tree this document describes):
 
-| 1 000-file cold download | requests | 1 ms RTT | 30 ms RTT |
-| ------------------------ | -------: | -------- | --------- |
-| one request per file     |     1000 | 1 105 ms | 9 254 ms  |
-| batched (this change)    |  **250** | 1 073 ms | 9 308 ms  |
+| 1 001-file cold download                      | requests | ~0 ms RTT  | 30 ms RTT  |
+| --------------------------------------------- | -------: | ---------- | ---------- |
+| per-wave batch (the route before this change) |      251 | 646 ms     | 10 132 ms  |
+| read-ahead (64 per request)                   |   **16** | **335 ms** | **764 ms** |
 
-The wall clock is the same — the pool already keeps four reads in flight, so a batch of four costs the
-same round trip one request per file did — and the **request count falls 4×**, which is what keeps a fast
-link under the transfer limiter and cuts the server's handler work. A batch that waits for a timer before
-it goes out makes this _worse_, not better: with a 5 ms hold the same download took 2.3 s locally. The
-read pipeline, not the batch, would be the lever for time: prefetching a wave ahead would put more files
-per round trip, which is a larger change than this one.
+The wave batch itself divided the **request count** by four without moving the clock — its own A/B measured
+9 254 ms one request per file against 9 233 ms batched at 30 ms, because the pool already keeps four reads
+in flight, so a batch of four costs the same round trip one request per file did. A batch that waits for a
+timer before it goes out makes this _worse_, not better: with a 5 ms hold the same download took 2.3 s
+locally. The read pipeline, not the batch, is the lever for time — a read-ahead that puts more files in one
+round trip is what turns `waves × RTT` into `requests × RTT` (measured above: 10.1 s → 0.76 s; 5 001 files
+at 30 ms, 46.6 s → 2.1 s).
 
 ## The three cliffs (before the fixes)
 
@@ -213,8 +222,10 @@ line).
 - **Up to ~20 000 files, healthy server:** a first connect is a one-off 15–75 s locally, and roughly two
   to three times that over a real network (upload bandwidth and per-batch RTT). Acceptable.
 - **Tens of thousands of files:** linear — 50 001 files is 501 pushes in 83 s, inside the 600/min
-  allowance — and a 50 000-file first download finishes in one pass in ~141 s. The steady state
-  afterwards is 0.6 s per pass at 10 000 files, 8.4 s at 50 000 (one `stat` per file).
+  allowance — and a 50 000-file first download finishes in one pass in ~141 s on localhost. The steady
+  state afterwards is 0.6 s per pass at 10 000 files, 8.4 s at 50 000 (one `stat` per file). The download
+  figure predates the read-ahead: at 64 versions per request (2026-11-08) the 5 001-file bind went from
+  46.6 s to 2.1 s at an injected 30 ms, so what is left at that size is the local half.
 - **Interruptions:** a refused batch, a rate-limited window, or a dropped connection now costs one batch
   or one window, not hours. A partially failed bind leaves the unlanded files untracked, so the retry
   re-batches them.
@@ -223,9 +234,10 @@ line).
 
 - **The local scan of a first bind.** It is one `stat` per file (0.6 s per 10 000, 8.4 s per 50 000) and it
   is now what a cold start spends its time on; the download's request count is no longer the ceiling (the
-  content route batches the reads of a wave, and only the pool's concurrency bounds it).
-- **The same measurement on a real network and on mobile.** Everything here is localhost on a desktop;
-  the per-batch RTT and the adapter's IPC cost are what a phone makes of the same numbers.
+  read-ahead puts 64 versions in one request, and only the pool's concurrency bounds the per-file half).
+- **The same measurement on a real network and on mobile.** Everything here is localhost on a desktop
+  (plus injected RTT); the adapter's IPC cost and the memory budget of the read-ahead on a phone are what
+  a real device makes of the same numbers.
 - **A peer that is online during the bind.** Not covered by the numbers above, because the harness
   starts the second device after the first one finished: in the real two-window case the peer receives
   one `file_pushed` per file and used to answer each with its own `POST /sync/pull`. That spent the
@@ -233,80 +245,14 @@ line).
   coalesced into batched chain pulls (200 per request, 25 ms of holding); see
   [sync-engine.md](sync-engine.md#pass-order-and-concurrency).
 
-## Planned next: a prefetch pipeline (not implemented)
-
-> Status: **design, not behaviour.** Nothing below exists in the engine today; the measurements above
-> are the baseline it has to beat, and the plan is recorded here because this document owns the
-> optimization plan.
-
-**The problem the batch content route did not solve is time, not requests.** A download costs
-_round trips × waves_, where a wave is one `maxConcurrent` (four) of per-file operations: each wave
-waits for its own content request. The batch route turned a wave's four requests into one, which divides
-the request count by four but leaves the number of waves — and therefore the wall clock — where it was
-(measured: 1 105 ms against 1 073 ms at 1 ms RTT, 9 254 ms against 9 308 ms at 30 ms). To go faster,
-**one round trip has to carry more files than the pool has slots**.
-
-**Design: a prefetcher beside the pass, not a wider pool.**
-
-- **Raise only the content pipeline.** The `WorkPool`/`OpQueue` concurrency stays at four: it also runs
-  pushes, deletes and large files, and each of those holds a plaintext copy in memory — that bound is
-  what protects a phone. The prefetcher holds **ciphertext only**, and nothing else changes.
-- **Fill it before the per-file loop.** After a pass has the index and the local scan, it knows which
-  chains' bytes are not on this device: a chain whose head hash is neither in the local hashes nor in the
-  state's last known hash. Those paths — and the same set for a notification burst, from the chains it
-  already fetched — are a **superset** of what `decideFile` will pull. A wrong guess costs one download
-  that is discarded; it cannot change a decision.
-- **Fetch them ahead, in wide batches.** A `ContentPrefetcher` owns the queue: up to `batchFiles` (32)
-  hashes or `batchBytes` (8 MiB) per request, `concurrency` (2) requests in flight, so up to 64 files are
-  in one round trip instead of four. It reuses `POST …/sync/contents` — the server already accepts 64
-  hashes and refuses an answer over 16 MiB — so the protocol does not change.
-- **Consume exactly as today.** `fetchContentBatched` checks the prefetch store first and falls back to
-  the current wave batch on a miss. Ciphertext is decrypted and verified per file by the reader, exactly
-  as now; the store is an LRU capped at `storeBytes` (8 MiB), so dropped entries simply cost a re-fetch.
-
-**Bounds and failure semantics.**
-
-| Situation                                     | Behaviour                                                                                 |
-| --------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| Prefetch hit                                  | The file decodes immediately; a download wave costs no round trip                         |
-| Miss / evicted                                | Fall back to the current per-wave batch (unchanged)                                       |
-| 429                                           | Waited out by `withRateLimitWaits`, as every bulk read is; the store keeps serving        |
-| Whole-request failure                         | Marked "not prefetched", **never raised to the pass**; the on-demand read retries         |
-| Hash the store does not hold (`404`)          | A `null` entry with a TTL, the same "nothing to apply" as today                           |
-| `stop()` / `whenIdle()`                       | In-flight prefetches count as background work; `stop` rejects waiters and drops the store |
-| Wasted prefetch (conflict, cap, out of scope) | Discarded; counted for tuning, never reported as activity                                 |
-
-Peak extra memory is ciphertext: the store (8 MiB) plus the in-flight requests (2 × 8 MiB) ≈ 24 MiB,
-bounded by bytes rather than by file count. The per-file plaintext bound is untouched.
-
-**Rejected alternatives.** Raising `maxConcurrent` would speed this up and shove every other per-file
-operation (and its plaintext copy) up with it — the phone-memory guard exists for that. Multi-range
-requests (`multipart/byteranges`) only help one large file and add a response format. Server push over
-the WebSocket would be a contract change for a transport-level win.
-
-**Expected effect, to be measured rather than promised.** 1 000 files at 30 ms RTT (today 9.31 s) becomes
-about sixteen content requests, so the network term is ~0.5 s and what remains is decrypting and writing
-four at a time (~1–2 s): roughly 2–3.5 s. On localhost the win is small, because RTT is not the bottleneck
-there — which is why the existing benchmark runs both.
-
-**Verification plan.** L0 for the prefetcher (byte/count caps, LRU eviction, hit/miss, a failed prefetch
-not failing the pass, a `404` TTL, `stop` rejecting waiters), L1 for a 1 000-file cold bind with an
-injected round trip (requests, wall clock, peak store bytes) and for a mixed push/pull pass, L3 for a real
-Obsidian bind over a 3 000-file vault, and an extension of `first-bind.bench.test.ts` comparing prefetch
-on/off locally and at 30 ms RTT. Off by default behind `prefetch: { enabled, batchFiles, batchBytes,
-concurrency, storeBytes }`, enabled for a pass whose candidate count is above a threshold, so a small
-pass keeps today's path.
-
-**Decisions to take before implementing.** (1) The phone memory budget — the proposal is 8 MiB store plus
-two 8 MiB requests. (2) Whether it ships enabled or behind an opt-in for one measurement round; the
-diagnostic counters (hit rate, wasted prefetches) should decide, not intuition.
-
 ## Files
 
 - `packages/e2e/src/research/timing.ts` — counters and clocks around the adapter/API.
 - `packages/e2e/src/research/first-bind.bench.test.ts` — upload / steady state / download.
 - `packages/e2e/src/research/first-bind-limits.bench.test.ts` — production limiters, server marginal
   cost, a bind bigger than one window.
+- `packages/e2e/src/research/download-read-ahead.bench.test.ts` — a cold download with the read-ahead
+  on and off, at 0 and 30 ms per request.
 
 ## 2026-10-30: per-blob `fsync` removed, batch writes run concurrently
 
@@ -379,6 +325,89 @@ job, changes / deletions / moves are their own lists) is in
 [sync-engine.md](sync-engine.md#pass-order-and-concurrency); the cases are `bulk-write.e2e.test.ts`, run
 against the deployed 600/minute allowance rather than the harness's raised one.
 
-Two limits stay: a **download** still pays one round trip per wave of four files (its request count is
-four times lower, its wall clock is not — see **Download**), and a first bind still scans the vault —
-the levers listed under Remaining work.
+One limit stays: a first bind still scans the vault — the lever listed under Remaining work. The
+download that follows a bulk push is no longer one round trip per wave of four files: the read-ahead of
+2026-11-08 (next section) carries 64 versions per request, for the peer's burst and for a cold bind
+alike.
+
+## 2026-11-08: a download read-ahead (measured)
+
+**The problem the batch content route did not solve was time, not requests.** A download cost
+_round trips × waves_, where a wave is one `maxConcurrent` (four) of per-file operations: each wave
+waited for its own content request. The batch route turned a wave's four requests into one, which divides
+the request count by four and leaves the number of waves — and therefore the wall clock — where it was
+(measured: 1 105 ms against 1 073 ms at 1 ms RTT, 9 254 ms against 9 308 ms at 30 ms). One round trip
+had to carry more files than the pool has slots.
+
+**What was built: a read-ahead beside the pass, not a wider pool.** `ContentPrefetcher`
+(`packages/engine/src/content-prefetch.ts`) is fed the versions a pass or a notification burst is about
+to pull, and reads them ahead in wide batches. The per-file loop asks it first (`readRemoteContent`) and
+falls back to the wave batch it always had.
+
+- **Only the content pipeline is widened.** `WorkPool`/`OpQueue` concurrency stays at four: it also runs
+  pushes, deletes and large files, and each of those holds a plaintext copy — that bound is what protects
+  a phone. The read-ahead holds **ciphertext only**, so it does not raise it.
+- **The candidates are a superset in the ordinary case, and a wrong guess cannot change a decision.**
+  After the index and the local scan, every live chain whose head content is not among the hashes the scan
+  just took is queued, in the pass's own priority order. A conflict copy, a local edit that decides as a
+  push, or a path the size cap refuses may still be read: the bytes are downloaded and dropped. Decryption,
+  verification and the write stay in the pull that needs them, exactly as before. It is not a _strict_
+  superset — bytes this device holds at another path are not in that set — so such a pull is simply read
+  the old way, at the cost of one request. The state's recorded sync points are deliberately **not**
+  consulted: a record outlives the bytes it describes, and treating it as content this device holds would
+  leave exactly the pulls that matter (a peer's revert, a conflict settled the remote's way) outside the
+  read-ahead.
+- **64 hashes or 4 MiB per request, two in flight.** The route accepts 64 hashes and answers up to
+  16 MiB; the limits a host may override are normalized against both, because a request the route
+  refuses would reject every read in it. A version above the 4 MiB request cap is never queued — it
+  would be a request of its own, and a read-ahead is for the many small files that make a round trip
+  the unit of progress — so it keeps the wave read the pool already gives it. The store is an LRU
+  capped at 8 MiB / 4 096 entries, and it is a **buffer, not a cache**: a taken answer leaves it, which
+  is what frees room for the next request — a read-ahead may only be ahead of the reader by what the
+  store holds, or a fast link would outrun a slow writer and every evicted entry would cost a second
+  read.
+- **Nothing here is a failure path.** A hit answers with the ciphertext; a hash the store never had
+  answers "not prefetched" and the caller reads it the old way; a request that failed answers "not
+  prefetched" too, so the on-demand read is the retry and the one that can raise. A `404` answer is
+  delivered as "nothing to apply" but **not cached**: a reclaimed blob can come back, and the pull path's
+  rule is that the next pass is the retry.
+- **A caller that is blocked on a hash jumps the queue.** A pass and a peer's burst can be in flight at
+  the same time, and the burst's apply loop runs as an exclusive job in the host — a demanded hash queued
+  behind hundreds of speculative ones would stall the files the user can see, and the events behind them.
+  `take` therefore promotes its hash ahead of the speculative queue.
+- **The same read-ahead serves a peer's burst.** `handleFilePushedBatch` queues the heads of each chunk it
+  fetched before applying them (skipping chains outside this device's scope), which is the download a peer
+  that is online during a bulk push pays.
+
+**Measured** (real engine, real server, real CLI adapter; RTT injected on the client's transport):
+
+| Vault                  | Read-ahead | Requests | ~0 ms RTT  | 30 ms RTT    |
+| ---------------------- | ---------- | -------: | ---------- | ------------ |
+| 1 001 files / 3.3 MiB  | off        |      251 | 646 ms     | 10 132 ms    |
+| 1 001 files / 3.3 MiB  | **on**     |   **16** | **335 ms** | **764 ms**   |
+| 5 001 files / 12.4 MiB | off        |     1375 | —          | 46 570 ms    |
+| 5 001 files / 12.4 MiB | **on**     |   **79** | —          | **2 092 ms** |
+
+The read-ahead is worth **13×** at one round trip per request and **1.9×** on localhost, where the round
+trip was never the bottleneck; the request count falls by the same factor as the pool concurrency it
+bypasses (a wave of four → 64 files). The batch size was chosen from an earlier run that measured 32 files
+per request (932 ms), 64 with a 4 MiB byte cap (892 ms) and 64 with an 8 MiB cap (827 ms) at 30 ms: the
+4 MiB cap keeps the worst-case ciphertext at ~16 MiB (8 MiB store + 2 × 4 MiB in flight) and the wider
+batch buys 7 %.
+
+Run it with `COURIER_BENCH=1 bun --bun vitest run packages/e2e/src/research/download-read-ahead.bench.test.ts`
+(`COURIER_BENCH_FILES`, `COURIER_BENCH_RTT`); `contentPrefetch: false` on the engine options is the
+baseline it compares against.
+
+**Rejected alternatives.** Raising `maxConcurrent` would raise every per-file operation (and its
+plaintext copy) with it — the phone-memory guard exists for that. Multi-range requests
+(`multipart/byteranges`) only help one large file and add a response format. Server push over the
+WebSocket would be a contract change for a transport-level win.
+
+**Pinned by**: the `ContentPrefetcher` cases in `content-prefetch.test.ts` (one request per hash, the
+count/byte caps, concurrency, LRU by bytes and by entries, a failed request answering "not prefetched",
+a `404` not being cached, `stop` answering its waiters); the `SyncEngine — download read-ahead` cases in
+`engine.test.ts` (a cold bind reads 64 per request, a failed read-ahead request costs the pass nothing,
+`contentPrefetch: false` keeps the wave, a notification burst reads ahead); and
+`bulk-write.e2e.test.ts`, where a 400-note remote lands on a fresh device in ≤ 10 content requests and the
+live peer's 700-file burst stays under 20.

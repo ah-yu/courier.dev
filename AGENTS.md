@@ -226,7 +226,9 @@ protocol or a security hole. Read the linked section before changing one.
     a missing stamp costs one re-read). Creates are batched (100 files / 8 MiB); a burst of local
     vault events becomes one engine job whose versions and chain reads travel in batches (100 and
     200 per request), with one listing per job and no pass; a download's content reads travel in
-    batches too (up to 64 hashes / 8 MiB); a pass orders
+    batches too (up to 64 hashes / 8 MiB), and a read-ahead beside the per-file loop pulls them
+    **ahead** of it (64 hashes or 4 MiB per request, two in flight, ciphertext only, LRU-bounded)
+    without raising the pool's concurrency; a pass orders
     work by priority, runs through `WorkPool`, serialises paths through `PathQueue`, bounds
     event-driven work through `OpQueue`, and coalesces a burst of `file_pushed` notifications into
     batched chain pulls (200 per request). See

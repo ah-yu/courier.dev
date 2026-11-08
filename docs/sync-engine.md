@@ -500,6 +500,57 @@ file now lives at.
     it, a `429` wait, the read count, and "the second batch is ready while the first request is in
     flight"), and `large-file.e2e.test.ts` (250 notes → three pushes).
 
+- **A download reads ahead, so a round trip carries more files than the pool has slots.** The batch
+  content route groups a wave's four reads into one request, which divides the **request count** and
+  leaves the wall clock alone: `WorkPool` still decides how many files a wave holds, so a cold download
+  costs `files / 4` round trips either way (measured at 30 ms: 9.25 s one request per file, 9.23 s
+  batched). `ContentPrefetcher` (`content-prefetch.ts`) reads the versions a pass or a notification
+  burst is **about to** pull, 64 hashes or 4 MiB per request with two requests in flight, and the
+  per-file loop takes them from its store (`readRemoteContent`) instead of issuing a request of its own.
+  Measured at an injected 30 ms: 1 001 files went from 10.1 s / 251 requests to 0.76 s / 16, and 5 001
+  from 46.6 s / 1 375 to 2.1 s / 79 ([first-bind-performance.md](first-bind-performance.md)).
+  - **The candidate set is a superset in the ordinary case, and a wrong guess cannot change a decision.**
+    After the index and the local scan, every live chain whose head content is not among the hashes the
+    scan just took is queued in the pass's own priority order; a notification burst queues the heads of
+    the chunk it just fetched, minus the chains outside this device's scope. A conflict copy, a local edit
+    that decides as a push, or a path the size cap refuses may still be read, and the bytes are dropped.
+    Decryption, verification, the write and every decision stay in the pull that needs them. It is not
+    strict: bytes this device holds at another path are not in the set, so that pull is read the old way.
+    The state's recorded sync points are deliberately not consulted — a record outlives the bytes it
+    describes, and it would exclude exactly the pulls that matter (a peer's revert, a conflict settled the
+    remote's way).
+  - **Only the content pipeline is widened.** `WorkPool`/`OpQueue` stay at four: they also run pushes,
+    deletes and large files, and each holds a plaintext copy. The read-ahead holds **ciphertext only**,
+    bounded by bytes (8 MiB store plus two 4 MiB requests in flight), and a version above the 4 MiB
+    request cap is never queued — it would be a request of its own, so it keeps the wave read the pool
+    already gives it.
+  - **The store is a buffer, not a cache, and the read-ahead is bounded by its room.** A taken answer
+    leaves the store, which frees room for the next request; a speculative batch may only use what is
+    left — buffered bytes (ciphertext) plus those in flight against `storeBytes`, and free entry slots
+    against `storeEntries` — while a demanded one ignores the check because a caller is blocked on it.
+    Without that, a fast link would outrun a slow writer — the phone case the memory bound exists for —
+    the LRU would evict entries nobody consumed, and every one of those pulls would cost a second read.
+    A pass drops its speculative queue _and_ the bytes it had buffered when its loop is over, and a
+    request that was already in flight at that moment is not stored again, so a wrong guess is not read
+    (or held) after the pass. A queue with no room left counts as idle: nothing will start until a take
+    frees room.
+  - **A caller that is blocked on a hash jumps the queue.** A pass and a peer's burst can be in flight
+    together, and the host runs the burst's apply as an exclusive job: a demanded hash queued behind
+    hundreds of speculative ones would stall the user's files and the events behind them. `take` promotes
+    its hash ahead of the speculative queue.
+  - **A miss is not a failure.** A hash the store never had is "not prefetched" and the caller reads it
+    the old way; a request that failed answers the same, so the on-demand read is the retry and the one
+    that can raise; a `404` is delivered as "nothing to apply" but **not cached**, because a reclaimed
+    blob can come back and the pull path's retry rule is the next pass. The store is an LRU, so eviction
+    costs a re-read, never a file.
+  - `contentPrefetch: false` turns it off (the benchmark's baseline), and the limits are per-engine
+    options, normalized against the route's own caps (64 hashes / 16 MiB) and to at least one request in
+    flight — a queue that never moves would hang the pass that waits on it.
+  - Covered by `content-prefetch.test.ts` (caps, concurrency, demand-before-speculation ordering, LRU by
+    bytes and entries, failure, `404`, `stop`, normalized limits), the `SyncEngine — download read-ahead`
+    cases in `engine.test.ts`, and `bulk-write.e2e.test.ts` (a 400-note remote on a fresh device in ≤ 10
+    content requests; a live peer's 700-file burst under 20).
+
 ## Chunked transfer
 
 - **A file above 8 MiB moves in 4 MiB chunks, and resumes where it stopped.** A push for a larger file

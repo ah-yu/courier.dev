@@ -51,6 +51,12 @@ import {
 } from "./decide";
 import { SelfEventLog } from "./self-events";
 import { RemoteIndex } from "./remote-index";
+import {
+  ContentPrefetcher,
+  normalizePrefetchLimits,
+  type ContentPrefetchLimits,
+  type PrefetchCandidate,
+} from "./content-prefetch";
 import { normalizePriorityPaths, orderByPriority, priorityRanks } from "./priority";
 import {
   DEFAULT_OP_QUEUE_LIMITS,
@@ -234,6 +240,19 @@ export interface EngineOptions {
    * in a host, the vault lease) must not be held for the whole window.
    */
   wait?: (ms: number) => Promise<void>;
+  /**
+   * Reading content ahead of the per-file loop (see {@link ContentPrefetcher}).
+   *
+   * On by default with {@link DEFAULT_CONTENT_PREFETCH_LIMITS}: a cold download's wall
+   * clock is `waves × round trip`, and a wave is one `WorkPool` slot, so the read-ahead
+   * is the only way to put more files in one round trip without widening the pool (and
+   * raising the per-file memory bound with it). `false` turns it off — the benchmark
+   * uses that to measure both paths — and an object overrides the limits.
+   *
+   * It changes no decision: a prefetched file is still decrypted, verified and written
+   * by the pull that needs it, and a miss simply reads it the old way.
+   */
+  contentPrefetch?: false | Partial<ContentPrefetchLimits>;
   /**
    * The runtime this pass runs on (see `Platform`).
    *
@@ -695,10 +714,23 @@ export class SyncEngine {
   private readonly scope: SyncScope;
   /** How many per-file operations one pass may run at once (see `WorkPool`). */
   private readonly passLimits: OpQueueLimits;
+  /**
+   * The read-ahead beside the per-file loop, or `null` when the host turned it off
+   * (see {@link EngineOptions.contentPrefetch}).
+   */
+  private readonly prefetcher: ContentPrefetcher | null;
 
   constructor(private opts: EngineOptions) {
     this.scope = normalizeScope(opts.syncScope);
     this.passLimits = opts.opLimits ?? DEFAULT_OP_QUEUE_LIMITS;
+    const prefetch = opts.contentPrefetch;
+    this.prefetcher =
+      prefetch === false
+        ? null
+        : new ContentPrefetcher(
+            (contentHashes) => this.sendContentBatch(contentHashes),
+            normalizePrefetchLimits(prefetch),
+          );
   }
 
   /**
@@ -2040,6 +2072,10 @@ export class SyncEngine {
     // Progress starts from the chains this pass already knows about; the creates add
     // themselves as the vault is walked (see `createUntrackedFiles`).
     this.beginProgress(ordered.length);
+    // Read ahead of the loop: the pool runs four files at a time, so without this a
+    // cold download costs one round trip per four files whatever the batch route groups
+    // (see `prefetchForPass`).
+    this.prefetchForPass(pass, ordered);
     const pool = new WorkPool(this.passLimits);
     // Two chains can name one path while a peer's move is in flight; the tasks that
     // may write the same path take turns through the engine's path queue. Everything
@@ -2074,6 +2110,13 @@ export class SyncEngine {
       ),
     );
 
+    // Every pull of the pass has happened, so a candidate nobody asked for is a guess that
+    // did not pay off: stop reading it and release the bytes it held, before the create
+    // phase starts uploading. Only this pass's entries go — a burst that is applying
+    // meanwhile has its own read-ahead. Requests already sent are not cancelled (a read is
+    // read-only and settles on its own), but nothing new is started for this pass.
+    this.prefetcher?.dropSpeculative("pass");
+
     // Untracked local files (no fileId anywhere) → create on the server. Its own batch
     // failures are collected inside it, for the same reason the push sites above are.
     const batchFailure = await this.createUntrackedFiles(
@@ -2087,6 +2130,81 @@ export class SyncEngine {
     // showing a counter (a create that a limiter left unsent was counted and dropped).
     this.reportProgress(true);
     return firstFailure ?? batchFailure;
+  }
+
+  /**
+   * Start reading, ahead of the loop, the versions this pass is about to pull.
+   *
+   * A download's wall clock is `waves × round trip`, where a wave is one `WorkPool` slot
+   * — four files — and the batch route groups a wave's reads without changing the number
+   * of waves (`docs/first-bind-performance.md` measures both at ~9.3 s for 1 000 files at
+   * 30 ms). Reading ahead is what puts more files in one round trip without widening the
+   * pool, and the pool's bound is deliberately untouched: it is what protects a phone's
+   * memory for pushes, deletes and large files alike. The read-ahead holds ciphertext
+   * only (see {@link ContentPrefetcher}).
+   *
+   * The candidates come from the same index the loop decides from: a live chain whose
+   * head content is not among the hashes the scan just took, in the loop's own order.
+   * That is a **superset** of the pulls in the ordinary case — a wrong guess (a conflict
+   * copy, a local edit that decides as a push, a path the size cap refuses) costs bytes
+   * that are dropped, never a decision. It is not a strict superset: bytes this device
+   * holds at *another* path, or at a path the scan could not stat, are not in that set, so
+   * a pull for them is simply read the old way. A wrong guess is cheap; a missed guess
+   * costs one on-demand request.
+   *
+   * Note it is **only** the hashes the scan took, not the state's recorded sync points: a
+   * record outlives the bytes it describes (a local edit, a delete), and treating it as
+   * content this device holds would leave exactly the pulls that matter — a peer's revert,
+   * a conflict resolved in the remote's favour — outside the read-ahead.
+   *
+   * The order is the loop's own (`orderFileIds`), so the files it touches first are the
+   * ones whose bytes go on the wire first; a read-ahead in server order would spend its
+   * requests on the files the user is not looking at.
+   */
+  private prefetchForPass(pass: ReconcilePass, ordered: readonly string[]): void {
+    if (this.prefetcher === null) return;
+    const held = new Set<string>(pass.localHashes.values());
+    const candidates: PrefetchCandidate[] = [];
+    for (const fileId of ordered) {
+      const head = remoteHead(pass.chainByFileId.get(fileId) ?? []);
+      if (!head || head.action === "delete") continue;
+      if (held.has(head.contentHash)) continue;
+      const { plainPath } = this.resolvePaths(fileId, pass);
+      if (plainPath === null || !this.isSyncable(plainPath)) continue;
+      candidates.push({ contentHash: head.contentHash, sizeBytes: head.sizeBytes });
+    }
+    this.prefetcher.request(candidates, "pass");
+  }
+
+  /**
+   * The same read-ahead for a notification burst, from the chains the batch fetched.
+   *
+   * A peer that pushes 1 000 files sends 1 000 notifications; they arrive coalesced, and
+   * this is the download the whole burst costs. The apply loop runs four files at a time,
+   * so without a read-ahead every four files are one round trip.
+   *
+   * `headPaths` is the decrypted path of each head — the same set the caller's apply loop
+   * has to compute anyway for its path check — because a chain outside this device's scope
+   * is never applied, and reading it ahead would spend bytes on content invariant 8 says
+   * this device does not sync.
+   */
+  private prefetchPushedChains(
+    chains: ReadonlyMap<string, VersionChainEntry[]>,
+    headPaths: ReadonlyMap<string, string | null>,
+  ): void {
+    if (this.prefetcher === null) return;
+    const candidates: PrefetchCandidate[] = [];
+    for (const [fileId, chain] of chains) {
+      const head = remoteHead(chain);
+      if (!head || head.action === "delete") continue;
+      // The head being this device's own sync point is the one case that cannot pull —
+      // not the recorded content hash, which a peer can revert to with a newer version.
+      if (this.state[fileId]?.lastKnownVersionId === head.versionId) continue;
+      const path = headPaths.get(fileId) ?? null;
+      if (path === null || !this.isSyncable(path)) continue;
+      candidates.push({ contentHash: head.contentHash, sizeBytes: head.sizeBytes });
+    }
+    this.prefetcher.request(candidates, "burst");
   }
 
   /**
@@ -3247,10 +3365,11 @@ export class SyncEngine {
     // The API hands back the stored ciphertext itself; there is nothing to decode first,
     // so a pull decrypts the bytes it received and no more. Reads are batched (see
     // `fetchContentBatched`): a pass or a notification burst fetches several versions in
-    // one request instead of one per file. A failure — a rate limit that outlasted its
+    // one request instead of one per file, and the read-ahead beside the loop may already
+    // hold them (see `ContentPrefetcher`). A failure — a rate limit that outlasted its
     // waits, a 5xx, a dropped connection — is a failed pull and is rethrown; only a `null`
     // (the store holds nothing, or the bytes do not decrypt) is "nothing to apply".
-    const stored = await this.fetchContentBatched(contentHash, plaintextSize);
+    const stored = await this.readRemoteContent(contentHash, plaintextSize);
     if (stored === null) return null;
     try {
       return await decryptCombinedBytes(this.opts.encryptionKey, stored);
@@ -3258,6 +3377,27 @@ export class SyncEngine {
       // Undecryptable: not a store a peer can use, and retrying cannot fix it.
       return null;
     }
+  }
+
+  /**
+   * One version's ciphertext: from the read-ahead when it holds it, otherwise the wave
+   * batch that a pass or a burst forms from the reads it is making right now.
+   *
+   * The two are interchangeable because they read the same route and answer the same
+   * "nothing to apply". A read-ahead whose request failed answers `failed`, which is a
+   * **miss**, not a missing blob: reading it again here is what keeps a dropped
+   * connection from looking like a reclaimed one.
+   */
+  private async readRemoteContent(
+    contentHash: string,
+    sizeBytes: number,
+  ): Promise<Uint8Array | null> {
+    const prefetched = this.prefetcher?.take(contentHash);
+    if (prefetched === undefined) return await this.fetchContentBatched(contentHash, sizeBytes);
+    const answer = await prefetched;
+    if (answer.kind === "content") return answer.bytes;
+    if (answer.kind === "missing") return null;
+    return await this.fetchContentBatched(contentHash, sizeBytes);
   }
 
   /**
@@ -5268,67 +5408,83 @@ export class SyncEngine {
     }
     const pending = [...latest.values()];
 
-    for (let start = 0; start < pending.length; start += MAX_PULL_BATCH_FILES) {
-      const chunk = pending.slice(start, start + MAX_PULL_BATCH_FILES);
-      const response = await this.opts.api.pull(
-        this.opts.vaultId,
-        chunk.map((event) => event.fileId),
-      );
-      const chains = new Map(response.files.map((file) => [file.fileId, file.versions]));
-
-      // The apply touches up to two paths: the head's recorded path and the path this
-      // device already holds the chain at (a rename being applied). Compute both before
-      // running anything; if any path repeats inside the chunk, the whole chunk applies
-      // in order, one file at a time. That is the conservative version of the path queue:
-      // a peer's move can leave two chains naming one path for a moment, and the two
-      // decisions must not interleave. With no shared path, four files at a time.
-      const seenPaths = new Set<string>();
-      let sharesPath = false;
-      for (const event of chunk) {
-        const head = remoteHead(chains.get(event.fileId) ?? []);
-        const headPath = head ? await this.decryptPath(head) : null;
-        for (const path of [headPath, this.state[event.fileId]?.plainPath ?? null]) {
-          if (path === null) continue;
-          if (seenPaths.has(path)) sharesPath = true;
-          seenPaths.add(path);
-        }
-      }
-
-      const failures: unknown[] = [];
-      const applyOne = async (event: PushedFileEvent): Promise<void> => {
-        await this.applyPushedChain(
-          event.fileId,
-          event.versionId,
-          event.deviceName ?? null,
-          chains.get(event.fileId) ?? [],
+    try {
+      for (let start = 0; start < pending.length; start += MAX_PULL_BATCH_FILES) {
+        const chunk = pending.slice(start, start + MAX_PULL_BATCH_FILES);
+        const response = await this.opts.api.pull(
+          this.opts.vaultId,
+          chunk.map((event) => event.fileId),
         );
-      };
-      if (sharesPath) {
+        const chains = new Map(response.files.map((file) => [file.fileId, file.versions]));
+
+        // The apply touches up to two paths: the head's recorded path and the path this
+        // device already holds the chain at (a rename being applied). Compute both before
+        // running anything; if any path repeats inside the chunk, the whole chunk applies
+        // in order, one file at a time. That is the conservative version of the path queue:
+        // a peer's move can leave two chains naming one path for a moment, and the two
+        // decisions must not interleave. With no shared path, four files at a time.
+        const seenPaths = new Set<string>();
+        const headPaths = new Map<string, string | null>();
+        let sharesPath = false;
         for (const event of chunk) {
-          try {
-            await applyOne(event);
-          } catch (err) {
-            failures.push(err);
+          const head = remoteHead(chains.get(event.fileId) ?? []);
+          const headPath = head ? await this.decryptPath(head) : null;
+          // The path the apply will decide on (`applyPushedChainLocked` prefers the state's
+          // own path over the head's), kept for the read-ahead: a chain outside this
+          // device's scope is never applied, and the prefetch must not read it either.
+          headPaths.set(event.fileId, this.state[event.fileId]?.plainPath ?? headPath);
+          for (const path of [headPath, this.state[event.fileId]?.plainPath ?? null]) {
+            if (path === null) continue;
+            if (seenPaths.has(path)) sharesPath = true;
+            seenPaths.add(path);
           }
         }
-      } else {
-        const pool = new WorkPool(this.passLimits);
-        await Promise.all(
-          chunk.map(async (event) => {
-            const head = remoteHead(chains.get(event.fileId) ?? []);
-            const weight = weightForSize(this.passLimits, head ? head.sizeBytes : null);
+
+        // The burst's read-ahead starts before the first file is applied: the apply loop
+        // runs four at a time, and these are the bytes all of them are about to pull.
+        this.prefetchPushedChains(chains, headPaths);
+
+        const failures: unknown[] = [];
+        const applyOne = async (event: PushedFileEvent): Promise<void> => {
+          await this.applyPushedChain(
+            event.fileId,
+            event.versionId,
+            event.deviceName ?? null,
+            chains.get(event.fileId) ?? [],
+          );
+        };
+        if (sharesPath) {
+          for (const event of chunk) {
             try {
-              await pool.run(weight, () => applyOne(event));
+              await applyOne(event);
             } catch (err) {
               failures.push(err);
             }
-          }),
-        );
+          }
+        } else {
+          const pool = new WorkPool(this.passLimits);
+          await Promise.all(
+            chunk.map(async (event) => {
+              const head = remoteHead(chains.get(event.fileId) ?? []);
+              const weight = weightForSize(this.passLimits, head ? head.sizeBytes : null);
+              try {
+                await pool.run(weight, () => applyOne(event));
+              } catch (err) {
+                failures.push(err);
+              }
+            }),
+          );
+        }
+        // One state write for the batch. Persisting per file rewrote the whole
+        // (megabyte-scale) state once per file, which was most of a live pull's cost.
+        this.persist();
+        if (failures.length > 0) throw failures[0];
       }
-      // One state write for the batch. Persisting per file rewrote the whole
-      // (megabyte-scale) state once per file, which was most of a live pull's cost.
-      this.persist();
-      if (failures.length > 0) throw failures[0];
+    } finally {
+      // The burst is over, however it ended: what is left of its read-ahead is a guess the
+      // apply loop did not pull, so release it — otherwise it keeps the room the next pass
+      // or burst needs. A failed chunk throws above, and this still runs.
+      this.prefetcher?.dropSpeculative("burst");
     }
   }
 
