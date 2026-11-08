@@ -2,12 +2,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 import { SyncLease } from "@courier/engine";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CliConfig, CliVault } from "./config";
 import { setLocale } from "./i18n";
 import { LeaseStore } from "./lease";
 import { readRuntime } from "./runtime";
-import { runDaemon, runOnceSync } from "./runner";
+import { keepLeaseFresh, runDaemon, runOnceSync } from "./runner";
 
 /**
  * One process owns one vault, first come first served. These tests hold the vault lease
@@ -101,6 +101,54 @@ describe("lease filesystem failures", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+/** A lease stand-in: only what the renewal touches, with its spy exposed beside it. */
+function fakeLease(ttlMs: number) {
+  const renew = vi.fn(async () => true);
+  return { lease: { ttlMs, renew } as unknown as SyncLease, renew };
+}
+
+/**
+ * A one-shot pass has no loop to renew from, and the record it took expires on its TTL. If
+ * the pass outlives it, the writer it displaced — still waiting, still retrying — takes the
+ * vault back mid-push. These cases pin the renewal and its period against the TTL.
+ */
+describe("keepLeaseFresh", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("renews at a quarter of the TTL, so a slow pass never lets the record lapse", async () => {
+    vi.useFakeTimers();
+    const { lease, renew } = fakeLease(400);
+
+    const stop = keepLeaseFresh(lease);
+    try {
+      await vi.advanceTimersByTimeAsync(99);
+      expect(renew).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(renew).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(300);
+      // Four periods in 400 ms: never more than a quarter of the TTL between renewals.
+      expect(renew.mock.calls.length).toBeGreaterThanOrEqual(4);
+    } finally {
+      stop();
+    }
+  });
+
+  it("stops renewing once the pass ends", async () => {
+    vi.useFakeTimers();
+    const { lease, renew } = fakeLease(400);
+
+    const stop = keepLeaseFresh(lease);
+    await vi.advanceTimersByTimeAsync(100);
+    stop();
+    const seen = renew.mock.calls.length;
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(renew.mock.calls.length).toBe(seen);
   });
 });
 

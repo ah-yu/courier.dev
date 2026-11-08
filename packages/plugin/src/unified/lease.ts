@@ -1,5 +1,27 @@
 import type { DataAdapter } from "obsidian";
+import { Platform } from "obsidian";
 import type { SyncLeaseStore } from "@courier/engine";
+
+/**
+ * This machine's name, as the desktop renderer can learn it.
+ *
+ * `SyncLease.currentHost` reads the environment, which a renderer launched from a GUI
+ * often does not carry (macOS from Finder is the common case). A lease record without a
+ * machine cannot support pid evidence — neither "that holder is gone" nor "that holder is
+ * somebody else" — so the plugin asks the OS through `window.require`, the same door
+ * `lease-watch.ts` uses. Mobile has no such surface and answers "".
+ */
+export function desktopHostname(): string {
+  if (!Platform.isDesktop) return "";
+  try {
+    const requireFn = (window as unknown as { require?: (id: string) => unknown }).require;
+    if (typeof requireFn !== "function") return "";
+    const os = requireFn("node:os") as { hostname?: () => string } | undefined;
+    return (os?.hostname?.() ?? "").trim();
+  } catch {
+    return "";
+  }
+}
 
 /**
  * The lease store inside an Obsidian vault.
@@ -43,7 +65,15 @@ export class AdapterLeaseStore implements SyncLeaseStore {
   async readFile(path: string): Promise<string | null> {
     try {
       return await this.adapter.read(path);
-    } catch {
+    } catch (error) {
+      // "Not there" is the only failure that means "no record". Everything else — a
+      // permission error, a locked file, a drive that went away — is a read that failed,
+      // and the lease has to be able to tell them apart: `stillOwner` stops the engine on
+      // a missing record and keeps the vault on a failed read. Asking the adapter whether
+      // the file is really gone is what makes that distinction without guessing at error
+      // codes the app's own adapter does not standardise.
+      const exists = await this.adapter.exists(path).catch(() => true);
+      if (exists) throw error;
       return null;
     }
   }
