@@ -5893,7 +5893,17 @@ describe("SyncEngine — batched content reads", () => {
 
     const target = await bindTarget(api, key, { maxConcurrent: 80, exclusiveBytes: 1_024 });
 
-    expect(api.contentBatchCalls.map((call) => call.length)).toEqual([64, 6]);
+    // The cap itself is deterministic — the 64th read flushes at once — but the tail is
+    // not: the batch window is 0 ms, so how many reads are pending when it closes depends
+    // on where the per-file awaits land in the event loop. The bound is the rule; a tail
+    // that travels as one request on one machine and two on another is the same
+    // behaviour, and pinning `[64, 6]` made ubuntu-latest fail with `[64, 3, 3]`.
+    const sizes = api.contentBatchCalls.map((call) => call.length);
+    expect(sizes[0]).toBe(MAX_CONTENT_BATCH_FILES);
+    for (const size of sizes) expect(size).toBeLessThanOrEqual(MAX_CONTENT_BATCH_FILES);
+    const hashes = api.contentBatchCalls.flat();
+    expect(hashes).toHaveLength(paths.length);
+    expect(new Set(hashes).size).toBe(paths.length);
     expect(target.adapter.files.size).toBe(paths.length);
   });
 

@@ -695,8 +695,17 @@ export class SyncEngine {
   private tooLargeReported = new Set<string>();
   /** Paths reported through `onFileSkipped` in the current pass (one event each). */
   private skippedReported = new Set<string>();
-  /** `sha256("")` — the hash a `delete` version carries. Computed once, lazily. */
-  private emptyHash: string | null = null;
+  /**
+   * `sha256("")` — the hash a `delete` version carries. Computed once, lazily.
+   *
+   * The **promise** is what is memoised, not the digest: a pass decides dozens of
+   * files in one turn and every one of them asks for this constant, so memoising the
+   * awaited value would still run one Web Crypto op per caller (`a ??= await b` resumes
+   * after the await, when the field is still empty). Each of those is an event-loop hop
+   * on the way to a pull's read, which is what let a download's reads arrive in waves
+   * instead of one batch.
+   */
+  private emptyHash: Promise<string> | null = null;
   /** Single-flight marker for {@link syncLocalSettings}. */
   private settingsPollRunning = false;
   /** Files the current pass has settled, and how many it has taken on (see `SyncProgress`). */
@@ -907,9 +916,13 @@ export class SyncEngine {
    * A decision needs it to tell "this device's sync point is a tombstone" from "this
    * device last agreed on content", and hashing an empty string per file per pass was
    * a Web Crypto call for a constant.
+   *
+   * Every caller in one turn gets the same promise, so the digest is computed once even
+   * when a pass decides eighty files before the first of them finishes (see
+   * {@link emptyHash}).
    */
-  private async emptyContentHash(): Promise<string> {
-    return (this.emptyHash ??= await sha256Text(""));
+  private emptyContentHash(): Promise<string> {
+    return (this.emptyHash ??= sha256Text(""));
   }
 
   // ── State persistence ──
