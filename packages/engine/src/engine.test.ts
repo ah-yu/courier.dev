@@ -7219,6 +7219,26 @@ describe("SyncEngine — a batch of local events", () => {
     expect(engine.fileIdForPath("src.md")).toBe(srcId);
   });
 
+  it("does not adopt a peer's tombstone as the head of an empty rename", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("empty.md", new Uint8Array(0));
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("empty.md")!;
+    // A peer deletes the empty note; the local device renames it (a live version whose
+    // content hash is also the empty hash). The tombstone must not be adopted as that
+    // version's head — the peer's deletion is what the chain says.
+    await api.remoteDelete(fileId);
+    adapter.files.delete("empty.md");
+    adapter.files.set("moved-empty.md", new Uint8Array(0));
+    await engine.handleLocalRename("empty.md", "moved-empty.md");
+
+    // The peer's tombstone is the chain's head, so the deletion lands and the moved copy
+    // goes with it; nothing is resurrected.
+    expect(api.chains.get(fileId)!.at(-1)!.action).toBe("delete");
+    expect(adapter.files.has("moved-empty.md")).toBe(false);
+    expect(engine.fileIdForPath("moved-empty.md")).toBeNull();
+  });
+
   it("adopts a refused destination whose bytes already match the moved file", async () => {
     const { engine, adapter, api } = await makeEngine();
     adapter.files.set("dest.md", encoder.encode("old dest"));
@@ -7276,6 +7296,31 @@ describe("SyncEngine — a batch of local events", () => {
     expect(api.pushed.slice(before).filter((push) => push.action === "rename")).toHaveLength(0);
     expect(engine.fileIdForPath("dest.md")).toBe(destId);
     expect(engine.fileIdForPath("src.md")).toBe(srcId);
+  });
+
+  it("keeps a refused destination when its bytes cannot be read", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("dest.md", encoder.encode("old dest"));
+    adapter.files.set("src.md", encoder.encode("moved bytes"));
+    await engine.initialSync();
+    const destId = engine.fileIdForPath("dest.md")!;
+    // A peer replaced the destination with something this device cannot read back: the
+    // refusal has no local bytes to compare, so it settles as a conflict without a copy.
+    await api.remoteEdit(destId, "peer bytes");
+    const realRead = adapter.readFile.bind(adapter);
+    adapter.readFile = async (path: string) => (path === "dest.md" ? null : await realRead(path));
+    const before = api.pushed.length;
+    try {
+      await engine.handleLocalEvents({
+        deleted: ["dest.md"],
+        renamed: [{ from: "src.md", to: "dest.md" }],
+      });
+    } finally {
+      adapter.readFile = realRead;
+    }
+
+    expect(api.pushed.slice(before).filter((push) => push.action === "rename")).toHaveLength(0);
+    expect(engine.fileIdForPath("dest.md")).toBe(destId);
   });
 
   it("does not treat a peer's empty file as the tombstone that landed", async () => {
@@ -7486,6 +7531,47 @@ describe("SyncEngine — a batch of local events", () => {
     );
     expect(api.chains.get(mine)!.map((version) => version.action)).toEqual(["create", "delete"]);
     expect(engine.fileIdForPath("reborn.md")).toBe(theirs);
+    await expectConsistent(engine, adapter, api);
+  });
+
+  it("keeps two chains apart when two deleted files shared their content", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("a.md", encoder.encode("same bytes"));
+    adapter.files.set("b.md", encoder.encode("same bytes"));
+    await engine.initialSync();
+    const aId = engine.fileIdForPath("a.md")!;
+    const bId = engine.fileIdForPath("b.md")!;
+    expect(api.chains.get(aId)!.at(-1)!.action).toBe("create");
+
+    // Both are removed in one job; a.md is back at its own path when the changes are read,
+    // so its tombstone is taken back and b.md's goes out. The two share a content hash, and
+    // taking a.md back must not steal b.md's rename record or its mapping.
+    adapter.files.delete("a.md");
+    adapter.files.delete("b.md");
+    adapter.files.set("a.md", encoder.encode("same bytes"));
+    const stat = adapter.statFile.bind(adapter);
+    let first = true;
+    adapter.statFile = async (path: string) => {
+      if (path === "a.md" && first) {
+        first = false;
+        return null;
+      }
+      return await stat(path);
+    };
+    try {
+      await engine.handleLocalEvents({ deleted: ["a.md", "b.md"], changed: ["a.md"] });
+    } finally {
+      adapter.statFile = stat;
+    }
+
+    // a.md's bytes never changed, so its chain keeps its version (no modify to send); b.md's
+    // tombstone goes out on its own chain.
+    expect(api.chains.get(aId)!.map((version) => version.action)).toEqual(["create"]);
+    expect(api.chains.get(bId)!.map((version) => version.action)).toEqual(["create", "delete"]);
+    expect(engine.fileIdForPath("a.md")).toBe(aId);
+    // A tombstone keeps the path mapped to its chain, so a file that appears there later is
+    // a restore of that chain rather than a second one.
+    expect(engine.fileIdForPath("b.md")).toBe(bId);
     await expectConsistent(engine, adapter, api);
   });
 
