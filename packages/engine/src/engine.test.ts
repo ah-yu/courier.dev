@@ -6014,6 +6014,8 @@ describe("SyncEngine — download read-ahead", () => {
     const sizes = api.contentBatchCalls.map((call) => call.length);
     expect(Math.max(...sizes)).toBe(4);
     expect(adapter.files.size).toBe(16);
+    // …and there is nothing to report: the accessor's `null` is the "off" answer.
+    expect(engine.prefetchStats()).toBeNull();
   });
 
   it("does not read ahead a chain this device does not sync", async () => {
@@ -6045,6 +6047,76 @@ describe("SyncEngine — download read-ahead", () => {
 
     expect(api.contentFetches).toEqual([]);
     expect(adapter.files.has(".obsidian/app.json")).toBe(false);
+  });
+
+  it("releases the read-ahead a pass decided not to use", async () => {
+    // A locally edited file's remote head is a candidate the pass decides to push **over**,
+    // so nothing takes it. The pass has to release it: an unconsumed entry would keep the
+    // room the next pass's read-ahead needs, and the feature would quietly stop working.
+    const { api, key } = await seedRemote(2);
+    const { engine, adapter } = newDevice(api, key);
+    await engine.initialSync();
+
+    adapter.files.set("wide/n-0.md", encoder.encode("# note 0, edited here"));
+    await api.remoteEdit(engine.fileIdForPath("wide/n-1.md")!, "# note 1, edited there");
+    const pushedBefore = api.pushed.length;
+
+    await engine.initialSync();
+
+    // The pull landed and the edit was pushed, so the pass really did decide both ways.
+    expect(new TextDecoder().decode(adapter.files.get("wide/n-1.md"))).toBe(
+      "# note 1, edited there",
+    );
+    expect(api.pushed.slice(pushedBefore).map((push) => push.action)).toContain("modify");
+    // …and the head it did not download is not still buffered.
+    expect(engine.prefetchStats()).toMatchObject({ storedEntries: 0, storedBytes: 0 });
+  });
+
+  it("releases the read-ahead a burst decided not to use", async () => {
+    // The peer pushes a version whose bytes are already here: the burst queues its head, the
+    // apply decides "synced", and nothing takes it — so the burst must drop it in the end.
+    const { api, key } = await seedRemote(1);
+    const { engine, adapter } = newDevice(api, key);
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("wide/n-0.md")!;
+    await api.remoteEdit(fileId, "# note 0");
+    const versionId = (await api.latestVersionId(fileId))!;
+    const before = engine.prefetchStats()!;
+
+    await engine.handleFilePushedBatch([{ fileId, versionId }]);
+
+    expect(new TextDecoder().decode(adapter.files.get("wide/n-0.md"))).toBe("# note 0");
+    const after = engine.prefetchStats()!;
+    // The burst really did read its head ahead (one more request) and nothing consumed it
+    // (no hit): that pair is what would disappear if this head ever decided as a pull.
+    expect(after.requests).toBe(before.requests + 1);
+    expect(after.hits).toBe(before.hits);
+    expect(after).toMatchObject({ storedEntries: 0, storedBytes: 0 });
+  });
+
+  it("releases the read-ahead when a burst's apply fails", async () => {
+    // The drop is in a `finally`, so a failed chunk releases what the read-ahead had stored
+    // for it: one file's version is already here (its head is never taken) and the other's
+    // write fails, which is what throws.
+    const { api, key } = await seedRemote(2);
+    const { engine, adapter } = newDevice(api, key);
+    await engine.initialSync();
+    const synced = engine.fileIdForPath("wide/n-0.md")!;
+    await api.remoteEdit(synced, "# note 0");
+    const failing = engine.fileIdForPath("wide/n-1.md")!;
+    await api.remoteEdit(failing, "# note 1, from the peer");
+    adapter.writeFile = async () => {
+      throw new Error("the disk is full");
+    };
+
+    await expect(
+      engine.handleFilePushedBatch([
+        { fileId: synced, versionId: (await api.latestVersionId(synced))! },
+        { fileId: failing, versionId: (await api.latestVersionId(failing))! },
+      ]),
+    ).rejects.toThrow("the disk is full");
+
+    expect(engine.prefetchStats()).toMatchObject({ storedEntries: 0, storedBytes: 0 });
   });
 
   it("normalizes a host's limits instead of stalling on them", async () => {

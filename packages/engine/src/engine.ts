@@ -55,6 +55,7 @@ import {
   ContentPrefetcher,
   normalizePrefetchLimits,
   type ContentPrefetchLimits,
+  type ContentPrefetchStats,
   type PrefetchCandidate,
 } from "./content-prefetch";
 import { normalizePriorityPaths, orderByPriority, priorityRanks } from "./priority";
@@ -756,6 +757,19 @@ export class SyncEngine {
    */
   isSyncablePath(path: string): boolean {
     return this.isSyncable(path);
+  }
+
+  /**
+   * One snapshot of the download read-ahead, or `null` when the host turned it off.
+   *
+   * The counters are {@link ContentPrefetcher.stats}'s: requests, hits, misses, and the
+   * ciphertext currently buffered. They exist for measurement and diagnostics — the cases
+   * in `engine.test.ts` use them to pin the read-ahead's drops, and a host that wants to
+   * check the read-ahead is paying off before tuning it has the same question — so the
+   * accessor keeps that question answerable without reaching inside the engine.
+   */
+  prefetchStats(): ContentPrefetchStats | null {
+    return this.prefetcher?.stats() ?? null;
   }
 
   /**
