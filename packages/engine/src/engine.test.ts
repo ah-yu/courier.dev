@@ -7201,19 +7201,85 @@ describe("SyncEngine — a batch of local events", () => {
       throw Object.assign(new Error("refused"), { status: 409, code: "STALE_BASE" });
     };
     try {
-      await engine.handleLocalEvents({
-        deleted: ["dest.md"],
-        renamed: [{ from: "src.md", to: "dest.md" }],
-      });
+      await expect(
+        engine.handleLocalEvents({
+          deleted: ["dest.md"],
+          renamed: [{ from: "src.md", to: "dest.md" }],
+        }),
+      ).rejects.toThrow("refused");
     } finally {
       api.push = realPush;
     }
 
     // The destination's chain is still live, so the move is withheld rather than leaving two
-    // chains at one path; the next pass settles the local file against that chain.
+    // chains at one path; the failed push is visible (the job rejects) and the pass retries.
     expect(api.pushed.slice(before).filter((push) => push.action === "rename")).toHaveLength(0);
     expect(api.chains.get(destId)!.at(-1)!.action).toBe("create");
+    expect(engine.fileIdForPath("dest.md")).toBe(destId);
     expect(engine.fileIdForPath("src.md")).toBe(srcId);
+  });
+
+  it("does not move onto a destination when the tombstone hits the limiter", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("dest.md", encoder.encode("old dest"));
+    adapter.files.set("src.md", encoder.encode("moved bytes"));
+    await engine.initialSync();
+    const destId = engine.fileIdForPath("dest.md")!;
+    const srcId = engine.fileIdForPath("src.md")!;
+    const before = api.pushed.length;
+
+    adapter.files.delete("dest.md");
+    adapter.files.delete("src.md");
+    adapter.files.set("dest.md", encoder.encode("moved bytes"));
+    const realPush = api.push.bind(api);
+    api.push = async () => {
+      throw rateLimited();
+    };
+    try {
+      await expect(
+        engine.handleLocalEvents({
+          deleted: ["dest.md"],
+          renamed: [{ from: "src.md", to: "dest.md" }],
+        }),
+      ).rejects.toMatchObject({ status: 429 });
+    } finally {
+      api.push = realPush;
+    }
+
+    // Uncertain whether it landed: the local bookkeeping names the destination's chain at the
+    // path again, no move is published, and the pass retries the decision.
+    expect(api.pushed.slice(before).filter((push) => push.action === "rename")).toHaveLength(0);
+    expect(engine.fileIdForPath("dest.md")).toBe(destId);
+    expect(engine.fileIdForPath("src.md")).toBe(srcId);
+  });
+
+  it("does not treat a peer's empty file as the tombstone that landed", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("dest.md", encoder.encode("old dest"));
+    adapter.files.set("src.md", encoder.encode("moved bytes"));
+    await engine.initialSync();
+    const destId = engine.fileIdForPath("dest.md")!;
+    // A peer replaces the destination with an empty file: the tombstone's base is stale, and
+    // every tombstone's content hash is the empty one — it must not be read as "our delete
+    // landed".
+    await api.remoteEdit(destId, "");
+    const before = api.pushed.length;
+
+    adapter.files.delete("dest.md");
+    adapter.files.delete("src.md");
+    adapter.files.set("dest.md", encoder.encode("moved bytes"));
+    await engine.handleLocalEvents({
+      deleted: ["dest.md"],
+      renamed: [{ from: "src.md", to: "dest.md" }],
+    });
+
+    // The peer's empty version wins the path and the moved bytes are parked beside it.
+    expect(api.pushed.slice(before).filter((push) => push.action === "rename")).toHaveLength(0);
+    expect(api.chains.get(destId)!.at(-1)!.action).toBe("modify");
+    expect(new TextDecoder().decode(adapter.files.get("dest.md"))).toBe("");
+    expect(new TextDecoder().decode(adapter.files.get(conflictFilePath("dest.md")))).toBe(
+      "moved bytes",
+    );
   });
 
   it("keeps a second copy of a peer's content as its own chain when it moves", async () => {
@@ -7433,25 +7499,34 @@ describe("SyncEngine — a batch of local events", () => {
   it("drops the batch's held versions when the limiter ends the job mid-way", async () => {
     const { engine, adapter, api } = await makeEngine();
     await engine.initialSync();
-    const paths = Array.from({ length: 150 }, (_, index) => `n-${index}.md`);
+    // Exactly one full batch, then a chunked file: adding it flushes the batch, the flush is
+    // refused, and the chunked version must be abandoned rather than staged and sent alone
+    // into the same limiter window.
+    const paths = Array.from({ length: 100 }, (_, index) => `n-${index}.md`);
     for (const path of paths) adapter.files.set(path, encoder.encode(`# ${path}`));
+    adapter.files.set("big.mp4", new Uint8Array(8 * 1024 * 1024 + 1024).fill(5));
+    const uploads = vi.fn(async () => {
+      throw new Error("no chunk should be staged");
+    });
+    api.uploadChunk = uploads;
 
     const realPush = api.push.bind(api);
     api.push = async () => {
       throw rateLimited();
     };
     try {
-      await expect(engine.handleLocalEvents({ changed: paths })).rejects.toMatchObject({
-        status: 429,
-      });
+      await expect(
+        engine.handleLocalEvents({ changed: [...paths, "big.mp4"] }),
+      ).rejects.toMatchObject({ status: 429 });
     } finally {
       api.push = realPush;
     }
 
     // The full-batch flush inside the job ended it; every version it still held was dropped
     // with its pending identity, so the next event or pass pushes them as batches again.
-    for (const path of paths) expect(engine.fileIdForPath(path)).toBeNull();
-  });
+    for (const path of [...paths, "big.mp4"]) expect(engine.fileIdForPath(path)).toBeNull();
+    expect(uploads).not.toHaveBeenCalled();
+  }, 20_000);
 
   it("stops the batch when a limiter outlasts its waits", async () => {
     const { engine, adapter, api } = await makeEngine();

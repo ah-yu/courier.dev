@@ -1312,8 +1312,14 @@ export class SyncEngine {
       const head = remoteHead(chain);
       // The head already holds the bytes this push was carrying: either this exact
       // push was applied and only its response was lost, or a peer converged on the
-      // same content. Nothing to write — take the head as the sync point.
-      if (head && head.contentHash === prepared.contentHash) {
+      // same content. Nothing to write — take the head as the sync point. A **delete** is
+      // settled by its action, not its content: every tombstone carries the empty-content
+      // hash, and an empty *live* file must not be mistaken for one that landed.
+      const landed =
+        prepared.action === "delete"
+          ? head?.action === "delete"
+          : head !== undefined && head.contentHash === prepared.contentHash;
+      if (head && landed) {
         this.adoptRemoteIdentity(fileId, plainPath, head, prepared.stamp ?? null);
         // The head is this very version (the server stores the client's versionId), so
         // the push did land and only its response was lost. A peer that merely converged
@@ -4313,11 +4319,22 @@ export class SyncEngine {
           if (tombstone.kind === "prepared") {
             try {
               await this.pushPrepared(tombstone.prepared);
-            } catch {
-              // A peer edited the destination, or the push did not land: the destination
-              // chain stays live and keeps the path. Leave the move undecided; the local
-              // file (the moved bytes) and the moved-away source are what the next pass
-              // decides against that live chain.
+            } catch (err) {
+              // The destination's chain did not retire, so it keeps the path: roll the local
+              // deletion bookkeeping back first (the state still names it at P, and the path
+              // mapping must too), then let the single-event rule settle the local file
+              // against that chain — a peer's version wins and the moved bytes are parked.
+              this.selfEvents.forgetDelete(replaced);
+              if (this.state[replaced] !== undefined) delete this.state[replaced].deletedAtMs;
+              this.pathToFileId.set(pair.to, replaced);
+              if (err instanceof SyncPushBaseError) {
+                await this.handleConflict(replaced, pair.to, remoteHead(err.chain), true);
+              } else {
+                // An uncertain failure (a transport error, a limiter): the tombstone may or
+                // may not have landed. Report it so the pass retries the decision.
+                if (isRateLimitError(err)) rateLimitedOut = true;
+                firstFailure ??= err;
+              }
               this.persist();
               continue;
             }
@@ -4395,11 +4412,17 @@ export class SyncEngine {
         // a new file would read the remote index's stale live head and park the new bytes as
         // a conflict with the version this job was going to delete.
         const pendingDelete = pendingDeleteByPath.get(path);
-        if (pendingDelete !== undefined) {
+        if (
+          pendingDelete !== undefined &&
+          pendingDeletes.get(pendingDelete.entry.prepared.fileId) === pendingDelete.entry &&
+          this.state[pendingDelete.entry.prepared.fileId]?.plainPath === path
+        ) {
           const fileId = pendingDelete.entry.prepared.fileId;
           pendingDeleteByPath.delete(path);
           pendingDeletes.delete(fileId);
-          if (pendingDelete.contentHash !== "") pendingRenames.delete(pendingDelete.contentHash);
+          if (pendingRenames.get(pendingDelete.contentHash) === fileId) {
+            pendingRenames.delete(pendingDelete.contentHash);
+          }
           this.selfEvents.forgetDelete(fileId);
           if (this.state[fileId] !== undefined) delete this.state[fileId].deletedAtMs;
           this.pathToFileId.set(path, fileId);
@@ -4416,6 +4439,7 @@ export class SyncEngine {
           await listing(),
           pendingDeletes,
           pendingRenames,
+          pendingDeleteByPath,
         );
         if (outcome.kind === "handled") {
           this.persist();
@@ -4568,6 +4592,7 @@ export class SyncEngine {
     localPaths: Set<string>,
     pendingDeletes?: Map<string, PendingPush>,
     pendingRenames?: Map<string, string>,
+    pendingDeleteByPath?: Map<string, { entry: PendingPush; contentHash: string }>,
   ): Promise<
     | { kind: "prepared"; prepared: PreparedPush }
     | { kind: "rename"; prepared: PreparedPush }
@@ -4592,6 +4617,11 @@ export class SyncEngine {
       pendingRenames?.delete(hash);
       // Consumed whichever map answered: one delete explains one new file.
       this.selfEvents.forgetDelete(fileId);
+      if (pendingDeleteByPath !== undefined) {
+        for (const [deletedPath, pending] of pendingDeleteByPath) {
+          if (pending.entry.prepared.fileId === fileId) pendingDeleteByPath.delete(deletedPath);
+        }
+      }
       if (this.state[fileId] !== undefined) delete this.state[fileId].deletedAtMs;
       const prepared = await this.preparePush({
         fileId,
