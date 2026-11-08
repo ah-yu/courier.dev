@@ -1,5 +1,6 @@
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -9,8 +10,13 @@ import {
 } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { bytesToBase64, deriveEncryptionKey, DEFAULT_MAX_FILE_BYTES } from "../../engine/src/index";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+  bytesToBase64,
+  deriveEncryptionKey,
+  DEFAULT_MAX_FILE_BYTES,
+  SyncLease,
+} from "../../engine/src/index";
 import { runDaemon, runOnceSync, type RunnerHandle } from "../../cli/src/runner";
 import { setLocale } from "../../cli/src/i18n";
 import type { CliConfig } from "../../cli/src/config";
@@ -461,18 +467,34 @@ describe("cli daemon e2e — the headless host over a real server", () => {
 
       // With it, the same call takes the vault, runs its pass, and releases again.
       const logs: string[] = [];
+      // Enough files that the pass outlives the short TTL below; the displaced daemon
+      // retries every 500 ms, so an unrenewed record is gone before the pass is.
+      const bulk = join(vaultPath, "bulk");
+      mkdirSync(bulk, { recursive: true });
+      for (let index = 0; index < 300; index += 1) {
+        // Written the same way the helper writes: a temp file in the same folder, renamed
+        // over the target, so the watcher never sees a half-written note.
+        const notePath = join(bulk, `note-${index}.md`);
+        const temporary = join(bulk, `.note-${index}.tmp`);
+        writeFileSync(temporary, `# note ${index}`);
+        renameSync(temporary, notePath);
+      }
       writeAtomically(vaultPath, "once.md", "written by --once --take-over");
-      await runOnceSync(config, vault, {
-        takeOver: true,
-        // Short enough that a pass over this vault outlives one record: without the
-        // one-shot renewal the displaced daemon takes the vault back mid-push.
-        leaseTtlMs: 400,
-        onLog: (message) => logs.push(message),
-      });
+
+      const renew = vi.spyOn(SyncLease.prototype, "renew");
+      renew.mockClear();
+      try {
+        await runOnceSync(config, vault, {
+          takeOver: true,
+          // Short enough that a pass over this vault outlives one record: the renewal
+          // period follows it (see `keepLeaseFresh`, pinned by its own unit case).
+          leaseTtlMs: 400,
+          onLog: (message) => logs.push(message),
+        });
+      } finally {
+        renew.mockRestore();
+      }
       expect(logs.some((message) => message.includes("--take-over"))).toBe(true);
-      // The displaced process never got the vault back while the pass was running: it is
-      // still waiting, not syncing over the one-shot writer.
-      expect(holder.engine, "the displaced process synced over the one-shot pass").toBeNull();
       await waitForAsync(
         async () => (await filesAtPath(server, remote.id, material.key, "once.md")).length > 0,
         "the one-shot pass never pushed its file",

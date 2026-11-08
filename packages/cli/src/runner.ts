@@ -311,15 +311,8 @@ export async function runOnceSync(
     throw new Error(t("cli.error.leaseFailed", { error: errorMessage(err) }), { cause: err });
   }
   if (!acquired) throw new Error(t("cli.error.syncLocked"));
-  // A one-shot pass has no loop to renew from, and a pass over a large vault runs for
-  // minutes. Without this the record expires after its TTL and the writer this run
-  // displaced — still waiting, still retrying — takes the vault back mid-push: two engines
-  // on one folder, which is the rule the lease exists to keep. The period is a quarter of
-  // the TTL so a slow pass cannot let the record lapse between two renewals.
-  const renewal = setInterval(
-    () => void lease.renew().catch(() => false),
-    Math.max(25, Math.floor(lease.ttlMs / 4)),
-  );
+  // A one-shot pass has no loop to renew from; see `keepLeaseFresh`.
+  const renewDuringPass = keepLeaseFresh(lease);
   try {
     const maxFileBytes = await accountMaxFileBytes(config, vault, opts);
     const engine = await buildEngine(config, vault, opts, maxFileBytes, api);
@@ -327,9 +320,27 @@ export async function runOnceSync(
     return engine;
   } finally {
     // The one-shot pass is done; the engine is not going to run a loop.
-    clearInterval(renewal);
+    renewDuringPass();
     await lease.release();
   }
+}
+
+/**
+ * Keep a one-shot pass's lease fresh until its pass ends, and answer the function that
+ * stops it.
+ *
+ * `run --once` has no loop to renew from, and a pass over a large vault runs for minutes —
+ * far longer than the record's TTL. Without this the writer the takeover displaced, still
+ * waiting and still retrying, takes the vault back in the middle of the pushes: two engines
+ * on one folder, which is exactly the rule the lease exists to keep. The period is a
+ * quarter of the TTL so a slow pass cannot let the record lapse between two renewals.
+ */
+export function keepLeaseFresh(lease: SyncLease): () => void {
+  const timer = setInterval(
+    () => void lease.renew().catch(() => false),
+    Math.max(25, Math.floor(lease.ttlMs / 4)),
+  );
+  return () => clearInterval(timer);
 }
 
 /**
