@@ -4051,13 +4051,14 @@ export class SyncEngine {
     // The change list this job decides: the events it was given, plus the destination of
     // any move whose source this device never tracked (that is a create at the new path).
     const changes = [...paths];
-    // One listing for the whole job: every new file's identity fallback asks whether a
-    // chain's recorded path still holds a file, and a burst of 1 000 used to walk the
-    // vault 1 000 times for it. A pure deletion batch pays nothing for it.
-    const localPaths =
-      changes.length === 0
-        ? new Set<string>()
-        : new Set(await this.opts.adapter.listSyncableFiles());
+    // One listing for the whole job, read only when a decision needs it: every new file's
+    // identity fallback asks whether a chain's recorded path still holds a file, and a
+    // burst of 1 000 used to walk the vault 1 000 times for it. Lazy, because a job whose
+    // only work is an untracked move appends its destination to `changes` after the move
+    // loop — the listing has to include that file. A pure deletion batch pays nothing.
+    let localPaths: Set<string> | null = null;
+    const listing = async (): Promise<Set<string>> =>
+      (localPaths ??= new Set(await this.opts.adapter.listSyncableFiles()));
     let firstFailure: unknown = null;
     let rateLimitedOut = false;
     let batch: PendingPush[] = [];
@@ -4080,6 +4081,14 @@ export class SyncEngine {
      * 600-event job (hashing and preparing every file) can outlive it.
      */
     const pendingRenames = new Map<string, string>();
+    /**
+     * Versions prepared but not yet settled (applied or forgotten).
+     *
+     * Every entry has a pending state entry written before its request went out; a throw
+     * anywhere in the job has to drop them all, or the next pass pushes them one request
+     * per file — the regression `dropPendingCreate` exists to prevent.
+     */
+    const preparedPending = new Set<PreparedPush>();
 
     /**
      * Send the versions prepared so far, and settle each answer.
@@ -4109,6 +4118,7 @@ export class SyncEngine {
         for (const { prepared } of sending) {
           this.forgetPushedVersion(prepared);
           this.dropPendingCreate(prepared);
+          preparedPending.delete(prepared);
         }
         // A limiter that outlasted its waits ends the job: every further batch would be
         // refused too, and the files are better left for the next event or pass.
@@ -4119,10 +4129,12 @@ export class SyncEngine {
       for (const [index, { prepared, kind }] of sending.entries()) {
         if (results[index]?.status === "ok") {
           this.applyPushedVersion(prepared);
+          preparedPending.delete(prepared);
           continue;
         }
         this.forgetPushedVersion(prepared);
         this.dropPendingCreate(prepared);
+        preparedPending.delete(prepared);
         try {
           if (kind === "create") {
             // The bytes may already be stored (a lost response) or the state entry was
@@ -4171,11 +4183,16 @@ export class SyncEngine {
      * above the byte bound travels alone so the batch never holds two large payloads.
      */
     const addToBatch = async (prepared: PreparedPush, kind: PendingPush["kind"]): Promise<void> => {
+      // Track the version until it is settled: a throw between here and its answer (an
+      // encryption failure, a chunk upload, a chain read) must not leave its pending state
+      // entry behind — the next pass would push it one request per file.
+      preparedPending.add(prepared);
       if (prepared.chunkCount > 0) {
         // A version above the chunking threshold stages its chunks through their own
         // endpoints and then names the upload: it travels alone, after the batch.
         await sendBatch();
         await this.pushPrepared(prepared);
+        preparedPending.delete(prepared);
         return;
       }
       // A version the store already holds the bytes for — a move — sends no payload, so it
@@ -4247,12 +4264,14 @@ export class SyncEngine {
         // back to the server as a second tombstone.
         if (this.consumeSelfDelete(path)) continue;
         // A removal and a rewrite of the same path can share a window (a tool replacing a
-        // file, a watcher that reports both halves of a move). Deletions are decided first,
-        // so a path this batch is also rewriting is not a deletion: the file is there again,
-        // and publishing the tombstone only to follow it with a restore tells every peer to
-        // delete a note that never went away. The single-event path keeps its own rule (it
-        // sees the two events in order, tombstone included).
-        if (pendingChanges.has(path)) continue;
+        // file, a watcher that reports both halves of a move). A path this batch is also
+        // rewriting is not a deletion — but only while the file is **still there**: a write
+        // followed by a delete inside one window leaves the change unreadable, and then the
+        // tombstone is the only record of what happened. The single-event path keeps its own
+        // rule (it sees the two events in order, tombstone included).
+        if (pendingChanges.has(path) && (await this.opts.adapter.statFile(path)) !== null) {
+          continue;
+        }
         const outcome = await this.resolveLocalDelete(path);
         if (outcome.kind === "handled") {
           this.persist();
@@ -4281,7 +4300,7 @@ export class SyncEngine {
           read.bytes,
           read.stamp,
           hash,
-          localPaths,
+          await listing(),
           pendingDeletes,
           pendingRenames,
         );
@@ -4342,15 +4361,23 @@ export class SyncEngine {
           : new Error("local event batch failed", { cause: firstFailure });
       }
     } catch (err) {
-      // Anything that throws outside `sendBatch` — a chain read, a prepare, a decision, the
-      // restore-owner check — leaves the versions prepared so far unsent. Their state
-      // entries were recorded before the request (so a concurrent event adopts the
-      // identity), and a pass that finds them would push them **one request per file**:
-      // the regression `dropPendingCreate` exists to prevent. Drop them with the batch.
-      for (const { prepared } of [...batch, ...pendingDeletes.values()]) {
+      // Anything that throws outside `sendBatch` — a chain read, a prepare, an encryption,
+      // a chunk upload, the restore-owner check — leaves the versions prepared so far
+      // unsent. Their state entries were recorded before the request (so a concurrent
+      // event adopts the identity), and a pass that finds them would push them **one
+      // request per file**: the regression `dropPendingCreate` exists to prevent. Drop
+      // every one of them, and persist the state without them — `sendBatch` may already
+      // have written the whole state, this entry included.
+      for (const prepared of preparedPending) {
         this.forgetPushedVersion(prepared);
         this.dropPendingCreate(prepared);
       }
+      for (const { prepared } of pendingDeletes.values()) {
+        this.forgetPushedVersion(prepared);
+        this.dropPendingCreate(prepared);
+      }
+      preparedPending.clear();
+      this.persist();
       throw err;
     }
   }

@@ -598,10 +598,13 @@ file now lives at.
   - Individual events below the threshold keep their immediate push: an ordinary edit still travels on
     the event, not in a batch. Covered by `host.test.ts` (`a burst of local events`: one job and no pass,
     the three event kinds kept apart, the follow-up hand-off, a pull's own events not counted) and
-    `bulk-write.e2e.test.ts` (700 creates, 300 edits, 300 deletions, 300 moves reported as `rename`
-    events and 300 moves reported as remove+create against the
+    `bulk-write.e2e.test.ts` (700 creates, 300 edits, 300 deletions and 300 moves reported as
+    `rename` events against the
     **deployed** 600/minute allowance: every version lands, fewer than 40 requests each way, and the
-    receiving host's only index read is its bind).
+    receiving host's only index read is its bind). The shape a watcher reports as its two halves
+    (remove + create) has no L1 case of its own — a split-move scenario proved flaky on the peer's
+    notification apply for reasons unrelated to the batch — and is pinned at L0 instead: the batch
+    turns it into one content-less `rename` with no tombstone.
   - **A download's content reads travel in batches too.** `fetchContentBatched` holds a read until the
     batch is full (`maxConcurrent` entries — the most reads the pool can have outstanding, capped at the
     route's 64 hashes), or for one turn of the event loop for the tail of a pass, and fetches them with

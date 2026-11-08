@@ -371,8 +371,9 @@ not).
 The fix is in the engine, driven by the host: more than `LOCAL_EVENT_BURST_SIZE` (4) local events inside
 `LOCAL_EVENT_BURST_WINDOW_MS` (500 ms) are collected and handed to **one job**
 (`SyncEngine.handleLocalEvents`), which decides each path exactly as a single event would and sends the
-versions 100 per request, with tracked files' chains fetched 200 per request. The vault is never scanned
-and the chain index is never fetched, so the cost follows the burst rather than the vault. The rule (and
+versions 100 per request, with tracked files' chains fetched 200 per request. There is no vault walk and
+no per-file listing: one listing is read per job (only when it has changes), and a job that restores files
+reads the chain index once for the job, so the cost follows the burst rather than the vault. The rule (and
 its guards: the engine's own writes are not counted, a burst still writing during the job owes one more
 job, changes / deletions / moves are their own lists) is in
 [sync-engine.md](sync-engine.md#pass-order-and-concurrency); the cases are `bulk-write.e2e.test.ts`, run

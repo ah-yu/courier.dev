@@ -7112,6 +7112,28 @@ describe("SyncEngine — a batch of local events", () => {
     expect(engine.fileIdForPath(".obsidian/app.json")).toBeNull();
   });
 
+  it("reads the chain index once for a job full of recreates", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    const paths = ["a.md", "b.md", "c.md"];
+    for (const path of paths) adapter.files.set(path, encoder.encode(`old ${path}`));
+    await engine.initialSync();
+    for (const path of paths) {
+      adapter.files.delete(path);
+      await engine.handleLocalDelete(path);
+    }
+
+    const realIndex = api.getVaultSyncIndex.bind(api);
+    const indexReads = vi.fn(async (vaultId: string) => realIndex(vaultId));
+    api.getVaultSyncIndex = indexReads;
+    for (const path of paths) adapter.files.set(path, encoder.encode(`new ${path}`));
+
+    await engine.handleLocalEvents({ changed: paths });
+
+    // Three restores, one owner check for the job: a bulk recreate is a bulk write.
+    expect(indexReads).toHaveBeenCalledTimes(1);
+    expect(api.pushed.filter((push) => push.action === "restore")).toHaveLength(paths.length);
+  });
+
   it("turns a move the watcher reports as delete+create into one rename", async () => {
     const { engine, adapter, api } = await makeEngine();
     adapter.files.set("old.md", encoder.encode("moved bytes"));
