@@ -5877,6 +5877,23 @@ describe("SyncEngine — batched content reads", () => {
     expect(target.adapter.files.get("big-b.pdf")?.byteLength).toBe(five.byteLength);
   });
 
+  it("sends a partial wave on the next turn rather than waiting for a full batch", async () => {
+    // Three reads against a pool that could run eight: the batch is not full, so the timer
+    // (one turn) is what carries it, and the pass does not keep the files waiting.
+    const paths = Array.from({ length: 3 }, (_, index) => ({
+      path: `tail/n-${index}.md`,
+      text: `# tail ${index}`,
+    }));
+    const { api, key } = await sourceFor(paths);
+    api.contentBatchCalls.length = 0;
+
+    const target = await bindTarget(api, key, { maxConcurrent: 8, exclusiveBytes: 1_024 });
+
+    expect(api.contentBatchCalls).toHaveLength(1);
+    expect(api.contentBatchCalls[0]).toHaveLength(3);
+    expect(target.adapter.files.size).toBe(3);
+  });
+
   it("flushes a batch at the request's file cap", async () => {
     const paths = Array.from({ length: MAX_CONTENT_BATCH_FILES }, (_, index) => ({
       path: `cap/n-${index}.md`,
@@ -7059,6 +7076,24 @@ describe("SyncEngine — a batch of local events", () => {
     expect(api.pushCalls).toHaveLength(before);
     expect(engine.fileIdForPath("b.md")).not.toBeNull();
     expect(engine.fileIdForPath("c.md")).toBeNull();
+  });
+
+  it("ignores an empty batch, and one entirely outside the scope", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("note.md", encoder.encode("x"));
+    await engine.initialSync();
+    const before = api.pushCalls.length;
+
+    // Nothing to decide, and nothing this device syncs: no pass, no listing, no request.
+    await engine.handleLocalEvents({});
+    await engine.handleLocalEvents({
+      changed: [".obsidian/app.json"],
+      deleted: [".obsidian/appearance.json"],
+      renamed: [{ from: ".obsidian/a.json", to: ".obsidian/b.json" }],
+    });
+
+    expect(api.pushCalls).toHaveLength(before);
+    expect(engine.fileIdForPath(".obsidian/app.json")).toBeNull();
   });
 
   it("stops the batch when a limiter outlasts its waits", async () => {

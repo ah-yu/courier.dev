@@ -110,10 +110,22 @@ read and nothing is pushed.
 One request per remote file, so the transfer allowance used to be the ceiling (2 000/min). It is now
 60 000/min — above what the per-file pipeline can use — and a refusal is waited out instead of ending the
 pass. The numbers above are the **per-file** pipeline at four concurrent files; since the batch content
-route (`POST …/sync/contents`, [api.md](api.md#11b-get-several-versions-content-at-once)) the four reads
-of a wave travel in one request: a 9-version cold pull measured **3 content requests (4 + 4 + 1) instead
-of 9**, and a large first bind costs about a quarter of the requests it used to. What bounds it now is
-the pool's concurrency, not the route.
+route (`POST …/sync/contents`, [api.md](api.md#11b-get-several-versions-content-at-once)) the reads of a
+wave travel together.
+
+**What the batch actually buys, measured** (1 000 files, L1, RTT injected on the client's transport):
+
+| 1 000-file cold download | requests | 1 ms RTT | 30 ms RTT |
+| ------------------------ | -------: | -------- | --------- |
+| one request per file     |     1000 | 1 105 ms | 9 254 ms  |
+| batched (this change)    |  **250** | 1 073 ms | 9 308 ms  |
+
+The wall clock is the same — the pool already keeps four reads in flight, so a batch of four costs the
+same round trip one request per file did — and the **request count falls 4×**, which is what keeps a fast
+link under the transfer limiter and cuts the server's handler work. A batch that waits for a timer before
+it goes out makes this _worse_, not better: with a 5 ms hold the same download took 2.3 s locally. The
+read pipeline, not the batch, would be the lever for time: prefetching a wave ahead would put more files
+per round trip, which is a larger change than this one.
 
 ## The three cliffs (before the fixes)
 

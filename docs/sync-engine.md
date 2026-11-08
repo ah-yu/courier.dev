@@ -595,13 +595,19 @@ file now lives at.
     `bulk-write.e2e.test.ts` (700 creates, 300 edits, 300 deletions and 300 moves against the
     **deployed** 600/minute allowance: every version lands, fewer than 40 requests each way, and the
     receiving host's only index read is its bind).
-  - **A download's content reads travel in batches too.** `fetchRemoteBytes` holds a read for
-    `CONTENT_BATCH_WINDOW_MS` (5 ms) so the four per-file operations a pass or a burst already runs
-    together fetch their versions in one request (`POST …/sync/contents`, see
-    [api.md](api.md#11b-get-several-versions-content-at-once)) instead of one per file. The batch is
-    bounded by 64 hashes / 8 MiB of plaintext (a file big enough to fill it travels alone), and a hash the
-    store does not hold comes back as a missing entry — the same "nothing to apply" a `404` is. A chunked
-    version still reads its ranges one at a time, which is what keeps a 200 MiB pull bounded.
+  - **A download's content reads travel in batches too.** `fetchContentBatched` holds a read until the
+    batch is full (`maxConcurrent` entries — the most reads the pool can have outstanding), or for one
+    turn of the event loop for the tail of a pass, and fetches them with one request
+    (`POST …/sync/contents`, see [api.md](api.md#11b-get-several-versions-content-at-once)). The batch is
+    bounded by the server's 64 hashes and by 8 MiB of plaintext (a file big enough to fill it travels
+    alone), and a hash the store does not hold comes back as a missing entry — the same "nothing to
+    apply" a `404` is. A chunked version still reads its ranges one at a time, which is what keeps a
+    200 MiB pull bounded.
+    **It is a request-count win, not a speed win**: the pool already keeps four reads in flight, so the
+    batch costs the same round trip per wave (measured: 1 000 files, 1.07 s against 1.10 s at 1 ms RTT,
+    9.31 s against 9.25 s at 30 ms) and divides the requests by four. A hold longer than one turn makes
+    it _slower_ (5 ms per wave was 2.3 s locally) — see
+    [first-bind-performance.md](first-bind-performance.md#download-an-empty-device-meets-a-full-remote).
   - **What it does not fix:** nothing on the event path is left unbatched. A first bind still scans the
     local vault (one `stat` per file) — the cost that bounds a cold start.
 - **A cold-start pass works in the order the user will notice, and bounds how much is in flight.** The work

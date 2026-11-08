@@ -1,7 +1,6 @@
 import type { SyncAction, SyncPushResponse, VersionChainEntry } from "@courier/shared";
 import {
   CHUNK_STORED_BYTES,
-  MAX_CONTENT_BATCH_FILES,
   MAX_PULL_BATCH_FILES,
   MAX_PUSH_BATCH_FILES,
   MAX_ENCRYPTED_PATH_LENGTH,
@@ -462,11 +461,18 @@ interface LocalChangeRead {
 /**
  * How long a whole-file content read waits for other reads to travel with it (ms).
  *
- * Long enough for the four per-file operations of a pass or a burst to reach their reads
- * (they all start within the same tick), short enough that a lone remote edit's download
- * does not wait on it.
+ * The wait only applies to a batch that is **not** full: the pool's concurrency is the most
+ * reads that can be outstanding, so a batch that many entries is flushed at once (see
+ * `fetchContentBatched`). This timer covers the tail of a pass, where fewer files are left
+ * than the pool could run.
+ *
+ * `0` — the next turn of the event loop — is deliberate: a timer here is a *sync point* in
+ * the download pipeline, and every millisecond of it is paid once per wave (250 waves for
+ * 1 000 files). Waiting longer than a turn made a 1 000-file cold bind slower than one
+ * request per file; one turn is free next to a network round trip and still groups the
+ * reads that finish together.
  */
-const CONTENT_BATCH_WINDOW_MS = 5;
+const CONTENT_BATCH_WINDOW_MS = 0;
 
 /**
  * Most plaintext one content batch may name.
@@ -3263,7 +3269,10 @@ export class SyncEngine {
       }
       this.pendingContent.set(contentHash, [{ sizeBytes, resolve, reject }]);
       this.contentBatchBytes += sizeBytes;
-      if (this.pendingContent.size >= MAX_CONTENT_BATCH_FILES) {
+      // A full wave goes out at once: the pool's concurrency is how many per-file
+      // operations can be waiting for content, so that many entries is a batch that cannot
+      // grow — waiting for the timer would only add a turn to every wave.
+      if (this.pendingContent.size >= this.passLimits.maxConcurrent) {
         this.flushContentBatch();
         return;
       }
