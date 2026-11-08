@@ -169,9 +169,12 @@ export const PUSH_NOTIFICATION_FLUSH_MS = 25;
  * is handed to **one pass** instead, whose creates travel 100 files per request
  * (`createUntrackedFiles`) — 1 000 files in 10 requests.
  *
- * Four in {@link LOCAL_EVENT_BURST_WINDOW_MS} is eight events a second, just under the
- * deployed allowance (600/minute = ten a second), so a stream that the server would refuse
- * is caught before it gets there. It is above what one save produces (Obsidian reports a
+ * Four in {@link LOCAL_EVENT_BURST_WINDOW_MS} is eight events a second. That is a
+ * heuristic, not a request bound: one tracked edit on the unbatched path costs a chain read
+ * and a push (about three requests), so a steady stream below the threshold can still
+ * approach the allowance — it then waits out a limiter window instead of being refused
+ * (or, once it crosses the threshold, the batched job costs one request per 100 files). It
+ * is above what one save produces (Obsidian reports a
  * create as `create` and `modify`, a rename as `delete` + `create`), so an ordinary edit
  * keeps its immediate per-path push.
  */

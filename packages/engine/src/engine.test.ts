@@ -6604,7 +6604,13 @@ async function expectConsistent(
     // The chain action tells a tombstone from a live empty file (both have the empty
     // content hash); without it the check would reject a correct empty file.
     if (api.chains.get(fileId)?.at(-1)?.action === "delete") {
-      expect(bytes, `a tombstone at ${entry.plainPath} has no file`).toBeUndefined();
+      // A tombstoned chain's old path may already belong to another chain — a move landed
+      // there in the same job (the destination's tombstone precedes the move) — so the
+      // test is "no file unless another chain owns the path", not "no file".
+      const owner = engine.fileIdForPath(entry.plainPath);
+      if (owner === null) {
+        expect(bytes, `a tombstone at ${entry.plainPath} has no file`).toBeUndefined();
+      }
       continue;
     }
     expect(engine.fileIdForPath(entry.plainPath), `${entry.plainPath} maps back`).toBe(fileId);
@@ -7111,6 +7117,76 @@ describe("SyncEngine — a batch of local events", () => {
     expect(api.pushCalls).toHaveLength(before);
     expect(engine.fileIdForPath(".obsidian/app.json")).toBeNull();
   });
+
+  it("tombstones a move's destination before the move lands, leaving one live chain", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("dest.md", encoder.encode("old dest"));
+    adapter.files.set("src.md", encoder.encode("moved bytes"));
+    await engine.initialSync();
+    const destId = engine.fileIdForPath("dest.md")!;
+    const srcId = engine.fileIdForPath("src.md")!;
+    const before = api.pushed.length;
+
+    // A replace: the destination is removed and another file is renamed onto it, reported
+    // as the two halves a watcher sees.
+    adapter.files.delete("dest.md");
+    adapter.files.delete("src.md");
+    adapter.files.set("dest.md", encoder.encode("moved bytes"));
+    await engine.handleLocalEvents({
+      deleted: ["dest.md"],
+      renamed: [{ from: "src.md", to: "dest.md" }],
+    });
+
+    const pushed = api.pushed.slice(before).map((push) => [push.action, push.fileId]);
+    // The destination's tombstone first, then the move: a peer must delete the old file
+    // before it writes the moved bytes there.
+    expect(pushed).toEqual([
+      ["delete", destId],
+      ["rename", srcId],
+    ]);
+    expect(api.chains.get(destId)!.at(-1)!.action).toBe("delete");
+    expect(api.chains.get(srcId)!.at(-1)!.action).toBe("rename");
+    expect(engine.fileIdForPath("dest.md")).toBe(srcId);
+    expect(new TextDecoder().decode(adapter.files.get("dest.md"))).toBe("moved bytes");
+    await expectConsistent(engine, adapter, api);
+  });
+
+  it("keeps a second copy of a peer's content as its own chain when it moves", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("a.md", encoder.encode("shared bytes"));
+    await engine.initialSync();
+    const aId = engine.fileIdForPath("a.md")!;
+
+    // A second, untracked copy of the same content, moved while the chain's own path still
+    // holds a file: the identity fallback must not merge the two by content — which it can
+    // only see if the job's listing includes the destination.
+    adapter.files.set("b.md", encoder.encode("shared bytes"));
+    adapter.files.delete("b.md");
+    adapter.files.set("c.md", encoder.encode("shared bytes"));
+
+    await engine.handleLocalEvents({ renamed: [{ from: "b.md", to: "c.md" }] });
+
+    expect(engine.fileIdForPath("a.md")).toBe(aId);
+    expect(engine.fileIdForPath("c.md")).not.toBeNull();
+    expect(engine.fileIdForPath("c.md")).not.toBe(aId);
+    expect(api.chains.get(aId)!.at(-1)!.action).toBe("create");
+  });
+
+  it("does not leave a chunked create behind when the batch's upload fails", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    await engine.initialSync();
+    adapter.files.set("big.mp4", new Uint8Array(8 * 1024 * 1024 + 1024).fill(5));
+    api.uploadChunk = async () => {
+      throw new Error("chunk upload failed");
+    };
+
+    await expect(engine.handleLocalEvents({ changed: ["big.mp4"] })).rejects.toThrow(
+      "chunk upload failed",
+    );
+    // The pending identity goes with the failed upload, not with a later pass.
+    expect(engine.fileIdForPath("big.mp4")).toBeNull();
+    expect(engine.serializeState()).not.toContain("big.mp4");
+  }, 20_000);
 
   it("reads the chain index once for a job full of recreates", async () => {
     const { engine, adapter, api } = await makeEngine();

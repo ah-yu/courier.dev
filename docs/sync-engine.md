@@ -551,7 +551,8 @@ file now lives at.
   device already tracks, one chain read _before_ it. Measured: 1 000 generated notes were 1 000 pushes;
   300 edits to existing notes were 300 chain reads and 300 pushes. Once more than
   `LOCAL_EVENT_BURST_SIZE` (4) events arrive inside `LOCAL_EVENT_BURST_WINDOW_MS` (500 ms) — eight a
-  second, just under the deployed allowance — `SyncHost` collects their paths and
+  second, a heuristic rather than a request bound: one unbatched tracked edit costs a chain read and a
+  push, so a steady stream below the threshold waits out a limiter window rather than being refused — `SyncHost` collects their paths and
   `LOCAL_EVENT_BURST_FLUSH_MS` (50 ms) later hands them to **one engine job**
   (`SyncEngine.handleLocalEvents`), which makes the same per-path decisions as a single event and sends
   what they produce in batches:
@@ -560,10 +561,12 @@ file now lives at.
     chains are fetched **200 per request** (`MAX_PULL_BATCH_FILES`) instead of one request each;
   - deletions travel in the same batch as their own version list. `changed` and `deleted` paths are kept
     apart because a change is decided by reading the file and a deletion by its absence — one list for
-    both would read nothing for a removed path and silently drop its tombstone. Deletions are decided
-    **first**, so the rename-by-hash record exists before a moved file's create is decided; a path that
-    is in both lists is decided as an **edit**, not a deletion (a tool replacing a file in place reports
-    both halves, and publishing the tombstone only to follow it with a restore tells every peer to delete
+    both would read nothing for a removed path and silently drop its tombstone. Deletions are _prepared_
+    **first** (so the rename-by-hash record exists before a moved file's create is decided) but queued
+    after the changes, and a path that
+    is in both lists is decided as an **edit**, not a deletion while the file is still there (a tool
+    replacing a file in place reports both halves, and publishing the tombstone only to follow it with a
+    restore tells every peer to delete
     a note that never went away);
   - this is **not a pass**, so it costs the burst, not the vault: there is no vault walk and no
     per-file listing. One listing is read per job (only when it has changes), where the single-event
@@ -584,7 +587,9 @@ file now lives at.
     halves instead of a rename (the CLI's `fs.watch`, an external tool) is recognised by
     rename-by-hash: the deletion half is prepared but **not queued**, and the create carrying its
     content takes it back, so the batch publishes one content-less `rename` — never a tombstone
-    followed by a rename racing it. A move whose source this device never
+    followed by a rename racing it. A move onto a path the same job also deletes (a replace) queues
+    the destination's tombstone **before** the move, so a peer removes the old file before writing the
+    moved bytes there, and one chain stays live at that path. A move whose source this device never
     tracked becomes a create at the destination, and a move that leaves this device's scope re-points
     the chain and publishes nothing (see `rememberMoveOutOfScope`); both are decided inside the job, so
     a folder rename is batch-sized too.

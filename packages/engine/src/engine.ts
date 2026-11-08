@@ -1630,7 +1630,12 @@ export class SyncEngine {
       // `rename`, whose bytes were only proved by that stamp.
       ...(prepared.stamp === null ? {} : { stamp: prepared.stamp }),
     };
-    this.pathToFileId.set(plainPath, fileId);
+    // A delete keeps the path mapped to this chain so a file written there later is a
+    // restore — unless another chain already owns the path (a move in the same job just
+    // claimed it, and this tombstone must not take it back).
+    if (action !== "delete" || this.pathToFileId.get(plainPath) === undefined) {
+      this.pathToFileId.set(plainPath, fileId);
+    }
     this.reportActivity({
       direction: "out",
       outcome: "applied",
@@ -4091,6 +4096,20 @@ export class SyncEngine {
     const preparedPending = new Set<PreparedPush>();
 
     /**
+     * Forget versions that will never be sent: their push-echo records and the pending state
+     * entry a create wrote before its request. Used by the throw path and by a limiter that
+     * outlasted its waits.
+     */
+    const dropUnsent = (entries: readonly PendingPush[]): void => {
+      for (const { prepared } of entries) {
+        this.forgetPushedVersion(prepared);
+        this.dropPendingCreate(prepared);
+        preparedPending.delete(prepared);
+        pendingDeletes.delete(prepared.fileId);
+      }
+    };
+
+    /**
      * Send the versions prepared so far, and settle each answer.
      *
      * A whole-request failure costs the batch (nothing landed, so every echo record and
@@ -4102,6 +4121,14 @@ export class SyncEngine {
      */
     const sendBatch = async (): Promise<void> => {
       if (batch.length === 0) return;
+      if (rateLimitedOut) {
+        // The limiter outlasted its waits: every further batch would be refused too, and
+        // trying costs another wait window while this job holds every path it claimed.
+        dropUnsent(batch);
+        batch = [];
+        batchBytes = 0;
+        return;
+      }
       const sending = batch;
       batch = [];
       batchBytes = 0;
@@ -4115,11 +4142,7 @@ export class SyncEngine {
         );
         results = response.results;
       } catch (err) {
-        for (const { prepared } of sending) {
-          this.forgetPushedVersion(prepared);
-          this.dropPendingCreate(prepared);
-          preparedPending.delete(prepared);
-        }
+        dropUnsent(sending);
         // A limiter that outlasted its waits ends the job: every further batch would be
         // refused too, and the files are better left for the next event or pass.
         if (isRateLimitError(err)) rateLimitedOut = true;
@@ -4127,6 +4150,9 @@ export class SyncEngine {
         return;
       }
       for (const [index, { prepared, kind }] of sending.entries()) {
+        // Settled either way: the version is answered, and its tombstone (if it was one)
+        // must not be swept by a later throw in this job.
+        pendingDeletes.delete(prepared.fileId);
         if (results[index]?.status === "ok") {
           this.applyPushedVersion(prepared);
           preparedPending.delete(prepared);
@@ -4222,6 +4248,16 @@ export class SyncEngine {
     // path as a deletion. A move whose source this device never tracked is a create at the
     // destination, so it joins the change list instead of paying for a job of its own.
     const pendingChanges = new Set(changes);
+    // A path this job deletes **and** a move lands on: the file that was there is gone, so
+    // its chain's tombstone must reach the server before the move's version — otherwise a
+    // peer writes the moved bytes and then applies a delete at the same path. Captured up
+    // front, because the move re-points the mapping for the destination.
+    const replacedDestinations = new Map<string, string>();
+    for (const path of deleted) {
+      const fileId = this.pathToFileId.get(path);
+      if (fileId !== undefined) replacedDestinations.set(path, fileId);
+    }
+    const consumedDeletes = new Set<string>();
     try {
       for (const pair of renamed) {
         if (rateLimitedOut) break;
@@ -4235,6 +4271,17 @@ export class SyncEngine {
         }
         // The engine following a peer's move fires this same event.
         if (this.consumeSelfRename(pair.from, pair.to)) continue;
+        const replaced = replacedDestinations.get(pair.to);
+        if (replaced !== undefined) {
+          // The destination's chain is going away: free the path for the move, and queue the
+          // tombstone **first** so the server (and every peer) applies the deletion before
+          // the version that writes the moved bytes there.
+          this.pathToFileId.delete(pair.to);
+          const tombstone = await this.resolveLocalDelete(pair.to, replaced);
+          replacedDestinations.delete(pair.to);
+          consumedDeletes.add(pair.to);
+          if (tombstone.kind === "prepared") await addToBatch(tombstone.prepared, "delete");
+        }
         const outcome = await this.resolveLocalRename(pair.from, pair.to);
         if (outcome.kind === "handled") {
           this.persist();
@@ -4260,6 +4307,9 @@ export class SyncEngine {
       // `pendingDeletes`).
       for (const path of deleted) {
         if (rateLimitedOut) break;
+        // A destination this job already tombstoned for a move (above): the path now holds
+        // the moved chain, and resolving it again would tombstone that one.
+        if (consumedDeletes.has(path)) continue;
         // The engine applying a peer's delete fires this same event; it must not be echoed
         // back to the server as a second tombstone.
         if (this.consumeSelfDelete(path)) continue;
@@ -4376,7 +4426,6 @@ export class SyncEngine {
         this.forgetPushedVersion(prepared);
         this.dropPendingCreate(prepared);
       }
-      preparedPending.clear();
       this.persist();
       throw err;
     }
@@ -4841,8 +4890,9 @@ export class SyncEngine {
    */
   private async resolveLocalDelete(
     path: string,
+    explicitFileId?: string,
   ): Promise<{ kind: "prepared"; prepared: PreparedPush } | { kind: "handled" }> {
-    const fileId = this.pathToFileId.get(path);
+    const fileId = explicitFileId ?? this.pathToFileId.get(path);
     if (!fileId) return { kind: "handled" };
     // A delete event can be half of a move the host could not report as a rename (an
     // external tool, the CLI's `fs.watch`, a plugin that was not running). When the
@@ -4866,7 +4916,10 @@ export class SyncEngine {
     // Remember the delete so a file that appears with this content can be read as its
     // rename rather than as a brand-new chain.
     this.selfEvents.rememberDelete(fileId, this.state[fileId]?.lastKnownContentHash ?? "");
-    this.pathToFileId.delete(path);
+    // Only drop the mapping while it still names this chain: a move can have taken the path
+    // in the same job, and the tombstone of the chain that used to be there must not remove
+    // the new owner's mapping.
+    if (this.pathToFileId.get(path) === fileId) this.pathToFileId.delete(path);
     // The state entry survives until the server accepts the tombstone (`applyPushedVersion`
     // then rewrites it to the delete version). Dropping it here would leave a failed push
     // — the network is down, or the app is closed before the next attempt — with a fileId
