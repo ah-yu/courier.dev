@@ -255,10 +255,15 @@ so a background update cannot replace the app mid-run. It installs **no CJK font
 depends on a glyph's shape. The job's 40-minute cap has the same reason — a slow package mirror
 once took 28 minutes of a 30-minute run and must not decide whether the run says anything.
 
-`.github/actions/obsidian-windows` downloads the pinned `Obsidian-<version>.exe`, verifies its
-sha256, installs it silently to `%LOCALAPPDATA%\Programs\Obsidian`, and exposes `Obsidian.exe` as
+`.github/actions/obsidian-windows` caches the pinned `Obsidian-<version>.exe` by version and
+sha256, verifies that hash (on a cache hit too), makes up to four download attempts when GitHub's
+release CDN answers a 5xx — a 503 and a 504 ended two L3 runs on 2026-11-08, before the suite had
+started — installs it silently to `%LOCALAPPDATA%\Programs\Obsidian`, and exposes `Obsidian.exe` as
 `COURIER_OBSIDIAN_APP` and `Obsidian.com` — the terminal redirector a GUI app needs — as
-`COURIER_OBSIDIAN_CLI`. It pins the same update endpoint through the runner's hosts file.
+`COURIER_OBSIDIAN_CLI`. It pins the same update endpoint through the runner's hosts file. The
+install itself runs every time: the installer registers the `obsidian://` protocol handler, so a
+restored install directory is not the same machine state as an installed app, while the cached
+bytes are.
 
 `.github/actions/obsidian-macos` downloads the pinned `Obsidian-<version>.dmg`, verifies its
 sha256, copies `Obsidian.app` to `/Applications`, and symlinks the CLI the bundle already carries
@@ -305,9 +310,11 @@ unrelated change. Remove the `if` once the hang is understood.
   `COURIER_OBSIDIAN_APP` points at the extracted app binary (the CLI copy in `~/.local/bin` is not
   the app), and `COURIER_OBSIDIAN_APP_FLAGS` carries `--no-sandbox --disable-gpu`.
 - **The same no-retry rule applies.** If a case fails on the runner, it is a product bug or a
-  wrong test assumption until proven otherwise; do not add a retry or skip it silently. A layout
-  assertion that turns out to be environment-dependent belongs behind the layout flag, with the
-  reason written next to it.
+  wrong test assumption until proven otherwise; do not add a retry or skip it silently. A **wait**
+  for a surface that fills asynchronously is not a case retry — `waitForVaultState` polls one, and
+  `expectEventually` (`src/harness/wait.ts`) asserts a reading a repaint can legitimately blank —
+  but a case that failed is never re-run to make it pass. A layout assertion that turns out to be
+  environment-dependent belongs behind the layout flag, with the reason written next to it.
 - **The layout assertions are a reference-platform contract.** They do not claim the UI is
   pixel-identical across OSes; they pin the design on one machine's fonts, DPI and theme. When
   the primary dev machine changes, set `COURIER_OBSIDIAN_LAYOUT_PLATFORM` and run the `itL` cases

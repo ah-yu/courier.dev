@@ -6,9 +6,13 @@ description: Download, verify and install the pinned Obsidian Windows build used
 # must match the asset that version names. Bump both together and re-run the full
 # local L3 suite (see docs/testing.md).
 #
-# No cache, unlike the Linux action: the installer registers the `obsidian://` protocol
-# handler, so a cached install directory is not the same machine state as an installed
-# app, and the download from GitHub's own release page is fast on the runner.
+# The **installer file** is cached, the install is not: the installer registers the
+# `obsidian://` protocol handler, so a restored install directory is not the same
+# machine state as an installed app. Caching the bytes changes nothing about that, and
+# it keeps a 340 MB download off the critical path of every run. The download is also
+# retried, because that download is where the CDN fails: on 2026-11-08 a 503 and a 504
+# ended two L3 runs before the suite had started. The sha256 below is what proves the
+# bytes on every attempt, so a retry cannot turn a wrong artifact into a passing run.
 inputs:
   version:
     description: Obsidian version to install.
@@ -22,6 +26,15 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Restore the verified installer
+      uses: actions/cache@v4
+      with:
+        # `~` is the runner's profile, which is where the step below looks for the file.
+        # A hit is never re-saved, so an entry the hash check rejects is downloaded again
+        # on every run and never replaced: change the key (a revision suffix) to heal it.
+        path: ~/.cache/courier/obsidian
+        key: obsidian-win-${{ inputs.version }}-${{ inputs.sha256 }}
+
     - name: Download and verify
       shell: pwsh
       env:
@@ -31,12 +44,42 @@ runs:
         $ErrorActionPreference = "Stop"
         # Progress rendering turns a 340 MB download into minutes of console writes.
         $ProgressPreference = "SilentlyContinue"
-        $installer = Join-Path $env:RUNNER_TEMP "Obsidian-$env:OBSIDIAN_VERSION.exe"
+        $dir = Join-Path $env:USERPROFILE ".cache\courier\obsidian"
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        $installer = Join-Path $dir "Obsidian-$env:OBSIDIAN_VERSION.exe"
         $url = "https://github.com/obsidianmd/obsidian-releases/releases/download/v$env:OBSIDIAN_VERSION/Obsidian-$env:OBSIDIAN_VERSION.exe"
-        Invoke-WebRequest -Uri $url -OutFile $installer
-        $actual = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actual -ne $env:OBSIDIAN_SHA256) {
-          throw "Obsidian $env:OBSIDIAN_VERSION: the installer hashes to $actual, the pin says $env:OBSIDIAN_SHA256"
+
+        # A restored cache is trusted only as far as the pin: hash it, and download again
+        # when it does not match (a truncated save, or a key bumped without the file).
+        $verified = $false
+        if (Test-Path -LiteralPath $installer) {
+          $actual = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          $verified = $actual -eq $env:OBSIDIAN_SHA256
+          if (-not $verified) {
+            Write-Warning "the cached installer hashes to $actual; downloading it again"
+            Remove-Item -LiteralPath $installer -Force
+          }
+        }
+
+        if (-not $verified) {
+          # GitHub's release CDN answers a 5xx often enough to matter, and a setup
+          # failure says nothing about the code. Four attempts, backing off, is the
+          # whole retry policy; the hash check below is the gate.
+          for ($attempt = 1; $attempt -le 4; $attempt++) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $installer -TimeoutSec 300
+              break
+            } catch {
+              if ($attempt -eq 4) { throw }
+              Write-Warning "download attempt ${attempt} failed: $($_.Exception.Message)"
+              Remove-Item -LiteralPath $installer -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds (5 * $attempt)
+            }
+          }
+          $actual = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:OBSIDIAN_SHA256) {
+            throw "Obsidian $env:OBSIDIAN_VERSION: the installer hashes to $actual, the pin says $env:OBSIDIAN_SHA256"
+          }
         }
         "OBSIDIAN_INSTALLER=$installer" >> $env:GITHUB_ENV
 

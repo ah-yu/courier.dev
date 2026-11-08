@@ -114,8 +114,8 @@ jobs:
   l3-obsidian-windows:
     name: L3 (real Obsidian, Windows)
     runs-on: windows-latest
-    # A 340 MB installer, then the suite on a 2-vCPU runner. The cap is for a stuck
-    # run, not for the normal one.
+    # A 340 MB installer on a cold cache (the action caches the bytes, not the install),
+    # then the suite on a 2-vCPU runner. The cap is for a stuck run, not for the normal one.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
