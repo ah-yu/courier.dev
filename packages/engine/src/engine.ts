@@ -32,6 +32,8 @@ import { generateFileId, generateVersionId } from "./ids";
 import { isConflictFile } from "./conflict-file";
 import { historyKindFor } from "./file-types";
 import { LocalEventJob, type LocalEventJobHost, type TombstoneLedger } from "./local-event-job";
+import { PushBatch, type BatchPushResult } from "./push-batch";
+import { ExcludedMoveFinder } from "./excluded-moves";
 import {
   isConfigPath,
   isSyncablePath,
@@ -580,18 +582,6 @@ export interface LocalEventBatch {
 const MAX_PUSH_BATCH_BYTES = 8 * 1024 * 1024;
 
 /**
- * How long the excluded folders' file listing is reused.
- *
- * The listing exists only to recognise a file that was moved into an excluded folder
- * without a rename event (see `findExcludedMoveCandidate`), and it is consulted before
- * a deletion is published. A burst — a folder removed, or a daemon flushing one batch
- * of events — would otherwise walk the excluded folders once per file; a few seconds of
- * staleness can only make the engine miss a just-created candidate, which falls back to
- * the normal deletion path.
- */
-const EXCLUDED_LISTING_TTL_MS = 30_000;
-
-/**
  * Whether a failed content read means "the store holds nothing for that hash".
  *
  * The content route answers `404` for a hash it does not hold (reclaimed by the recycle
@@ -718,12 +708,6 @@ export class SyncEngine {
   private emptyHashPromise: Promise<string> | null = null;
   /** Single-flight marker for {@link syncLocalSettings}. */
   private settingsPollRunning = false;
-  /**
-   * The files under this device's excluded folders, grouped by file name, with the
-   * moment the listing was taken. See {@link findExcludedMoveCandidate}.
-   */
-  private excludedFiles: { readonly at: number; readonly byName: Map<string, string[]> } | null =
-    null;
 
   /** Which paths this device syncs (see `SyncScope`). */
   private readonly scope: SyncScope;
@@ -740,6 +724,8 @@ export class SyncEngine {
   private readonly activity: ActivityReporter;
   /** How a conflict is settled: remote wins, the local side parked beside it. */
   private readonly conflicts: ConflictResolver;
+  /** The excluded-folder fallback for an event-less move (see `ExcludedMoveFinder`). */
+  private readonly excludedMoves: ExcludedMoveFinder;
 
   constructor(private opts: EngineOptions) {
     this.scope = normalizeScope(opts.syncScope);
@@ -778,6 +764,15 @@ export class SyncEngine {
       withinSizeCap: (path) => this.withinLocalSizeCap(path),
       readLocal: (path) => this.readWithStamp(path),
       refusalChain: (err) => (err instanceof SyncPushBaseError ? err.chain : null),
+    });
+    this.excludedMoves = new ExcludedMoveFinder({
+      listExcludedFiles: async () => (await opts.adapter.listExcludedFiles?.()) ?? [],
+      statFile: (path) => opts.adapter.statFile(path),
+      readFile: (path) => opts.adapter.readFile(path),
+      isClaimed: (path) => this.pathToFileId.has(path) || this.remoteIndex.fileIdAt(path) !== null,
+      knownSize: (fileId) => this.state[fileId]?.stamp?.sizeBytes,
+      excludedFolders: () => this.scope.excludedFolders.length,
+      now: () => Date.now(),
     });
   }
 
@@ -2787,112 +2782,13 @@ export class SyncEngine {
     pass: ReconcilePass,
   ): Promise<unknown> {
     const { localHashes, localStamps, remote } = pass;
-    let batch: PreparedPush[] = [];
-    let batchBytes = 0;
-    let firstFailure: unknown = null;
-    let rateLimitedOut = false;
-
-    /** The batch on the wire, if any: the next one is prepared while it flies. */
-    let inFlight: Promise<unknown> | null = null;
-
-    /**
-     * Send one prepared batch and apply its per-file verdicts.
-     *
-     * Answers the first refusal, and marks the pass as rate-limited-out when the limiter
-     * outlasted its waits. Everything the caller needs to record is recorded here, so the
-     * caller can start the request and keep preparing the next batch.
-     */
-    const sendBatchNow = async (sending: PreparedPush[]): Promise<unknown> => {
-      let results;
-      try {
-        const response = await this.withRateLimitWaits(() =>
-          this.opts.api.push(
-            this.opts.vaultId,
-            sending.map((prepared) => this.wireFile(prepared, prepared.content)),
-          ),
-        );
-        results = response.results;
-      } catch (err) {
-        // The whole request failed: nothing landed, so no echo can arrive for any of
-        // these versions and none of them may stay suppressed. The batch is dropped —
-        // its files are retried by the next pass — and the failure is answered to the
-        // caller while the creates that follow still get their chance.
-        for (const prepared of sending) {
-          this.forgetPushedVersion(prepared);
-          this.dropPendingCreate(prepared);
-        }
-        // A limiter that outlasted the waits ends the pass: every further batch would
-        // be refused too, and the files are better left untracked than half-created.
-        if (isRateLimitError(err)) rateLimitedOut = true;
-        this.activity.advanceProgress(sending.length);
-        return err;
-      }
-
-      let failure: unknown = null;
-      for (const [index, prepared] of sending.entries()) {
-        const result = results[index];
-        // A create names `baseVersionId: null`, so a stale base cannot reach it; every
-        // non-`ok` answer is a refusal the next pass retries in a batch.
-        if (classifyPushResult(result) === "ok") {
-          this.applyPushedVersion(prepared);
-          this.activity.advanceProgress();
-          continue;
-        }
-        // A refused file is retried by the next pass, through the batched create path:
-        // dropping the pending entry is what keeps it from being pushed one request at a
-        // time by `reconcileOne` (see `dropPendingCreate`).
-        this.forgetPushedVersion(prepared);
-        this.dropPendingCreate(prepared);
-        this.activity.advanceProgress();
-        failure ??= new Error(
-          `Push failed for ${prepared.plainPath}: ${result?.error ?? result?.status ?? "no result"}`,
-        );
-      }
-      return failure;
-    };
-
-    /**
-     * Hand the current batch to the wire **without waiting for it**.
-     *
-     * Preparing a batch (read, hash, encrypt path and content) is a millisecond per file
-     * on its own, so waiting for the previous request before reading the next files left
-     * the network idle for half of a bind (measured: ~0.3 s per 100-file batch at 50 000
-     * files, of which the server was 0.05 s). The batch being prepared is at most one, so
-     * a bind holds at most two batches — one on the wire, one under construction — and a
-     * file over the byte bound still travels alone (see the loop).
-     */
-    const flush = (): void => {
-      if (batch.length === 0) return;
-      const sending = batch;
-      batch = [];
-      batchBytes = 0;
-      inFlight = sendBatchNow(sending);
-    };
-
-    /**
-     * Wait for the batch in flight and fold its failure in.
-     *
-     * Answers whether the pass has to stop. Called at every point where the next thing to
-     * send would otherwise overlap something it must not (a chunked upload, a large file,
-     * or the next batch's own request), which is where the overlap is capped at one batch.
-     */
-    const settle = async (): Promise<boolean> => {
-      if (inFlight === null) return rateLimitedOut;
-      const promise = inFlight;
-      inFlight = null;
-      // Not `firstFailure ??= await promise`: `??=` skips the `await` itself once an
-      // earlier batch failed, orphaning this one — it would still be on the wire when the
-      // pass returned, and the next `flush()` would overwrite its slot.
-      const failure = await promise;
-      if (firstFailure === null) firstFailure = failure;
-      return rateLimitedOut;
-    };
+    const batch = this.createBatch();
 
     // The order is the pass's (a note the user just created or opened first); it was
     // computed by the caller, which also queued this job for every candidate path.
     try {
       for (const path of ordered) {
-        if (rateLimitedOut) break;
+        if (batch.rateLimited) break;
         if (this.pathToFileId.has(path) || remote.fileIdAt(path) !== null) continue;
         const read = await this.readWithStamp(path);
         if (!read) continue;
@@ -2930,74 +2826,70 @@ export class SyncEngine {
         // The pass has taken this file on: it is counted from here, so the last progress
         // report of a bind ends at `done === total` even when a limiter cuts it short.
         this.activity.addProgressTotal(1);
-        // A file above the chunking threshold is staged through the chunk endpoints and
-        // named by its push; it never joins a batch (its frame carries no bytes anyway).
-        if (prepared.chunkCount > 0) {
-          // A chunk upload is its own sequence of requests: let the batch in flight finish
-          // first rather than interleaving the two.
-          if (await settle()) {
-            this.abandonUnsent(prepared);
-            break;
-          }
-          const failure = await this.sendPreparedChunked(prepared);
-          firstFailure ??= failure;
-          // A chunked create's refusal is a limiter answer too: three more >8 MiB files
-          // must not each burn another round of waits.
-          if (isRateLimitError(failure)) rateLimitedOut = true;
-          this.activity.advanceProgress();
-          continue;
-        }
-        // Every other create carries its content, so the batch knows exactly what it holds.
-        prepared.content = await this.contentFor(prepared);
-        const size = prepared.content?.byteLength ?? 0;
-
-        // A file that is itself over the bound is sent on its own, before and after a
-        // flush: a bind must never hold two large files at the same time.
-        if (size > MAX_PUSH_BATCH_BYTES) {
-          if (await settle()) {
-            this.abandonUnsent(prepared);
-            break;
-          }
-          // Whatever small files are queued go first: the large one travels alone.
-          flush();
-          batch.push(prepared);
-          batchBytes = size;
-          flush();
-          // Alone, and finished before the next file is read: the memory bound above.
-          await settle();
-          continue;
-        }
-        if (batch.length >= MAX_PUSH_BATCH_FILES || batchBytes + size > MAX_PUSH_BATCH_BYTES) {
-          // The batch that is full goes out now; this file starts the next one, which is
-          // prepared while the request flies.
-          if (await settle()) {
-            this.abandonUnsent(prepared);
-            break;
-          }
-          flush();
-        }
-        batch.push(prepared);
-        batchBytes += size;
+        // The batch owns the bounds and the request window: a chunked file travels alone
+        // through `sendAlone`, a large one after the small files, and the next batch is
+        // prepared while the previous request is on the wire (`pipelined`).
+        const outcome = await batch.add(prepared, undefined, { pipelined: true });
+        if (outcome === "dropped") break;
       }
     } catch (err) {
-      // A throw from the adapter or the encryption must not leave this batch's pending
+      // A throw from the adapter or the encryption must not leave the batch's pending
       // entries (or the request on the wire) behind: that is the stranded-file path again.
-      // The normal path keeps atch for the tail flush below.
-      await settle();
-      for (const prepared of batch) this.abandonUnsent(prepared);
+      await batch.settle();
+      batch.abandon();
       throw err;
     }
 
     // The last full batch, then the tail of the vault.
-    await settle();
-    if (rateLimitedOut) {
-      for (const prepared of batch) this.abandonUnsent(prepared);
-      batch = [];
-    } else {
-      flush();
-      await settle();
-    }
-    return firstFailure;
+    await batch.drain();
+    return batch.failure;
+  }
+
+  /**
+   * The batch a bind's creates travel in.
+   *
+   * Everything here is a create's own rule: its echo record and pending identity go
+   * together when the server will not take it (`dropPendingCreate`), its progress row is
+   * settled exactly once, and a chunked file stages its chunks before naming the upload.
+   * The bounds and the request window are {@link PushBatch}'s.
+   */
+  private createBatch(): PushBatch<PreparedPush, void> {
+    return new PushBatch<PreparedPush, void>(
+      {
+        send: async (prepared) => {
+          const response = await this.withRateLimitWaits(() =>
+            this.opts.api.push(
+              this.opts.vaultId,
+              prepared.map((one) => this.wireFile(one, one.content)),
+            ),
+          );
+          return response.results;
+        },
+        contentFor: (prepared) => this.contentFor(prepared),
+        sendAlone: async (prepared) => {
+          const failure = await this.sendPreparedChunked(prepared);
+          this.activity.advanceProgress();
+          return failure;
+        },
+        applied: (prepared) => {
+          this.applyPushedVersion(prepared);
+          this.activity.advanceProgress();
+        },
+        refused: async (prepared, _meta, result) => {
+          // A create names `baseVersionId: null`, so a stale base cannot reach it; every
+          // non-`ok` answer is a refusal the next pass retries in a batch.
+          return new Error(
+            `Push failed for ${prepared.plainPath}: ${result?.error ?? result?.status ?? "no result"}`,
+          );
+        },
+        forget: (prepared) => {
+          this.forgetPushedVersion(prepared);
+          this.dropPendingCreate(prepared);
+          this.activity.advanceProgress();
+        },
+      },
+      { maxFiles: MAX_PUSH_BATCH_FILES, maxBytes: MAX_PUSH_BATCH_BYTES },
+    );
   }
 
   /**
@@ -3027,111 +2919,93 @@ export class SyncEngine {
 
   /** The work of {@link pushTombstones}, running inside its paths' job. */
   private async pushTombstonesLocked(pending: readonly PendingTombstone[]): Promise<unknown> {
-    let batch: PreparedPush[] = [];
-    let firstFailure: unknown = null;
-    let rateLimitedOut = false;
-
-    /**
-     * Settle one tombstone's answer.
-     *
-     * `ok` records the sync point; `stale_base` settles from the chain the server refused
-     * against (no re-send: the server has already refused this base); anything else
-     * throws for the caller to record.
-     */
-    const settleOne = async (
-      prepared: PreparedPush,
-      result: { status: string; error?: string } | undefined,
-    ): Promise<void> => {
-      const outcome = classifyPushResult(result);
-      if (outcome === "ok") {
-        this.applyPushedVersion(prepared);
-        return;
-      }
-      // A tombstone always names the head it was decided from, so a stale base is reachable
-      // here and is settled from the chain the server refused against (no re-send).
-      if (outcome === "stale_base") {
-        await this.settleStaleBase(prepared);
-        return;
-      }
-      throw new Error(
-        `Push failed for ${prepared.plainPath}: ${result?.error ?? result?.status ?? "no result"}`,
-      );
-    };
-
-    /**
-     * Send the prepared tombstones and settle each answer.
-     *
-     * A whole-request failure drops the batch — nothing landed, so no echo can arrive for
-     * any of them — and leaves the state entries alone: the next pass finds the files
-     * still gone and decides the same tombstones again, in a batch.
-     */
-    const sendBatch = async (): Promise<void> => {
-      if (batch.length === 0) return;
-      const sending = batch;
-      batch = [];
-      let results: Array<{ status: string; error?: string }>;
-      try {
-        const response = await this.withRateLimitWaits(() =>
-          this.opts.api.push(
-            this.opts.vaultId,
-            sending.map((prepared) => this.wireFile(prepared, prepared.content)),
-          ),
-        );
-        results = response.results;
-      } catch (err) {
-        for (const prepared of sending) this.forgetPushedVersion(prepared);
-        // A limiter that outlasted its waits ends the batch: every further request would
-        // be refused too, and the files are better left for the next pass.
-        if (isRateLimitError(err)) rateLimitedOut = true;
-        firstFailure ??= err;
-        return;
-      }
-      for (const [index, prepared] of sending.entries()) {
-        // One entry the server, the adapter or a conflict resolution refuses must not
-        // cost the rest of the batch: the versions after it were answered by the same
-        // request, and leaving them unapplied would drop their sync points — the next
-        // pass would read those chains as deletions it never made, and a file written
-        // there later would become a new chain instead of a restore.
-        try {
-          await settleOne(prepared, results[index]);
-        } catch (err) {
-          this.forgetPushedVersion(prepared);
-          if (err instanceof SyncPushBaseError) {
-            // The tombstone lost a race with a peer's edit: the remote side wins and there
-            // is nothing local to park — the single-file path's answer, applied here too.
-            try {
-              const applied = await this.conflicts.resolve(
-                prepared.fileId,
-                prepared.plainPath,
-                remoteHead(err.chain),
-                false,
-              );
-              if (!applied) firstFailure ??= err;
-            } catch (conflictErr) {
-              firstFailure ??= conflictErr;
-            }
-            continue;
-          }
-          firstFailure ??= err;
-        }
-      }
-    };
-
+    const batch = this.tombstoneBatch();
     for (const entry of pending) {
-      if (rateLimitedOut) break;
+      if (batch.rateLimited) break;
       try {
+        // Prepare the next tombstone only once the queued request has landed: its guards
+        // re-check the disk, and a file can be written back (or an event can claim the
+        // path) while the batch is on the wire — the 101st tombstone of a 101-file
+        // deletion must see that.
+        if (batch.atCapacity) await batch.drain();
+        if (batch.rateLimited) break;
         const prepared = await this.prepareTombstone(entry);
         if (!prepared) continue;
-        batch.push(prepared);
-        if (batch.length >= MAX_PUSH_BATCH_FILES) await sendBatch();
+        if ((await batch.add(prepared, undefined)) === "dropped") break;
       } catch (err) {
         // A stat or an encryption that fails for one path is that path's problem: the
         // batch keeps the tombstones it already holds and the pass still creates.
-        firstFailure ??= err;
+        batch.recordFailure(err);
       }
     }
-    await sendBatch();
-    return firstFailure;
+    await batch.drain();
+    return batch.failure;
+  }
+
+  /**
+   * The batch a pass's tombstones travel in.
+   *
+   * A tombstone is content-less and names the head it was decided from: its only answer
+   * that is not a refusal is `stale_base`, settled from the chain the server refused
+   * against (see {@link settleTombstoneRefusal}). The bounds and the request window are
+   * {@link PushBatch}'s.
+   */
+  private tombstoneBatch(): PushBatch<PreparedPush, void> {
+    return new PushBatch<PreparedPush, void>(
+      {
+        send: async (prepared) => {
+          const response = await this.withRateLimitWaits(() =>
+            this.opts.api.push(
+              this.opts.vaultId,
+              prepared.map((one) => this.wireFile(one, one.content)),
+            ),
+          );
+          return response.results;
+        },
+        contentFor: (prepared) => this.contentFor(prepared),
+        applied: (prepared) => this.applyPushedVersion(prepared),
+        refused: (prepared, _meta, result) => this.settleTombstoneRefusal(prepared, result),
+        forget: (prepared) => this.forgetPushedVersion(prepared),
+      },
+      { maxFiles: MAX_PUSH_BATCH_FILES, maxBytes: MAX_PUSH_BATCH_BYTES },
+    );
+  }
+
+  /**
+   * Settle a refused tombstone, answering the failure to record.
+   *
+   * `stale_base` means a peer pushed after the point the deletion was decided from: the
+   * remote side wins and, the local file already being gone, there is nothing to park, so
+   * the peer's version simply comes back. Any other answer is a refusal the pass reports.
+   */
+  private async settleTombstoneRefusal(
+    prepared: PreparedPush,
+    result: BatchPushResult | undefined,
+  ): Promise<unknown> {
+    if (classifyPushResult(result) !== "stale_base") {
+      return new Error(
+        `Push failed for ${prepared.plainPath}: ${result?.error ?? result?.status ?? "no result"}`,
+      );
+    }
+    try {
+      await this.settleStaleBase(prepared);
+      return null;
+    } catch (err) {
+      if (!(err instanceof SyncPushBaseError)) return err;
+      // The tombstone lost a race with a peer's edit: the remote side wins and there is
+      // nothing local to park — the single-file path's answer, applied here too.
+      try {
+        const applied = await this.conflicts.resolve(
+          prepared.fileId,
+          prepared.plainPath,
+          remoteHead(err.chain),
+          false,
+        );
+        return applied ? null : err;
+      } catch (conflictErr) {
+        return conflictErr;
+      }
+    }
   }
 
   /**
@@ -3159,23 +3033,6 @@ export class SyncEngine {
     return await this.preparePush(
       this.tombstoneRequest(fileId, path, baseVersionId, this.deleteMoment(stateEntry)),
     );
-  }
-
-  /**
-   * Give up on a file whose create was prepared but never sent.
-   *
-   * The loop writes the pending state entry and registers the echo suppression *before*
-   * it knows whether the batch that holds the file will go out. When a limiter ends the
-   * pass at that point, this file has no batch waiting for it: both records have to go,
-   * or the next pass sees a file that is "tracked" with no version and pushes it one
-   * request at a time — the exact cost `dropPendingCreate` exists to avoid.
-   */
-  private abandonUnsent(prepared: PreparedPush): void {
-    this.forgetPushedVersion(prepared);
-    this.dropPendingCreate(prepared);
-    // It was counted as taken on, and it is settled now (as "not sent"): the pass's final
-    // `done === total` has to hold even when a limiter stopped it.
-    this.activity.advanceProgress();
   }
 
   /**
@@ -3667,7 +3524,7 @@ export class SyncEngine {
    * brand-new file: one note, two chains, and a duplicate on every peer.
    *
    * A move whose destination is an **excluded folder** cannot be found in the pass's
-   * listing (the scope drops it): {@link findExcludedMoveCandidate} answers that half,
+   * listing (the scope drops it): {@link ExcludedMoveFinder} answers that half,
    * and the chain records the path without pushing, exactly like a rename event into
    * the same folder.
    *
@@ -3700,7 +3557,7 @@ export class SyncEngine {
       candidate = path;
     }
     if (candidate === null) {
-      const excluded = await this.findExcludedMoveCandidate(fileId, oldPath, syncedHash, remote);
+      const excluded = await this.excludedMoves.find(fileId, oldPath, syncedHash);
       if (excluded === null) return;
       // Recorded, not pushed: the destination is outside this device's sync scope, and
       // the recorded path is what turns the move back into a `rename` when the folder
@@ -3727,82 +3584,6 @@ export class SyncEngine {
       this.pathToFileId.set(candidate, fileId);
       entry.plainPath = candidate;
     });
-  }
-
-  /**
-   * The file under an excluded folder that is this chain's file, moved there without an
-   * event the engine could read as a rename.
-   *
-   * A host can see a move as "removed at the old path, created at the new one" — an
-   * external tool, the CLI's `fs.watch`, a plugin that was not running — and when the
-   * destination is an excluded folder the scope drops the created half, so the absence
-   * would become a tombstone for a file the user still owns. The match is deliberately
-   * narrow: the same file name, the same size when the state recorded one, and exactly
-   * one candidate whose bytes hash to the sync point. Anything else falls back to the
-   * normal deletion path — a wrong "move" would keep a file every peer has deleted.
-   */
-  private async findExcludedMoveCandidate(
-    fileId: string,
-    oldPath: string,
-    contentHash: string,
-    remote: RemoteIndex,
-  ): Promise<string | null> {
-    if (this.scope.excludedFolders.length === 0) return null;
-    const candidates = (await this.excludedFilesByName()).get(this.fileNameOf(oldPath)) ?? [];
-    if (candidates.length === 0) return null;
-
-    const sizeHint = this.state[fileId]?.stamp?.sizeBytes;
-    let match: string | null = null;
-    for (const candidate of candidates) {
-      // A file another chain claims (or this chain already records) is not the move.
-      if (this.pathToFileId.has(candidate) || remote.fileIdAt(candidate) !== null) continue;
-      if (sizeHint !== undefined) {
-        const stamp = await this.opts.adapter.statFile(candidate);
-        if (stamp === null || stamp.sizeBytes !== sizeHint) continue;
-      }
-      const bytes = await this.opts.adapter.readFile(candidate);
-      if (!bytes) continue;
-      if ((await sha256Hex(bytes)) !== contentHash) continue;
-      if (match !== null) return null; // ambiguous — keep the deletion path
-      match = candidate;
-    }
-    return match;
-  }
-
-  /**
-   * The excluded folders' files grouped by name, listed at most once per burst.
-   *
-   * A host that cannot list them answers none, and a move it never saw stays a
-   * deletion — the same behaviour as before the listing existed.
-   */
-  private async excludedFilesByName(): Promise<Map<string, string[]>> {
-    const now = Date.now();
-    if (this.excludedFiles !== null && now - this.excludedFiles.at < EXCLUDED_LISTING_TTL_MS) {
-      return this.excludedFiles.byName;
-    }
-    const byName = new Map<string, string[]>();
-    // A listing is a fallback for a decision the pass would otherwise make as a deletion:
-    // a host that cannot answer must not make the pass fail (and retry forever).
-    let listed: string[] = [];
-    try {
-      listed = (await this.opts.adapter.listExcludedFiles?.()) ?? [];
-    } catch {
-      listed = [];
-    }
-    for (const path of listed) {
-      const name = this.fileNameOf(path);
-      const bucket = byName.get(name);
-      if (bucket) bucket.push(path);
-      else byName.set(name, [path]);
-    }
-    this.excludedFiles = { at: now, byName };
-    return byName;
-  }
-
-  /** The last path segment — the name a move generally keeps. */
-  private fileNameOf(path: string): string {
-    const slash = path.lastIndexOf("/");
-    return slash === -1 ? path : path.slice(slash + 1);
   }
 
   /**
@@ -4780,12 +4561,7 @@ export class SyncEngine {
     // what turns the move back into a `rename`.
     const contentHash = this.state[fileId]?.lastKnownContentHash ?? "";
     if (contentHash !== "") {
-      const movedTo = await this.findExcludedMoveCandidate(
-        fileId,
-        path,
-        contentHash,
-        this.remoteIndex,
-      );
+      const movedTo = await this.excludedMoves.find(fileId, path, contentHash);
       if (movedTo !== null) {
         this.recordLocalPathMove(path, movedTo);
         return { kind: "handled" };
