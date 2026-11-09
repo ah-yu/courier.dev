@@ -6,7 +6,6 @@ import type {
 } from "@courier/shared";
 import {
   CHUNK_STORED_BYTES,
-  MAX_CONTENT_BATCH_FILES,
   MAX_PULL_BATCH_FILES,
   MAX_PUSH_BATCH_FILES,
   MAX_ENCRYPTED_PATH_LENGTH,
@@ -24,7 +23,9 @@ import {
   sha256Text,
 } from "./crypto";
 import { chunkBounds, chunkCountForSize, shouldTransferInChunks } from "./chunked-transfer";
-import type { Platform, TimerHandle } from "./platform";
+import { ActivityReporter } from "./activity-reporter";
+import { ContentReader } from "./content-reader";
+import type { Platform } from "./platform";
 import { generateFileId, generateVersionId } from "./ids";
 import { isConflictFile, conflictFilePath } from "./conflict-file";
 import { historyKindFor } from "./file-types";
@@ -211,7 +212,7 @@ export interface EngineOptions {
   /**
    * How far the current pass has got (see {@link SyncProgress}).
    *
-   * Reported at coarse steps — every {@link PROGRESS_STEP_FILES} settled files, plus one
+   * Reported at coarse steps — every 25 settled files, plus one
    * call when the pass starts with a known total and one when it ends — so a host can
    * show "1 200 / 10 000" during a first bind without a callback per file. A pass with
    * nothing to do reports nothing. A listener that throws is ignored, like
@@ -498,39 +499,6 @@ interface LocalChangeRead {
 }
 
 /**
- * How long a whole-file content read waits for other reads to travel with it (ms).
- *
- * The wait only applies to a batch that is **not** full: the pool's concurrency is the most
- * reads that can be outstanding, so a batch that many entries is flushed at once (see
- * `fetchContentBatched`). This timer covers the tail of a pass, where fewer files are left
- * than the pool could run.
- *
- * `0` — the next turn of the event loop — is deliberate: a timer here is a *sync point* in
- * the download pipeline, and every millisecond of it is paid once per wave (250 waves for
- * 1 000 files). Waiting longer than a turn made a 1 000-file cold bind slower than one
- * request per file; one turn is free next to a network round trip and still groups the
- * reads that finish together.
- */
-const CONTENT_BATCH_WINDOW_MS = 0;
-
-/**
- * Most plaintext one content batch may name.
- *
- * The batch holds every file's ciphertext until the request is answered, so this is what
- * bounds a download's memory; a file above it travels alone. The server's own bound is
- * `MAX_CONTENT_BATCH_BYTES`, twice this, so a batch built here is always accepted.
- */
-const CONTENT_BATCH_MAX_BYTES = 8 * 1024 * 1024;
-
-/** One file waiting for the next batched content read. */
-interface PendingContent {
-  /** The version's plaintext size, for the batch's byte budget. */
-  sizeBytes: number;
-  resolve: (bytes: Uint8Array | null) => void;
-  reject: (err: unknown) => void;
-}
-
-/**
  * One burst of local vault events, as a host collects it.
  *
  * `changed` are paths whose file was created or modified; `deleted` are paths whose file
@@ -567,15 +535,6 @@ const MAX_PUSH_BATCH_BYTES = 8 * 1024 * 1024;
  * the normal deletion path.
  */
 const EXCLUDED_LISTING_TTL_MS = 30_000;
-
-/**
- * How many settled files a pass may go through before it reports progress again.
- *
- * A bind's counter has to move often enough to look alive and rarely enough not to make a
- * host repaint for every note: 25 files is a visible step on any vault, and a 10 000-file
- * bind reports ~400 times instead of 10 000.
- */
-const PROGRESS_STEP_FILES = 25;
 
 /**
  * Whether a failed content read means "the store holds nothing for that hash".
@@ -686,12 +645,6 @@ export class SyncEngine {
    * operation: the change is one job, and the next job on that path starts after it.
    */
   private readonly paths = new PathQueue();
-  /** Whole-file content reads waiting for the next batched request (see `fetchContentBatched`). */
-  private pendingContent = new Map<string, PendingContent[]>();
-  /** Plaintext bytes the pending batch would fetch, for its memory bound. */
-  private contentBatchBytes = 0;
-  /** The timer that flushes {@link pendingContent}; `null` when none is armed. */
-  private contentBatchTimer: TimerHandle | null = null;
   /**
    * Paths this engine is writing right now, so a vault event the write fires can be
    * queued without waiting for it (see `schedule`).
@@ -699,15 +652,9 @@ export class SyncEngine {
   private readonly writingPaths = new Set<string>();
   /** Tombstone rule for the reconcile currently running (see `TombstoneHandling`). */
   private tombstoneMerge: TombstoneHandling = "apply-remote-delete";
-  /** True during the single pass that binds the vault (see {@link initialSync}). */
-  private firstBind = false;
   /** The pass in flight, shared by every call that arrives while it runs. */
   private passPromise: Promise<void> | null = null;
   private initialized = false;
-  /** Paths reported through `onFileTooLarge` in the current pass (one event each). */
-  private tooLargeReported = new Set<string>();
-  /** Paths reported through `onFileSkipped` in the current pass (one event each). */
-  private skippedReported = new Set<string>();
   /**
    * The in-flight (or settled) `sha256("")` — the hash a `delete` version carries.
    * Holding the promise, not the value it settles to, is what lets the first pass's
@@ -716,11 +663,6 @@ export class SyncEngine {
   private emptyHashPromise: Promise<string> | null = null;
   /** Single-flight marker for {@link syncLocalSettings}. */
   private settingsPollRunning = false;
-  /** Files the current pass has settled, and how many it has taken on (see `SyncProgress`). */
-  private progressDone = 0;
-  private progressTotal = 0;
-  /** The `done` value the last `onProgress` call reported, so steps are coarse. */
-  private progressEmitted = 0;
   /**
    * The files under this device's excluded folders, grouped by file name, with the
    * moment the listing was taken. See {@link findExcludedMoveCandidate}.
@@ -737,6 +679,10 @@ export class SyncEngine {
    * (see {@link EngineOptions.contentPrefetch}).
    */
   private readonly prefetcher: ContentPrefetcher | null;
+  /** Batched content reads for every version a pass or a burst pulls (see `ContentReader`). */
+  private readonly content: ContentReader;
+  /** What this pass tells the host: the activity feed, the skip notices and the progress. */
+  private readonly activity: ActivityReporter;
 
   constructor(private opts: EngineOptions) {
     this.scope = normalizeScope(opts.syncScope);
@@ -746,9 +692,25 @@ export class SyncEngine {
       prefetch === false
         ? null
         : new ContentPrefetcher(
-            (contentHashes) => this.sendContentBatch(contentHashes),
+            (contentHashes) => this.content.fetch(contentHashes),
             normalizePrefetchLimits(prefetch),
           );
+    this.content = new ContentReader({
+      api: opts.api,
+      vaultId: opts.vaultId,
+      platform: opts.platform,
+      maxConcurrent: this.passLimits.maxConcurrent,
+      prefetcher: this.prefetcher,
+      wait: (send) => this.withRateLimitWaits(send),
+    });
+    this.activity = new ActivityReporter({
+      scope: this.scope,
+      onFileTooLarge: opts.onFileTooLarge,
+      onFileSkipped: opts.onFileSkipped,
+      onSettingsApplied: opts.onSettingsApplied,
+      onSyncActivity: opts.onSyncActivity,
+      onProgress: opts.onProgress,
+    });
   }
 
   /**
@@ -800,8 +762,8 @@ export class SyncEngine {
     const stamp = await this.opts.adapter.statFile(path);
     if (stamp === null) return false;
     if (withinFileSizeCap(this.scope, stamp.sizeBytes)) return true;
-    this.reportTooLarge(path, stamp.sizeBytes);
-    this.reportActivity({
+    this.activity.reportTooLarge(path, stamp.sizeBytes);
+    this.activity.reportActivity({
       direction: "out",
       outcome: "skipped",
       fileId: this.pathToFileId.get(path) ?? null,
@@ -815,24 +777,30 @@ export class SyncEngine {
     return false;
   }
 
-  private reportTooLarge(plainPath: string, sizeBytes: number): void {
-    if (this.tooLargeReported.has(plainPath)) return;
-    this.tooLargeReported.add(plainPath);
-    this.opts.onFileTooLarge?.({ plainPath, sizeBytes });
-  }
-
   /**
-   * Tell the host one decision this device made (see {@link SyncActivityEvent}).
+   * Report a local file that is over the upload cap, once per pass and only when it is
+   * not already at its sync point.
    *
-   * Deliberately isolated: the activity feed is a UI convenience, so a host listener
-   * that throws must never fail the sync pass that reported it.
+   * A file over the cap that is exactly at its sync point has nothing to send: it arrived
+   * from a peer (the cap bounds uploads, never downloads) or was synced under a higher cap
+   * before the administrator lowered it. Reporting it would nag every pass about a file
+   * that is perfectly in sync; only a local change this device cannot push is worth the
+   * notice. The reconcile scan and the settings poll share this so the two cannot drift.
    */
-  private reportActivity(event: SyncActivityEvent): void {
-    try {
-      this.opts.onSyncActivity?.(event);
-    } catch (err) {
-      console.error("Courier: a sync-activity listener failed:", err);
-    }
+  private reportOverCapLocal(path: string, stamp: FileStamp): void {
+    if (this.cachedHashFor(path, stamp) !== null) return;
+    this.activity.reportTooLarge(path, stamp.sizeBytes);
+    this.activity.reportActivity({
+      direction: "out",
+      outcome: "skipped",
+      fileId: this.pathToFileId.get(path) ?? null,
+      versionId: null,
+      plainPath: path,
+      action: null,
+      sizeBytes: stamp.sizeBytes,
+      deviceName: null,
+      reason: "size",
+    });
   }
 
   /**
@@ -845,77 +813,6 @@ export class SyncEngine {
    */
   private versionAlreadyApplied(fileId: string, versionId: string): boolean {
     return this.state[fileId]?.lastKnownVersionId === versionId;
-  }
-
-  /** Report a file this pass left out for a reason that is not its size (once per pass). */
-  private reportSkipped(plainPath: string, reason: FileSkippedEvent["reason"]): void {
-    if (this.skippedReported.has(plainPath)) return;
-    this.skippedReported.add(plainPath);
-    this.opts.onFileSkipped?.({ plainPath, reason });
-  }
-
-  /**
-   * Report a settings file this device just applied from the remote.
-   *
-   * Deliberately not "once per pass": each application is a separate change to a file
-   * the running app has already read, so the host needs one event per file — it is the
-   * host's own burst notifier that turns a folderful of them into one line.
-   */
-  private reportSettingsApplied(plainPath: string, action: SettingsAppliedEvent["action"]): void {
-    // Ownership is the guard, not "is inside the config folder": it answers null for a
-    // path nothing may sync (`workspace.json`, `cache/**`, this plugin's own folder), and
-    // it gives the host the group it needs to judge the change without knowing the rule.
-    const group = settingsGroupOf(plainPath, this.scope);
-    if (group === null) return;
-    this.opts.onSettingsApplied?.({ plainPath, action, group });
-  }
-
-  /** Start a pass: one `onFileTooLarge`/`onFileSkipped` per path per pass, and fresh skip sets. */
-  private beginPass(): void {
-    this.tooLargeReported.clear();
-    this.skippedReported.clear();
-  }
-
-  // ── Progress (see `SyncProgress`) ──
-
-  /** Begin reporting a pass that already knows `total` files, and report it. */
-  private beginProgress(total: number): void {
-    this.progressDone = 0;
-    this.progressTotal = total;
-    this.progressEmitted = 0;
-    this.reportProgress(true);
-  }
-
-  /** Take on `count` more files — a create the pass discovered as it walked the vault. */
-  private addProgressTotal(count: number): void {
-    this.progressTotal += count;
-  }
-
-  /** Mark `count` files settled, and report once enough has moved. */
-  private advanceProgress(count = 1): void {
-    this.progressDone += count;
-    this.reportProgress(false);
-  }
-
-  /**
-   * Report progress, if this pass has anything to report and a step has passed.
-   *
-   * `force` is for the beginning and the end of a pass: the first tells a host the total,
-   * the last tells it the pass is over (`done === total`), which is what a status bar
-   * needs to stop showing a counter. A listener that throws is ignored — progress is a
-   * courtesy, and a UI bug must not fail the sync that reported it.
-   */
-  private reportProgress(force: boolean): void {
-    const listener = this.opts.onProgress;
-    if (!listener) return;
-    if (this.progressTotal === 0 && this.progressDone === 0) return;
-    if (!force && this.progressDone - this.progressEmitted < PROGRESS_STEP_FILES) return;
-    this.progressEmitted = this.progressDone;
-    try {
-      listener({ done: this.progressDone, total: this.progressTotal });
-    } catch {
-      // A host callback is not allowed to fail the pass.
-    }
   }
 
   /**
@@ -1424,7 +1321,7 @@ export class SyncEngine {
       // on the same bytes has a different versionId and is not reported as this
       // device's upload.
       if (head.versionId === prepared.versionId) {
-        this.reportActivity({
+        this.activity.reportActivity({
           direction: "out",
           outcome: "applied",
           fileId,
@@ -1464,8 +1361,8 @@ export class SyncEngine {
     // and the rest of the pass continues; checked here, before the echo-suppression
     // registration below, so nothing is remembered about a version never sent.
     if (encryptedPath.length > MAX_ENCRYPTED_PATH_LENGTH) {
-      this.reportSkipped(plainPath, "path-too-long");
-      this.reportActivity({
+      this.activity.reportSkipped(plainPath, "path-too-long");
+      this.activity.reportActivity({
         direction: "out",
         outcome: "skipped",
         fileId,
@@ -1733,7 +1630,7 @@ export class SyncEngine {
     if (action !== "delete" || this.pathToFileId.get(plainPath) === undefined) {
       this.pathToFileId.set(plainPath, fileId);
     }
-    this.reportActivity({
+    this.activity.reportActivity({
       direction: "out",
       outcome: "applied",
       fileId,
@@ -1817,8 +1714,8 @@ export class SyncEngine {
     firstBind?: boolean;
     priorityPaths?: readonly string[];
   }): Promise<void> {
-    this.firstBind = options.firstBind === true;
-    this.tombstoneMerge = this.firstBind ? "bind-merge" : "apply-remote-delete";
+    const firstBind = options.firstBind === true;
+    this.tombstoneMerge = firstBind ? "bind-merge" : "apply-remote-delete";
     try {
       await this.reconcile(options.priorityPaths ?? []);
       this.initialized = true;
@@ -1860,7 +1757,7 @@ export class SyncEngine {
     // twice; against a reconcile it is harmless (the path queue covers that).
     if (this.settingsPollRunning) return;
     this.settingsPollRunning = true;
-    this.beginPass();
+    this.activity.beginPass();
     try {
       const listed = (await this.opts.adapter.listSyncableFiles()).filter((p) =>
         this.isSyncable(p),
@@ -1875,24 +1772,9 @@ export class SyncEngine {
         const stamp = await this.opts.adapter.statFile(path);
         if (stamp === null) continue;
         if (!withinFileSizeCap(this.scope, stamp.sizeBytes)) {
-          // Same rule as the reconcile scan: a file that is exactly at its sync point has
-          // nothing to send, so an over-cap settings file is not reported twice a minute
-          // for being in sync. Only a local change this device cannot push is worth the
-          // notice.
-          if (this.cachedHashFor(path, stamp) === null) {
-            this.reportTooLarge(path, stamp.sizeBytes);
-            this.reportActivity({
-              direction: "out",
-              outcome: "skipped",
-              fileId: this.pathToFileId.get(path) ?? null,
-              versionId: null,
-              plainPath: path,
-              action: null,
-              sizeBytes: stamp.sizeBytes,
-              deviceName: null,
-              reason: "size",
-            });
-          }
+          // Same rule as the reconcile scan, so an over-cap settings file is not reported
+          // twice a minute for being in sync.
+          this.reportOverCapLocal(path, stamp);
           continue;
         }
         const cached = this.cachedHashFor(path, stamp);
@@ -1925,7 +1807,7 @@ export class SyncEngine {
     const { adapter, api, vaultId } = this.opts;
     // The host's list is a preference; normalize it once for the whole pass.
     const priority = priorityRanks(normalizePriorityPaths(priorityPaths));
-    this.beginPass();
+    this.activity.beginPass();
     // The sync points this pass starts from, read before its first await: an event that
     // adopts a newer version at any point during the pass (even while it lists or hashes)
     // makes this pass's chain stale for that file, and its job must skip rather than pull
@@ -2126,7 +2008,7 @@ export class SyncEngine {
     const ordered = this.orderFileIds([...pass.fileIds], pass);
     // Progress starts from the chains this pass already knows about; the creates add
     // themselves as the vault is walked (see `createUntrackedFiles`).
-    this.beginProgress(ordered.length);
+    this.activity.beginProgress(ordered.length);
     // Read ahead of the loop: the pool runs four files at a time, so without this a
     // cold download costs one round trip per four files whatever the batch route groups
     // (see `prefetchForPass`).
@@ -2164,7 +2046,7 @@ export class SyncEngine {
             // task has settled.
             firstFailure ??= err;
           } finally {
-            this.advanceProgress();
+            this.activity.advanceProgress();
           }
         }),
       ),
@@ -2193,7 +2075,7 @@ export class SyncEngine {
     );
     // The pass is over: report the final pair, whose `done === total` tells a host to stop
     // showing a counter (a create that a limiter left unsent was counted and dropped).
-    this.reportProgress(true);
+    this.activity.reportProgress(true);
     return firstFailure ?? deleteFailure ?? batchFailure;
   }
 
@@ -2333,25 +2215,7 @@ export class SyncEngine {
       // Over the **upload** cap: the pass must not push it, but it still has to take a
       // peer's newer version (`applyOverCapRemote`).
       overCapPaths.add(path);
-      // A file over the cap that is exactly at its sync point has nothing to send: it
-      // arrived from a peer (the cap bounds uploads, never downloads) or was synced under
-      // a higher cap before the administrator lowered it. Reporting it would nag, every
-      // pass, about a file that is perfectly in sync; only a local change this device
-      // cannot push is worth the notice.
-      if (this.cachedHashFor(path, stamp) === null) {
-        this.reportTooLarge(path, stamp.sizeBytes);
-        this.reportActivity({
-          direction: "out",
-          outcome: "skipped",
-          fileId: this.pathToFileId.get(path) ?? null,
-          versionId: null,
-          plainPath: path,
-          action: null,
-          sizeBytes: stamp.sizeBytes,
-          deviceName: null,
-          reason: "size",
-        });
-      }
+      this.reportOverCapLocal(path, stamp);
       return;
     }
     // The stamp is kept for every statable file, not only the hashed ones: it orders the
@@ -2963,7 +2827,7 @@ export class SyncEngine {
         // A limiter that outlasted the waits ends the pass: every further batch would
         // be refused too, and the files are better left untracked than half-created.
         if (isRateLimitError(err)) rateLimitedOut = true;
-        this.advanceProgress(sending.length);
+        this.activity.advanceProgress(sending.length);
         return err;
       }
 
@@ -2972,7 +2836,7 @@ export class SyncEngine {
         const result = results[index];
         if (result?.status === "ok") {
           this.applyPushedVersion(prepared);
-          this.advanceProgress();
+          this.activity.advanceProgress();
           continue;
         }
         // A refused file is retried by the next pass, through the batched create path:
@@ -2980,7 +2844,7 @@ export class SyncEngine {
         // time by `reconcileOne` (see `dropPendingCreate`).
         this.forgetPushedVersion(prepared);
         this.dropPendingCreate(prepared);
-        this.advanceProgress();
+        this.activity.advanceProgress();
         failure ??= new Error(
           `Push failed for ${prepared.plainPath}: ${result?.error ?? result?.status ?? "no result"}`,
         );
@@ -3069,7 +2933,7 @@ export class SyncEngine {
         this.pathToFileId.set(path, fileId);
         // The pass has taken this file on: it is counted from here, so the last progress
         // report of a bind ends at `done === total` even when a limiter cuts it short.
-        this.addProgressTotal(1);
+        this.activity.addProgressTotal(1);
         // A file above the chunking threshold is staged through the chunk endpoints and
         // named by its push; it never joins a batch (its frame carries no bytes anyway).
         if (prepared.chunkCount > 0) {
@@ -3084,7 +2948,7 @@ export class SyncEngine {
           // A chunked create's refusal is a limiter answer too: three more >8 MiB files
           // must not each burn another round of waits.
           if (isRateLimitError(failure)) rateLimitedOut = true;
-          this.advanceProgress();
+          this.activity.advanceProgress();
           continue;
         }
         // Every other create carries its content, so the batch knows exactly what it holds.
@@ -3320,7 +3184,7 @@ export class SyncEngine {
     this.dropPendingCreate(prepared);
     // It was counted as taken on, and it is settled now (as "not sent"): the pass's final
     // `done === total` has to hold even when a limiter stopped it.
-    this.advanceProgress();
+    this.activity.advanceProgress();
   }
 
   /**
@@ -3348,6 +3212,24 @@ export class SyncEngine {
     delete this.state[prepared.fileId];
     if (this.pathToFileId.get(prepared.plainPath) === prepared.fileId) {
       this.pathToFileId.delete(prepared.plainPath);
+    }
+  }
+
+  /**
+   * Answer a refused tombstone the way every delete path must.
+   *
+   * A peer pushed after the point the delete was decided from, so the tombstone would have
+   * removed a version this device never saw: a **deletion that raced an edit**. The remote
+   * side wins and — the local file already being gone — there is nothing to park, so the
+   * peer's version simply comes back. The single event and the burst share this so a
+   * batched refusal cannot settle differently from an unbatched one.
+   */
+  private async settleRefusedTombstone(prepared: PreparedPush): Promise<void> {
+    try {
+      await this.pushPrepared(prepared);
+    } catch (err) {
+      if (!(err instanceof SyncPushBaseError)) throw err;
+      await this.handleConflict(prepared.fileId, prepared.plainPath, remoteHead(err.chain), false);
     }
   }
 
@@ -3576,18 +3458,17 @@ export class SyncEngine {
    * (`docs/first-bind-performance.md`).
    */
   private async fetchRemoteBytes(
-    vaultId: string,
     contentHash: string,
     plaintextSize: number,
   ): Promise<Uint8Array | null> {
     // The API hands back the stored ciphertext itself; there is nothing to decode first,
-    // so a pull decrypts the bytes it received and no more. Reads are batched (see
-    // `fetchContentBatched`): a pass or a notification burst fetches several versions in
-    // one request instead of one per file, and the read-ahead beside the loop may already
-    // hold them (see `ContentPrefetcher`). A failure — a rate limit that outlasted its
-    // waits, a 5xx, a dropped connection — is a failed pull and is rethrown; only a `null`
-    // (the store holds nothing, or the bytes do not decrypt) is "nothing to apply".
-    const stored = await this.readRemoteContent(contentHash, plaintextSize);
+    // so a pull decrypts the bytes it received and no more. Reads are batched by
+    // `ContentReader`: a pass or a notification burst fetches several versions in one
+    // request instead of one per file, and the read-ahead beside the loop may already hold
+    // them (see `ContentPrefetcher`). A failure — a rate limit that outlasted its waits, a
+    // 5xx, a dropped connection — is a failed pull and is rethrown; only a `null` (the store
+    // holds nothing, or the bytes do not decrypt) is "nothing to apply".
+    const stored = await this.content.read(contentHash, plaintextSize);
     if (stored === null) return null;
     try {
       return await decryptCombinedBytes(this.opts.encryptionKey, stored);
@@ -3595,107 +3476,6 @@ export class SyncEngine {
       // Undecryptable: not a store a peer can use, and retrying cannot fix it.
       return null;
     }
-  }
-
-  /**
-   * One version's ciphertext: from the read-ahead when it holds it, otherwise the wave
-   * batch that a pass or a burst forms from the reads it is making right now.
-   *
-   * The two are interchangeable because they read the same route and answer the same
-   * "nothing to apply". A read-ahead whose request failed answers `failed`, which is a
-   * **miss**, not a missing blob: reading it again here is what keeps a dropped
-   * connection from looking like a reclaimed one.
-   */
-  private async readRemoteContent(
-    contentHash: string,
-    sizeBytes: number,
-  ): Promise<Uint8Array | null> {
-    const prefetched = this.prefetcher?.take(contentHash);
-    if (prefetched === undefined) return await this.fetchContentBatched(contentHash, sizeBytes);
-    const answer = await prefetched;
-    if (answer.kind === "content") return answer.bytes;
-    if (answer.kind === "missing") return null;
-    return await this.fetchContentBatched(contentHash, sizeBytes);
-  }
-
-  /**
-   * The ciphertext of `contentHash`, held for at most {@link CONTENT_BATCH_WINDOW_MS} to
-   * travel with the reads other files of the same pass or burst are making.
-   *
-   * A download used to be one content request per file, and that was the last per-file cost
-   * on the sync path (`docs/first-bind-performance.md`): a first bind of 50 000 files made
-   * 50 000 requests. The engine runs four per-file operations at a time, so a short window
-   * groups their reads into one request (the server answers several versions per route, see
-   * `buildContentBatchBody`), and a lone read still costs one request.
-   *
-   * `sizeBytes` is the version's plaintext size: the batch's byte budget is what bounds the
-   * memory a batch holds, and a file big enough to fill it travels alone.
-   */
-  private fetchContentBatched(contentHash: string, sizeBytes: number): Promise<Uint8Array | null> {
-    return new Promise((resolve, reject) => {
-      // The same content is often needed by more than one file (a copy, or two chains that
-      // converged): one entry in the request answers all of them.
-      const waiting = this.pendingContent.get(contentHash);
-      if (waiting !== undefined) {
-        waiting.push({ sizeBytes, resolve, reject });
-        return;
-      }
-      if (
-        this.contentBatchBytes > 0 &&
-        this.contentBatchBytes + sizeBytes > CONTENT_BATCH_MAX_BYTES
-      ) {
-        this.flushContentBatch();
-      }
-      this.pendingContent.set(contentHash, [{ sizeBytes, resolve, reject }]);
-      this.contentBatchBytes += sizeBytes;
-      // A full wave goes out at once: the pool's concurrency is how many per-file
-      // operations can be waiting for content, so that many entries is a batch that cannot
-      // grow — waiting for the timer would only add a turn to every wave.
-      // A batch never names more hashes than the route accepts, whatever the pool runs:
-      // `opLimits` is caller-settable, and a request the schema refuses would reject every
-      // waiter and fail the pass.
-      const batchFiles = Math.min(this.passLimits.maxConcurrent, MAX_CONTENT_BATCH_FILES);
-      if (this.pendingContent.size >= batchFiles) {
-        this.flushContentBatch();
-        return;
-      }
-      this.contentBatchTimer ??= this.opts.platform.after(CONTENT_BATCH_WINDOW_MS, () => {
-        this.contentBatchTimer = null;
-        this.flushContentBatch();
-      });
-    });
-  }
-
-  /** Send the held content reads as one request, and settle every waiter for each hash. */
-  private flushContentBatch(): void {
-    if (this.contentBatchTimer !== null) {
-      this.contentBatchTimer.cancel();
-      this.contentBatchTimer = null;
-    }
-    if (this.pendingContent.size === 0) return;
-    const hashes = [...this.pendingContent.keys()];
-    const waiting = this.pendingContent;
-    this.pendingContent = new Map();
-    this.contentBatchBytes = 0;
-    void this.sendContentBatch(hashes).then(
-      (results) => {
-        for (const [index, hash] of hashes.entries()) {
-          for (const waiter of waiting.get(hash) ?? []) waiter.resolve(results[index] ?? null);
-        }
-      },
-      (err: unknown) => {
-        for (const waiters of waiting.values()) for (const waiter of waiters) waiter.reject(err);
-      },
-    );
-  }
-
-  /** One content request, waiting out a limiter's window like every other bulk read. */
-  private async sendContentBatch(
-    contentHashes: readonly string[],
-  ): Promise<Array<Uint8Array | null>> {
-    return await this.withRateLimitWaits(() =>
-      this.opts.api.getVersionContents(this.opts.vaultId, [...contentHashes]),
-    );
   }
 
   /**
@@ -3862,7 +3642,7 @@ export class SyncEngine {
     plaintextSize: number,
   ): Promise<Uint8Array | null> {
     if (!shouldTransferInChunks(plaintextSize)) {
-      return this.fetchRemoteBytes(vaultId, contentHash, plaintextSize);
+      return this.fetchRemoteBytes(contentHash, plaintextSize);
     }
     const count = chunkCountForSize(plaintextSize);
     const plaintext = new Uint8Array(plaintextSize);
@@ -3946,8 +3726,8 @@ export class SyncEngine {
       this.remoteIndex.forget(fileId);
       // A settings file that disappeared is as much a change to what the app has
       // already read as one that arrived.
-      this.reportSettingsApplied(plainPath, "delete");
-      this.reportActivity({
+      this.activity.reportSettingsApplied(plainPath, "delete");
+      this.activity.reportActivity({
         direction: "in",
         outcome: "applied",
         fileId,
@@ -3990,8 +3770,8 @@ export class SyncEngine {
         // The bytes were already here, but a settings file the peer **moved** now sits
         // at a path the app has not read — the same reload as one that arrived.
         if (moved) {
-          this.reportSettingsApplied(target, "rename");
-          this.reportActivity({
+          this.activity.reportSettingsApplied(target, "rename");
+          this.activity.reportActivity({
             direction: "in",
             outcome: "applied",
             fileId,
@@ -4039,8 +3819,8 @@ export class SyncEngine {
     this.adoptRemoteIdentity(fileId, target, applied);
     this.rememberStamp(target, await this.opts.adapter.statFile(target));
     if (!alreadyHeld) {
-      this.reportSettingsApplied(target, moved ? "rename" : "write");
-      this.reportActivity({
+      this.activity.reportSettingsApplied(target, moved ? "rename" : "write");
+      this.activity.reportActivity({
         direction: "in",
         outcome: "applied",
         fileId,
@@ -4544,19 +4324,7 @@ export class SyncEngine {
             // just dropped again: `pushPrepared` owns both answers.
             await this.pushPrepared(prepared);
           } else if (kind === "delete") {
-            // A refused tombstone is a deletion that raced a peer's push; the remote side
-            // wins and — the local file being gone — its version simply comes back.
-            try {
-              await this.pushPrepared(prepared);
-            } catch (err) {
-              if (!(err instanceof SyncPushBaseError)) throw err;
-              await this.handleConflict(
-                prepared.fileId,
-                prepared.plainPath,
-                remoteHead(err.chain),
-                false,
-              );
-            }
+            await this.settleRefusedTombstone(prepared);
           } else if (kind === "rename") {
             // The move is already on disk, so a refused `rename` is decided again from the
             // chain the server showed us — the same answer the single event gives.
@@ -4620,7 +4388,6 @@ export class SyncEngine {
           return;
         }
         batch.push({ prepared, kind });
-        batchBytes = size;
         await sendBatch();
         return;
       }
@@ -5336,16 +5103,7 @@ export class SyncEngine {
       this.persist();
       return;
     }
-    try {
-      await this.pushPrepared(outcome.prepared);
-    } catch (err) {
-      if (!(err instanceof SyncPushBaseError)) throw err;
-      // A peer pushed after the point this delete was decided from, so the tombstone
-      // would have removed a version this device never saw: a **deletion that raced
-      // an edit**. The remote side wins, and — because the local file is already gone
-      // — there is nothing to park; the peer's version simply comes back.
-      await this.handleConflict(outcome.prepared.fileId, path, remoteHead(err.chain), false);
-    }
+    await this.settleRefusedTombstone(outcome.prepared);
     this.persist();
   }
 
@@ -5629,9 +5387,11 @@ export class SyncEngine {
     try {
       for (let start = 0; start < pending.length; start += MAX_PULL_BATCH_FILES) {
         const chunk = pending.slice(start, start + MAX_PULL_BATCH_FILES);
-        const response = await this.opts.api.pull(
-          this.opts.vaultId,
-          chunk.map((event) => event.fileId),
+        const response = await this.withRateLimitWaits(() =>
+          this.opts.api.pull(
+            this.opts.vaultId,
+            chunk.map((event) => event.fileId),
+          ),
         );
         const chains = new Map(response.files.map((file) => [file.fileId, file.versions]));
 
@@ -5760,7 +5520,7 @@ export class SyncEngine {
       // A version this device already holds is not a new decision; see the same guard in
       // `reconcile`, where a switch turned off after a sync must not rewrite history.
       if (!this.versionAlreadyApplied(fileId, head.versionId)) {
-        this.reportActivity({
+        this.activity.reportActivity({
           direction: "in",
           outcome: "skipped",
           fileId,

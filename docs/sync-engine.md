@@ -25,11 +25,15 @@ is the ownership rule), `conflict-file.ts` (naming the
 recovering the original path from it), `websocket.ts` (`SyncWebSocket` — user key + a self-declared device label as
 the subscribe payload), `host.ts` (`SyncHost` — the loop both hosts run), `self-events.ts`
 (`SelfEventLog` — the time-bounded records that let the engine recognise its own writes, deletes,
-moves and push echoes, on an injected clock) and `remote-index.ts` (`RemoteIndex` — the live path, head
-and content hash of every chain the server holds, which is what keeps one path on one chain). Engine
+moves and push echoes, on an injected clock), `remote-index.ts` (`RemoteIndex` — the live path, head
+and content hash of every chain the server holds, which is what keeps one path on one chain),
+`content-reader.ts` (`ContentReader` — every version's ciphertext, batched behind one seam: the
+read-ahead first, then the wave batch with its 8 MiB and 64-hash bounds) and `activity-reporter.ts`
+(`ActivityReporter` — the activity feed, the once-per-pass skip notices and the coarse progress
+counter, with the "a host listener must not fail the pass" rule in one place). Engine
 tests use mock adapters/APIs (`packages/engine/src/*.test.ts`).
 
-Three things `SyncEngine` composes rather than contains, so the 2 000-line orchestrator does not also
+Three things `SyncEngine` composes rather than contains, so the orchestrator does not also
 own them: **`SelfEventLog`** and **`RemoteIndex`** (above — the first's windows are testable by moving a
 fake clock, which used to mean freezing a global `Date`; the second is the identity index every rename,
 notification and incremental event asks), the **`ReconcilePass`** value object (the maps and sets one
