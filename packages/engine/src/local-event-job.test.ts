@@ -21,6 +21,8 @@ function version(fileId: string, size: number, overrides: Partial<JobVersion> = 
 
 interface JobOptions {
   push?: (batch: readonly JobVersion[]) => Promise<readonly JobPushResult[]>;
+  /** Settle a refusal differently (a throwing settle is one of the edges under test). */
+  refused?: (prepared: JobVersion, kind: PendingKind) => Promise<void>;
   maxFiles?: number;
   maxBytes?: number;
   lists?: Partial<LocalEventLists>;
@@ -42,6 +44,7 @@ function makeJob(options: JobOptions = {}) {
     },
     applied: (prepared) => applied.push(prepared.fileId),
     refused: async (prepared, kind) => {
+      if (options.refused) return await options.refused(prepared, kind);
       refused.push({ fileId: prepared.fileId, kind });
     },
     forget: (prepared) => forgotten.push(prepared.fileId),
@@ -224,5 +227,69 @@ describe("LocalEventJob — the change list", () => {
     job.noteChange("b.md");
     expect(job.changes).toEqual(["a.md", "b.md"]);
     expect(job.hasPendingChange("b.md")).toBe(true);
+  });
+});
+
+describe("LocalEventJob — edges of the limiter and a throwing refusal", () => {
+  const rateLimited = { status: 429 };
+
+  it("abandons a version over the byte bound when the flush before it hits the limiter", async () => {
+    const { job, pushed, forgotten } = makeJob({
+      maxBytes: 10,
+      push: async () => {
+        throw rateLimited;
+      },
+    });
+    await job.add(version("small", 6), "create");
+    // The big version cannot share a request, so it flushes first; that request is refused
+    // and the big one is dropped rather than paying another wait window.
+    await job.add(version("big", 11), "create");
+    expect(pushed).toEqual([["small"]]);
+    expect(forgotten).toEqual(["small", "big"]);
+    expect(job.rateLimited).toBe(true);
+  });
+
+  it("drops a batch that was still held when the limiter ran out", async () => {
+    const { job, pushed, forgotten } = makeJob({
+      push: async () => {
+        throw rateLimited;
+      },
+    });
+    await job.add(version("a", 1), "create");
+    await job.flush();
+    // `add` only abandons when it has to flush; a version with room joins the batch, and
+    // the next flush is what drops it without a request.
+    await job.add(version("b", 1), "create");
+    await job.flush();
+    expect(pushed).toEqual([["a"]]);
+    expect(forgotten).toEqual(["a", "b"]);
+  });
+
+  it("keeps the first failure when the refusal settlement itself throws", async () => {
+    const { job, applied } = makeJob({
+      push: async (batch) => batch.map(() => ({ status: "stale_base" })),
+      refused: async () => {
+        throw new Error("settle failed");
+      },
+    });
+    await job.add(version("a", 1), "tracked");
+    await expect(job.complete()).rejects.toThrow("settle failed");
+    expect(applied).toEqual([]);
+  });
+
+  it("does not touch the tombstones once the limiter has ended the job", async () => {
+    const { job, pushed } = makeJob({
+      push: async () => {
+        throw rateLimited;
+      },
+    });
+    await job.add(version("a", 1), "create");
+    await job.flush();
+    job.noteTombstone("t.md", version("t", 0, { content: null }), "ht");
+    await job.drainTombstones();
+    expect(pushed).toEqual([["a"]]);
+    // The tombstone is still held: the next event or pass decides it, not a refused request.
+    expect(job.tombstoneAt("t.md")).toBe("t");
+    await expect(job.complete()).rejects.toThrow("local event batch failed");
   });
 });

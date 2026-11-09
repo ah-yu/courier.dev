@@ -54,8 +54,9 @@ document describes carry the rest: **`ContentReader`** (a pull's bytes), **`Acti
 the host is told), **`ConflictResolver`** (the conflict rules), the **`pass-view.ts`** functions
 (ordering, path geometry, read-ahead candidates) and **`LocalEventJob`** (a burst's shared
 bookkeeping and batches). `packages/engine/src/`'s
-`decide.test.ts`, `self-events.test.ts`, `remote-index.test.ts`, `host.test.ts`,
-`local-event-job.test.ts` and `websocket.test.ts`
+`decide.test.ts`, `pass-view.test.ts`, `conflict.test.ts`, `content-reader.test.ts`,
+`activity-reporter.test.ts`, `local-event-job.test.ts`, `self-events.test.ts`,
+`remote-index.test.ts`, `host.test.ts` and `websocket.test.ts`
 are the L0 net for those — the last one with a fake global `WebSocket` and fake timers, because the
 L1/L2 suites run a real socket against a real server and therefore only ever exercise the happy path
 (a refused subscribe, the exponential retry, the 60-second quiet-socket close and a message that is not
