@@ -69,6 +69,40 @@ describe("ActivityReporter — once-per-pass notices", () => {
   });
 });
 
+describe("ActivityReporter — an oversized local file", () => {
+  it("reports the notice once per pass, and the activity row for every skipped decision", () => {
+    const onFileTooLarge = vi.fn<(event: FileTooLargeEvent) => void>();
+    const onSyncActivity = vi.fn<(event: SyncActivityEvent) => void>();
+    const reporter = makeReporter({ onFileTooLarge, onSyncActivity });
+
+    reporter.reportSkippedForSize("big.mp4", 12, "file-1");
+    reporter.reportSkippedForSize("big.mp4", 12, "file-1");
+
+    // The notice answers "tell the user once"; the feed records decisions, so two skips are
+    // two rows — the same rule every other `reportActivity` call site follows.
+    expect(onFileTooLarge).toHaveBeenCalledTimes(1);
+    expect(onSyncActivity).toHaveBeenCalledTimes(2);
+    expect(onSyncActivity).toHaveBeenCalledWith({
+      direction: "out",
+      outcome: "skipped",
+      fileId: "file-1",
+      versionId: null,
+      plainPath: "big.mp4",
+      action: null,
+      sizeBytes: 12,
+      deviceName: null,
+      reason: "size",
+    });
+
+    // A path this device has never tracked has no fileId yet.
+    reporter.reportSkippedForSize("new.mp4", 7, null);
+    expect(onFileTooLarge).toHaveBeenCalledTimes(2);
+    expect(onSyncActivity).toHaveBeenLastCalledWith(
+      expect.objectContaining({ fileId: null, plainPath: "new.mp4", sizeBytes: 7 }),
+    );
+  });
+});
+
 describe("ActivityReporter — settings applied", () => {
   it("reports the owning group of a settings path, and stays silent for a path no group owns", () => {
     const onSettingsApplied = vi.fn<(event: SettingsAppliedEvent) => void>();

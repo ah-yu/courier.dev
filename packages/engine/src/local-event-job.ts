@@ -1,24 +1,25 @@
-import { isRateLimitError } from "./rate-limit";
 import type { FileStamp } from "./adapter";
+import { PushBatch } from "./push-batch";
+import type { BatchPushResult, BatchVersion } from "./push-batch";
 
 /**
- * The state and the wire mechanics of one burst of local vault events.
+ * The shared state of one burst of local vault events.
  *
  * A bulk write — an agent, a script, a folder operation — reaches a host as one event per
  * file. Handled one at a time that is one push per file, which the sync route's per-vault
  * allowance refuses after about a minute; {@link LocalEventJob} is the object that lets
  * the burst be decided file by file but travel in batches of 100 (or 8 MiB). The phases
  * that *decide* stay in the engine, which is where the identity and tombstone rules live;
- * this object owns the shared bookkeeping they hand each other:
+ * this object owns the bookkeeping they hand each other:
  *
  * - the change list and the tracked files waiting for the job's one bulk chain read;
  * - the tombstones prepared but not queued yet, so a create that is the other half of a
  *   move can take one back before anything reaches the server;
- * - the versions prepared but not settled yet, so a throw anywhere in the job drops all
- *   of them instead of leaving pending state entries for the next pass to push one
- *   request per file;
- * - the batch itself, its bounds, and the settle/abandon rules for a whole-request
- *   failure and a limiter that outlasted its waits.
+ * - the pending-delete ledger, which a settled tombstone leaves.
+ *
+ * The batch itself — its bounds, the one-request window, the settle/abandon rules for a
+ * whole-request failure and a limiter that outlasted its waits — is {@link PushBatch}'s,
+ * shared with the pass's creates and tombstones.
  *
  * The engine supplies the semantic half through {@link LocalEventJobHost}; the job never
  * touches the adapter, the API or the state except through it.
@@ -49,15 +50,8 @@ export interface JobTrackedChange {
  */
 export type PendingKind = "create" | "tracked" | "delete" | "rename";
 
-/** The part of a prepared version this job moves around. */
-export interface JobVersion {
-  readonly fileId: string;
-  readonly plainPath: string;
-  readonly chunkCount: number;
-  readonly reusesStoredContent: boolean;
-  /** The ciphertext, filled in just before the request. */
-  content: Uint8Array | null;
-}
+/** The part of a prepared version this job moves around (see `PushBatch`). */
+export type JobVersion = BatchVersion;
 
 /** One prepared version waiting in the batch, and how its refusal is settled. */
 export interface JobEntry<T extends JobVersion> {
@@ -65,11 +59,8 @@ export interface JobEntry<T extends JobVersion> {
   kind: PendingKind;
 }
 
-/** One answer from the push route. */
-export interface JobPushResult {
-  status: string;
-  error?: string;
-}
+/** One answer from the push route (see `PushBatch`). */
+export type JobPushResult = BatchPushResult;
 
 /**
  * What the engine does for the job. Everything semantic — preparing a version, adopting
@@ -133,7 +124,6 @@ export class LocalEventJob<T extends JobVersion> implements TombstoneLedger {
   readonly tracked: JobTrackedChange[] = [];
 
   private readonly host: LocalEventJobHost<T>;
-  private readonly limits: LocalEventBatchLimits;
   private readonly deleted: readonly string[];
   private readonly renamed: ReadonlyArray<{ from: string; to: string }>;
   /** The paths already in {@link changes}, so a move is not decided twice. */
@@ -173,31 +163,49 @@ export class LocalEventJob<T extends JobVersion> implements TombstoneLedger {
    */
   private readonly pendingDeleteByPath = new Map<string, Tombstone<T>>();
   /**
-   * Versions prepared but not yet settled (applied or forgotten).
+   * The versions this job is sending: the batch's own window, with every answer settled
+   * through the host.
    *
    * Every entry has a pending state entry written before its request went out; a throw
-   * anywhere in the job has to drop them all, or the next pass pushes them one request
-   * per file — the regression `dropPendingCreate` exists to prevent.
+   * anywhere in the job has to drop the queued ones, or the next pass pushes them one
+   * request per file — the regression `dropPendingCreate` exists to prevent.
    */
-  private readonly preparedPending = new Set<T>();
-  private batch: JobEntry<T>[] = [];
-  private batchBytes = 0;
-  /** The limiter outlasted its waits: every further batch would be refused too. */
-  private rateLimitedOut = false;
-  /** The first failure of the job; the rest are dropped, and it is thrown at the end. */
-  private firstFailure: unknown = null;
+  private readonly batch: PushBatch<T, PendingKind>;
 
   constructor(host: LocalEventJobHost<T>, lists: LocalEventLists, limits: LocalEventBatchLimits) {
     this.host = host;
-    this.limits = limits;
     this.changes = [...lists.changed];
     this.pendingChanges = new Set(this.changes);
     this.deleted = lists.deleted;
     this.renamed = lists.renamed;
+    this.batch = new PushBatch<T, PendingKind>(
+      {
+        send: (prepared) => host.push(prepared),
+        contentFor: (prepared) => host.contentFor(prepared),
+        sendAlone: (prepared) => host.sendAlone(prepared),
+        applied: (prepared) => {
+          // A tombstone is settled by its answer: once it is applied or refused, the
+          // pending-delete ledger must not sweep it again (see `drainTombstones`).
+          this.pendingDeletes.delete(prepared.fileId);
+          host.applied(prepared);
+        },
+        refused: async (prepared, kind) => {
+          this.pendingDeletes.delete(prepared.fileId);
+          await host.refused(prepared, kind);
+          return null;
+        },
+        forget: (prepared) => {
+          this.pendingDeletes.delete(prepared.fileId);
+          host.forget(prepared);
+        },
+        settled: () => host.persist(),
+      },
+      limits,
+    );
   }
 
   get rateLimited(): boolean {
-    return this.rateLimitedOut;
+    return this.batch.rateLimited;
   }
 
   /** The deletions this burst covered, in arrival order. */
@@ -292,56 +300,15 @@ export class LocalEventJob<T extends JobVersion> implements TombstoneLedger {
     }
   }
 
-  /** Add one prepared version to the batch, or send it on its own when it cannot share. */
+  /**
+   * Add one prepared version to the batch, or send it on its own when it cannot share.
+   *
+   * The bounds, the one-request window and the abandon-on-throw rule live in
+   * {@link PushBatch}; this job keeps only what is a burst's own (the tombstones a move
+   * may take back, and the pending-delete ledger).
+   */
   async add(prepared: T, kind: PendingKind): Promise<void> {
-    // Track the version until it is settled: a throw between here and its answer (an
-    // encryption failure, a chunk upload, a chain read) must not leave its pending state
-    // entry behind — the next pass would push it one request per file.
-    this.preparedPending.add(prepared);
-    // Whatever has to travel on its own first can drain the limiter; a version that will
-    // be refused is dropped here rather than paying another wait window.
-    const abandon = (): void => {
-      this.host.forget(prepared);
-      this.preparedPending.delete(prepared);
-    };
-    if (prepared.chunkCount > 0) {
-      // A version above the chunking threshold stages its chunks through their own
-      // endpoints and then names the upload: it travels alone, after the batch.
-      await this.flush();
-      if (this.rateLimitedOut) {
-        abandon();
-        return;
-      }
-      await this.host.sendAlone(prepared);
-      this.preparedPending.delete(prepared);
-      return;
-    }
-    // A version the store already holds the bytes for — a move — sends no payload, so it
-    // never pays for the ciphertext either (the single-file path skips the same step).
-    if (!prepared.reusesStoredContent) prepared.content = await this.host.contentFor(prepared);
-    const size = prepared.content?.byteLength ?? 0;
-    if (size > this.limits.maxBytes) {
-      await this.flush();
-      if (this.rateLimitedOut) {
-        abandon();
-        return;
-      }
-      this.batch.push({ prepared, kind });
-      await this.flush();
-      return;
-    }
-    if (
-      this.batch.length >= this.limits.maxFiles ||
-      this.batchBytes + size > this.limits.maxBytes
-    ) {
-      await this.flush();
-      if (this.rateLimitedOut) {
-        abandon();
-        return;
-      }
-    }
-    this.batch.push({ prepared, kind });
-    this.batchBytes += size;
+    await this.batch.add(prepared, kind);
   }
 
   /**
@@ -354,64 +321,30 @@ export class LocalEventJob<T extends JobVersion> implements TombstoneLedger {
    * would drift.
    */
   async flush(): Promise<void> {
-    if (this.batch.length === 0) return;
-    if (this.rateLimitedOut) {
-      this.dropUnsent(this.batch);
-      this.batch = [];
-      this.batchBytes = 0;
-      return;
-    }
-    const sending = this.batch;
-    this.batch = [];
-    this.batchBytes = 0;
-    let results: readonly JobPushResult[];
-    try {
-      results = await this.host.push(sending.map(({ prepared }) => prepared));
-    } catch (err) {
-      this.dropUnsent(sending);
-      // A limiter that outlasted its waits ends the job: every further batch would be
-      // refused too, and the files are better left for the next event or pass.
-      if (isRateLimitError(err)) this.rateLimitedOut = true;
-      this.firstFailure ??= err;
-      return;
-    }
-    for (const [index, { prepared, kind }] of sending.entries()) {
-      // Settled either way: the version is answered, and its tombstone (if it was one)
-      // must not be swept by a later throw in this job.
-      this.pendingDeletes.delete(prepared.fileId);
-      if (results[index]?.status === "ok") {
-        this.host.applied(prepared);
-        this.preparedPending.delete(prepared);
-        continue;
-      }
-      this.host.forget(prepared);
-      this.preparedPending.delete(prepared);
-      try {
-        await this.host.refused(prepared, kind);
-      } catch (err) {
-        this.firstFailure ??= err;
-      }
-    }
-    this.host.persist();
+    await this.batch.drain();
   }
 
   /** Send the tombstones no move consumed, in the order the deletions arrived. */
   async drainTombstones(): Promise<void> {
-    for (const entry of this.pendingDeletes.values()) {
-      if (this.rateLimitedOut) break;
+    // A snapshot: sending one settles its entry (the batch's `settled`/`forget` callbacks
+    // remove it from the ledger), and the loop must still visit every tombstone it started
+    // with.
+    for (const entry of Array.from(this.pendingDeletes.values())) {
+      if (this.rateLimited) break;
       await this.add(entry.prepared, entry.kind);
     }
   }
 
   /** Flush the last batch and surface the job's first failure, if it has one. */
   async complete(): Promise<void> {
-    await this.flush();
-    if (this.firstFailure !== null) {
+    await this.batch.drain();
+    const failure = this.batch.failure;
+    if (failure !== null) {
       // A host's failure path reads the error's status/code (a dead credential stops it),
       // so a rare non-Error throw is wrapped rather than stringified.
-      throw this.firstFailure instanceof Error
-        ? this.firstFailure
-        : new Error("local event batch failed", { cause: this.firstFailure });
+      throw failure instanceof Error
+        ? failure
+        : new Error("local event batch failed", { cause: failure });
     }
   }
 
@@ -422,22 +355,12 @@ export class LocalEventJob<T extends JobVersion> implements TombstoneLedger {
    * pass that finds them would push them one request per file.
    */
   abandon(): void {
-    for (const prepared of this.preparedPending) this.host.forget(prepared);
+    this.batch.abandon();
     for (const { prepared } of this.pendingDeletes.values()) this.host.forget(prepared);
   }
 
   /** Record a failure a phase met; the first one is thrown by {@link complete}. */
   recordFailure(err: unknown): void {
-    if (isRateLimitError(err)) this.rateLimitedOut = true;
-    this.firstFailure ??= err;
-  }
-
-  /** Forget versions that will never be sent: echo records, pending entries, tombstones. */
-  private dropUnsent(entries: readonly JobEntry<T>[]): void {
-    for (const { prepared } of entries) {
-      this.host.forget(prepared);
-      this.preparedPending.delete(prepared);
-      this.pendingDeletes.delete(prepared.fileId);
-    }
+    this.batch.recordFailure(err);
   }
 }
