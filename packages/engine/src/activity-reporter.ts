@@ -26,8 +26,13 @@ export interface ActivityReporterOptions {
  *
  * It is separate from the decision code because none of it decides anything: the feed is a
  * UI convenience, and the "once per pass" bookkeeping (which paths were already reported) is
- * state that a pass owns, not state a chain owns. A listener that throws must never fail the
- * sync that reported it — that rule lives here once, for all five callbacks.
+ * state that a pass owns, not state a chain owns.
+ *
+ * Two of the five callbacks are isolated, because they are pure convenience and a host bug
+ * must not cost a sync: `onSyncActivity` and `onProgress` swallow a throwing listener (and
+ * log the first). The three notices — `onFileTooLarge`, `onFileSkipped`, `onSettingsApplied` —
+ * are called directly, so a host that throws there fails the pass exactly as it did before
+ * this class existed; changing that would be a host-contract change, not a refactor.
  */
 export class ActivityReporter {
   /** Paths reported through `onFileTooLarge` in the current pass (one event each). */

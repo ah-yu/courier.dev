@@ -54,7 +54,9 @@ export interface ContentReaderOptions {
 }
 
 /**
- * The ciphertext of every version a pass or a notification burst pulls, read in batches.
+ * The ciphertext of every whole-file version a pass or a notification burst pulls, read in
+ * batches. A version above the chunking threshold never reaches this class: it travels
+ * through the ranged path (`fetchRemoteChunk`), and the read-ahead refuses it as a candidate.
  *
  * A download used to be one content request per file, and that was the last per-file cost on
  * the sync path (`docs/first-bind-performance.md`): a first bind of 50 000 files made 50 000

@@ -24,17 +24,17 @@ import {
 } from "./crypto";
 import { chunkBounds, chunkCountForSize, shouldTransferInChunks } from "./chunked-transfer";
 import { ActivityReporter } from "./activity-reporter";
+import { ConflictResolver } from "./conflict";
 import { ContentReader } from "./content-reader";
 import type { Platform } from "./platform";
 import { generateFileId, generateVersionId } from "./ids";
-import { isConflictFile, conflictFilePath } from "./conflict-file";
+import { isConflictFile } from "./conflict-file";
 import { historyKindFor } from "./file-types";
 import {
   isConfigPath,
   isSyncablePath,
   normalizeScope,
   outOfScopeReason,
-  settingsGroupOf,
   syncsAnySettings,
   withinFileSizeCap,
   type SettingsGroup,
@@ -57,15 +57,16 @@ import {
   normalizePrefetchLimits,
   type ContentPrefetchLimits,
   type ContentPrefetchStats,
-  type PrefetchCandidate,
 } from "./content-prefetch";
-import { normalizePriorityPaths, orderByPriority, priorityRanks } from "./priority";
 import {
-  DEFAULT_OP_QUEUE_LIMITS,
-  weightForSize,
-  type OpQueueLimits,
-  type OpWeight,
-} from "./op-queue";
+  chainPaths,
+  orderedFileIds,
+  prefetchCandidatesForBurst,
+  prefetchCandidatesForPass,
+  weightOfFile,
+} from "./pass-view";
+import { normalizePriorityPaths, orderByPriority, priorityRanks } from "./priority";
+import { DEFAULT_OP_QUEUE_LIMITS, weightForSize, type OpQueueLimits } from "./op-queue";
 import { WorkPool } from "./work-pool";
 import { PathQueue } from "./path-queue";
 import { MAX_RATE_LIMIT_WAITS, isRateLimitError, rateLimitWaitMs, sleep } from "./rate-limit";
@@ -80,7 +81,7 @@ import type { FileStamp } from "./adapter";
  *
  * A conflict inside Obsidian's config folder is deliberately not one of these: it is
  * settled by last modification time, silently, because a copy parked there is invisible
- * to the app (see `handleConflict`).
+ * to the app (see `ConflictResolver`).
  */
 export interface ConflictResolvedEvent {
   fileId: string;
@@ -683,6 +684,8 @@ export class SyncEngine {
   private readonly content: ContentReader;
   /** What this pass tells the host: the activity feed, the skip notices and the progress. */
   private readonly activity: ActivityReporter;
+  /** How a conflict is settled: remote wins, the local side parked beside it. */
+  private readonly conflicts: ConflictResolver;
 
   constructor(private opts: EngineOptions) {
     this.scope = normalizeScope(opts.syncScope);
@@ -710,6 +713,17 @@ export class SyncEngine {
       onSettingsApplied: opts.onSettingsApplied,
       onSyncActivity: opts.onSyncActivity,
       onProgress: opts.onProgress,
+    });
+    this.conflicts = new ConflictResolver({
+      scope: this.scope,
+      adapter: opts.adapter,
+      onConflictResolved: opts.onConflictResolved,
+      applyRemote: (fileId, plainPath, head, localContentHash, deviceName) =>
+        this.pullRemote(fileId, plainPath, head, localContentHash, deviceName),
+      push: (request) => this.pushFile(request),
+      withinSizeCap: (path) => this.withinLocalSizeCap(path),
+      readLocal: (path) => this.readWithStamp(path),
+      refusalChain: (err) => (err instanceof SyncPushBaseError ? err.chain : null),
     });
   }
 
@@ -1688,7 +1702,7 @@ export class SyncEngine {
   ): Promise<void> {
     // One pass at a time. A call while a pass is in flight joins it (a bind only joins a
     // bind; a bind requested while a plain pass runs waits for it and then binds), so a
-    // second pass can never overwrite `firstBind`/`tombstoneMerge`, the remote index or
+    // second pass can never overwrite the bind rule (`tombstoneMerge`), the remote index or
     // the create batch of the pass already running. The bind's merge rule is what keeps
     // a connect from deleting notes the server already deleted.
     while (this.passPromise !== null) {
@@ -1994,7 +2008,7 @@ export class SyncEngine {
    *
    * The pool bounds how many per-file operations are in flight (one large file at a
    * time); each one is a different fileId, so the state they mutate is disjoint. The
-   * ordering is the user's paths first (see `orderFileIds`), not the server's answer
+   * ordering is the user's paths first (see `orderedFileIds`), not the server's answer
    * order. Two different chains can still name one path while a peer's move is in flight,
    * so the tasks that may write the same path take turns through the engine's path queue;
    * everything else runs concurrently.
@@ -2004,8 +2018,8 @@ export class SyncEngine {
    */
   private async reconcileLoop(pass: ReconcilePass): Promise<unknown> {
     // The set answers "which files does this pass consider"; the array is what gives
-    // the user's own files a head start (see `orderFileIds`).
-    const ordered = this.orderFileIds([...pass.fileIds], pass);
+    // the user's own files a head start (see `orderedFileIds`).
+    const ordered = orderedFileIds([...pass.fileIds], pass, this.state);
     // Progress starts from the chains this pass already knows about; the creates add
     // themselves as the vault is walked (see `createUntrackedFiles`).
     this.activity.beginProgress(ordered.length);
@@ -2030,8 +2044,8 @@ export class SyncEngine {
     // is what the queue serialises.
     await Promise.all(
       ordered.map((fileId) =>
-        pool.run(this.weightForFile(fileId, pass), async () => {
-          const claim = this.resolvePaths(fileId, pass).claimed;
+        pool.run(weightOfFile(fileId, pass, this.state, this.passLimits), async () => {
+          const claim = chainPaths(fileId, pass, this.state).claimed;
           try {
             const failure = await this.paths.run(
               claim,
@@ -2104,23 +2118,18 @@ export class SyncEngine {
    * content this device holds would leave exactly the pulls that matter — a peer's revert,
    * a conflict resolved in the remote's favour — outside the read-ahead.
    *
-   * The order is the loop's own (`orderFileIds`), so the files it touches first are the
+   * The order is the loop's own (`orderedFileIds`), so the files it touches first are the
    * ones whose bytes go on the wire first; a read-ahead in server order would spend its
    * requests on the files the user is not looking at.
    */
   private prefetchForPass(pass: ReconcilePass, ordered: readonly string[]): void {
     if (this.prefetcher === null) return;
-    const held = new Set<string>(pass.localHashes.values());
-    const candidates: PrefetchCandidate[] = [];
-    for (const fileId of ordered) {
-      const head = remoteHead(pass.chainByFileId.get(fileId) ?? []);
-      if (!head || head.action === "delete") continue;
-      if (held.has(head.contentHash)) continue;
-      const { plainPath } = this.resolvePaths(fileId, pass);
-      if (plainPath === null || !this.isSyncable(plainPath)) continue;
-      candidates.push({ contentHash: head.contentHash, sizeBytes: head.sizeBytes });
-    }
-    this.prefetcher.request(candidates, "pass");
+    this.prefetcher.request(
+      prefetchCandidatesForPass(ordered, pass, this.state, pass.localHashes, (path) =>
+        this.isSyncable(path),
+      ),
+      "pass",
+    );
   }
 
   /**
@@ -2136,22 +2145,14 @@ export class SyncEngine {
    * this device does not sync.
    */
   private prefetchPushedChains(
-    chains: ReadonlyMap<string, VersionChainEntry[]>,
-    headPaths: ReadonlyMap<string, string | null>,
+    chains: ReadonlyMap<string, readonly VersionChainEntry[]>,
+    applyPaths: ReadonlyMap<string, string | null>,
   ): void {
     if (this.prefetcher === null) return;
-    const candidates: PrefetchCandidate[] = [];
-    for (const [fileId, chain] of chains) {
-      const head = remoteHead(chain);
-      if (!head || head.action === "delete") continue;
-      // The head being this device's own sync point is the one case that cannot pull —
-      // not the recorded content hash, which a peer can revert to with a newer version.
-      if (this.state[fileId]?.lastKnownVersionId === head.versionId) continue;
-      const path = headPaths.get(fileId) ?? null;
-      if (path === null || !this.isSyncable(path)) continue;
-      candidates.push({ contentHash: head.contentHash, sizeBytes: head.sizeBytes });
-    }
-    this.prefetcher.request(candidates, "burst");
+    this.prefetcher.request(
+      prefetchCandidatesForBurst(chains, applyPaths, this.state, (path) => this.isSyncable(path)),
+      "burst",
+    );
   }
 
   /**
@@ -2308,7 +2309,7 @@ export class SyncEngine {
     // device has the file at — see the `synced` branch below. A chain the server
     // holds no path for falls back to whatever this device knows, which is also
     // what keeps the comparison below from firing on a missing path.
-    const { plainPath, recordedPath } = this.resolvePaths(fileId, pass);
+    const { plainPath, recordedPath } = chainPaths(fileId, pass, this.state);
 
     // A chain this device does not sync — settings files while the switch is
     // off, or a hard-excluded path — is left completely alone: not pulled, not
@@ -2622,104 +2623,11 @@ export class SyncEngine {
         // A `false` answer (the remote side could not be applied) is tolerated here for the
         // same reason the `pull` case above tolerates it: a pass is the retry, and the next
         // one decides again from the same bytes.
-        await this.handleConflict(fileId, plainPath, head, localExists);
+        await this.conflicts.resolve(fileId, plainPath, head, localExists);
         break;
       }
     }
     return failure;
-  }
-
-  /**
-   * The order the pass works through its files.
-   *
-   * Two cheap signals decide it, and both already exist: the host states the paths the
-   * user has open (its `getPriorityPaths`), and the state records the stamp of the bytes
-   * this device last synced, so the files edited most recently float up even when a host
-   * states nothing. A chain is ranked by the **better** of the path the server records
-   * and the path the local file has, because those two disagree for exactly as long as a
-   * rename is in flight — and in that window the local path is the one on screen.
-   *
-   * A tracked chain goes before a remote-only one at the same rank (see
-   * `PrioritizedEntry.locallyTracked`): while a peer's move is in flight, the chain whose
-   * file is on disk has to settle the path before the remote-only chain reads it.
-   */
-  private orderFileIds(fileIds: readonly string[], pass: ReconcilePass): string[] {
-    return orderByPriority(
-      fileIds.map((fileId, position) => {
-        const { plainPath, recordedPath } = this.resolvePaths(fileId, pass);
-        // The local file's **current** stamp is the recency signal for a file the user
-        // edits; a remote-only chain has none, so its head's recorded mtime stands in.
-        // The file can sit at the recorded path when the vault applied a peer's move
-        // before the engine processed it, so look for the stamp on either path.
-        const stampPath = this.localStampPath(plainPath, recordedPath, pass);
-        const localMtime =
-          stampPath === null ? undefined : pass.localStamps.get(stampPath)?.mtimeMs;
-        const head = remoteHead(pass.chainByFileId.get(fileId) ?? []);
-        return {
-          key: fileId,
-          paths: [recordedPath, plainPath],
-          mtimeMs: localMtime ?? head?.mtimeMs ?? this.state[fileId]?.stamp?.mtimeMs ?? 0,
-          locallyTracked: this.state[fileId] !== undefined,
-          position,
-        };
-      }),
-      pass.priority,
-    );
-  }
-
-  /**
-   * Where a chain lives on this device and where the server records it.
-   *
-   * The two disagree for exactly as long as a peer's move is in flight: the server
-   * records the new path, while the file — and this device's identity mapping — is still
-   * at the old one. `plainPath` is where a task reads and writes; `recordedPath` is what
-   * a pull may move the file to. `claimed` is the union, which is what two tasks with an
-   * overlapping path claim (the engine's path queue).
-   */
-  private resolvePaths(
-    fileId: string,
-    pass: ReconcilePass,
-  ): { plainPath: string | null; recordedPath: string | null; claimed: string[] } {
-    const entry = this.state[fileId];
-    const recordedPath = pass.remote.pathOf(fileId) ?? entry?.plainPath ?? null;
-    const plainPath = entry?.plainPath ?? recordedPath;
-    const claimed: string[] = [];
-    if (plainPath !== null) claimed.push(plainPath);
-    if (recordedPath !== null && recordedPath !== plainPath) claimed.push(recordedPath);
-    return { plainPath, recordedPath, claimed };
-  }
-
-  /**
-   * The path this pass actually holds bytes at, for its stamp and size.
-   *
-   * The state path is preferred, but the vault may already have applied a peer's move:
-   * `plainPath` is then stale and the file sits at `recordedPath`. Only a path this pass
-   * listed has a stamp, so the answer is whichever of the two it recorded.
-   */
-  private localStampPath(
-    plainPath: string | null,
-    recordedPath: string | null,
-    pass: ReconcilePass,
-  ): string | null {
-    if (plainPath !== null && pass.localStamps.has(plainPath)) return plainPath;
-    if (recordedPath !== null && pass.localStamps.has(recordedPath)) return recordedPath;
-    return null;
-  }
-
-  /**
-   * How much memory one file's operation can hold at once.
-   *
-   * A pull carries a peer's version; a push/rename carries the local bytes. The larger
-   * of the two decides whether the file may share the pool with others, so a bind never
-   * holds several large payloads at once — the same rule the host's `OpQueue` applies to
-   * event-driven work.
-   */
-  private weightForFile(fileId: string, pass: ReconcilePass): OpWeight {
-    const { plainPath, recordedPath } = this.resolvePaths(fileId, pass);
-    const stampPath = this.localStampPath(plainPath, recordedPath, pass);
-    const localSize = stampPath === null ? 0 : (pass.localStamps.get(stampPath)?.sizeBytes ?? 0);
-    const head = remoteHead(pass.chainByFileId.get(fileId) ?? []);
-    return weightForSize(this.passLimits, Math.max(head?.sizeBytes ?? 0, localSize));
   }
 
   /**
@@ -3101,7 +3009,7 @@ export class SyncEngine {
             // The tombstone lost a race with a peer's edit: the remote side wins and there
             // is nothing local to park — the single-file path's answer, applied here too.
             try {
-              const applied = await this.handleConflict(
+              const applied = await this.conflicts.resolve(
                 prepared.fileId,
                 prepared.plainPath,
                 remoteHead(err.chain),
@@ -3229,7 +3137,12 @@ export class SyncEngine {
       await this.pushPrepared(prepared);
     } catch (err) {
       if (!(err instanceof SyncPushBaseError)) throw err;
-      await this.handleConflict(prepared.fileId, prepared.plainPath, remoteHead(err.chain), false);
+      await this.conflicts.resolve(
+        prepared.fileId,
+        prepared.plainPath,
+        remoteHead(err.chain),
+        false,
+      );
     }
   }
 
@@ -3266,181 +3179,6 @@ export class SyncEngine {
           // out rather than retrying for a pass nobody is waiting for.
           throw err;
         }
-      }
-    }
-  }
-
-  /**
-   * Resolve a conflict. There are two rules, decided by the path.
-   *
-   * **A config-folder path** (`settingsGroupOf` answers a group) resolves by **last
-   * modification time** and reports nothing: a conflict copy parked in `.obsidian/` is
-   * invisible to Obsidian's file explorer, so there is no way for the user to see or
-   * act on it. The newer side wins — the local file is pushed over the head when it is
-   * newer, the remote head is applied when it is not — and no `onConflictResolved`
-   * event is raised, because nothing the host could say would be actionable.
-   *
-   * **Everywhere else** the remote head wins, and the local content — when there is
-   * any — is parked beside the file as a conflict copy so nothing the user wrote is
-   * thrown away.
-   *
-   * The remote side is applied with {@link pullRemote}, which already knows both
-   * shapes: a live head is written at the path that version records (following a
-   * peer's move), and a `delete` head removes the local file. A local side that no
-   * longer exists — this device deleted the file and a peer edited it — has nothing
-   * to park; the file simply comes back.
-   *
-   * `plainPath` is where the local side lived; that is the path the conflict file is
-   * named after, even when the remote head records a different one.
-   */
-  private async handleConflict(
-    fileId: string,
-    plainPath: string | null,
-    head: VersionChainEntry | undefined,
-    localExists: boolean,
-    deviceName: string | null = null,
-  ): Promise<boolean> {
-    const { adapter } = this.opts;
-    if (!head) return true;
-    if (!plainPath) return true;
-
-    // Ownership is the test, not "is inside the config folder": it answers null for a
-    // path nothing may sync, and a path in a group this device has off never reaches a
-    // conflict at all (the scope guard drops it upstream).
-    if (settingsGroupOf(plainPath, this.scope) !== null) {
-      return await this.resolveSettingsConflict(fileId, plainPath, head, localExists, deviceName);
-    }
-
-    // The local bytes are read **before** the remote side is applied — that write (or
-    // deletion) is what would otherwise destroy the only copy of them — but the copy is
-    // parked, and the conflict announced, only once the remote head is really in place. It
-    // used to be the other way round, which meant a conflict whose content could not be read
-    // (a missing or truncated blob, a request that failed) was reported as "the remote
-    // version won, your copy is at …" while the note still held the local text — and, since
-    // the same decision came up from the same bytes, it parked one more copy on every pass.
-    const localBytes = localExists ? await adapter.readFile(plainPath) : null;
-    if (localExists && !localBytes) return true;
-
-    const applied = await this.pullRemote(fileId, plainPath, head, null, deviceName);
-    if (!applied) return false;
-
-    const conflictPath =
-      localBytes === null ? null : await this.parkConflictFile(plainPath, localBytes);
-    this.opts.onConflictResolved?.({
-      fileId,
-      plainPath,
-      conflictPath,
-      remoteAction: head.action === "delete" ? "delete" : "write",
-    });
-    return true;
-  }
-
-  /**
-   * Settle a config-folder conflict by **last modification time**, with no copy and no
-   * event.
-   *
-   * The local file's stamp is compared with the head's `mtimeMs` — the modification time
-   * the pushing device recorded — so the answer is "who changed it last", not "who
-   * pushed last". That is what makes an edit made offline win over a peer's later push
-   * when it really was the later edit. A tie, a missing stamp or an unreadable file
-   * resolves to the remote head: both devices apply the same rule, so a tie converges
-   * instead of letting them push past each other.
-   *
-   * A local side that no longer exists — this device deleted the file and a peer edited
-   * it — has nothing to compare or keep, so the remote head is applied. A deletion this
-   * device never pushed carries no timestamp to argue with.
-   *
-   * The local-won branch is a normal conditional push (`baseVersionId` = the head). It
-   * pushes at **the path the local file actually has**, not at the path the head records:
-   * a version names the path its bytes live at, and writing one for a path whose file
-   * sits somewhere else is how one chain ends up claiming two paths. A peer that moved
-   * the file while this device edited it therefore follows the win back to this path —
-   * the same "the winning side's content, at the winning side's path" the vault-file rule
-   * gives when the remote side wins.
-   *
-   * A refusal is answered by deciding again from the chain the server just showed us.
-   * A second refusal is contention, not failure — nothing was written and nothing was
-   * lost — so it is answered `true` and left to the next pass, which the settings poll
-   * runs every second. Answering `false` there would make a notification report a failed
-   * conflict for a race the engine simply lost twice.
-   */
-  private async resolveSettingsConflict(
-    fileId: string,
-    plainPath: string,
-    head: VersionChainEntry,
-    localExists: boolean,
-    deviceName: string | null = null,
-  ): Promise<boolean> {
-    if (!localExists) return await this.pullRemote(fileId, plainPath, head, null, deviceName);
-
-    let currentHead = head;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      // The local half of the size cap, asked **before** the read and for the same
-      // reason as everywhere else: the engine hashes and encrypts the whole file in
-      // memory. A file that grew past the cap between the listing and this conflict is
-      // skipped and reported, exactly like one the list already filtered out.
-      if (!(await this.withinLocalSizeCap(plainPath))) {
-        // `false` is "too large" (reported) or "vanished since the listing", and the
-        // next pass decides the latter.
-        return true;
-      }
-      const read = await this.readWithStamp(plainPath);
-      // The file vanished between the size check and here: the next pass decides.
-      if (!read) return true;
-      const { bytes, stamp } = read;
-      // A missing stamp is treated as "no usable modification time", which loses to any
-      // real remote version — the same answer a tie gets.
-      const localMtimeMs = Math.max(0, Math.floor(stamp?.mtimeMs ?? 0));
-      if (localMtimeMs <= currentHead.mtimeMs) {
-        // No content hash is offered: the losing side's bytes differ from the head's by
-        // definition, so `pullRemote`'s "this device already holds them" shortcut cannot
-        // apply. It has to write the winner's bytes over them.
-        return await this.pullRemote(fileId, plainPath, currentHead, null, deviceName);
-      }
-      try {
-        await this.pushFile({
-          fileId,
-          plainPath,
-          // A live head is modified; a tombstone means the file is being brought back,
-          // which is a `restore` on the same chain (the recycle bin's own action).
-          action: currentHead.action === "delete" ? "restore" : "modify",
-          bytes,
-          baseVersionId: currentHead.versionId,
-          stamp,
-        });
-        return true;
-      } catch (err) {
-        // Anything but a refusal means the push could not be made at all (the file could
-        // not be read, the network is down): the callers report that instead of assuming
-        // the conflict was settled.
-        if (!(err instanceof SyncPushBaseError)) return false;
-        // A second refusal: a third party keeps pushing. Nothing was written, so this is
-        // not a failure — the next pass decides again from the newer chain.
-        if (attempt === 1) return true;
-        const fresh = remoteHead(err.chain);
-        if (!fresh) return true;
-        currentHead = fresh;
-      }
-    }
-    return true;
-  }
-
-  /**
-   * Write the local side of a conflict beside the original and return where it landed.
-   *
-   * The name is `{stem}-{YYYY-MM-DD-HHmmss}.conflict{ext}` — the extension the original
-   * has, because the copy has to open in the app that owns it — with a counter when that
-   * name is already taken: two copies parked inside the same second must not overwrite
-   * each other. The timestamp is taken once, so every candidate this call tries names the
-   * same instant.
-   */
-  private async parkConflictFile(plainPath: string, bytes: Uint8Array): Promise<string> {
-    const now = new Date();
-    for (let index = 1; ; index++) {
-      const candidate = conflictFilePath(plainPath, now, index);
-      if ((await this.opts.adapter.statFile(candidate)) === null) {
-        await this.opts.adapter.writeFile(candidate, bytes);
-        return candidate;
       }
     }
   }
@@ -4466,7 +4204,7 @@ export class SyncEngine {
                 if (head && localHash !== null && localHash === head.contentHash) {
                   this.adoptRemoteIdentity(replaced, pair.to, head, null);
                 } else {
-                  const applied = await this.handleConflict(replaced, pair.to, head, true);
+                  const applied = await this.conflicts.resolve(replaced, pair.to, head, true);
                   // A peer version that cannot be applied is a failed push, not a settled
                   // one: the pass is the retry (the same rule the delete refusal follows).
                   if (!applied) firstFailure ??= err;
@@ -4813,7 +4551,7 @@ export class SyncEngine {
         return prepared === null ? { kind: "handled" } : { kind: "rename", prepared };
       }
       const chain = await this.pullChain(remote.fileId);
-      await this.handleConflict(remote.fileId, path, remoteHead(chain), true);
+      await this.conflicts.resolve(remote.fileId, path, remoteHead(chain), true);
       return { kind: "handled" };
     }
 
@@ -4954,7 +4692,7 @@ export class SyncEngine {
       // The recreated bytes are already the owner's version: adopt it, no conflict.
       this.adoptRemoteIdentity(other.fileId, path, other.head, stamp);
     } else {
-      const applied = await this.handleConflict(other.fileId, path, other.head, true);
+      const applied = await this.conflicts.resolve(other.fileId, path, other.head, true);
       if (!applied) return false;
     }
     if (this.state[fileId]?.plainPath === path) {
@@ -5081,7 +4819,7 @@ export class SyncEngine {
         this.adoptRemoteIdentity(fileId, path, head, stamp);
       }
     } else if (decision.action === "conflict") {
-      await this.handleConflict(fileId, path, head, true);
+      await this.conflicts.resolve(fileId, path, head, true);
     } else if (decision.action === "pull" && head) {
       await this.pullRemote(fileId, path, head, hash);
     }
@@ -5407,7 +5145,7 @@ export class SyncEngine {
         // it twice made every tracked-file burst — every delete, every edit — look like a
         // shared path and fall back to the serial apply.
         const seenPaths = new Set<string>();
-        const headPaths = new Map<string, string | null>();
+        const applyPaths = new Map<string, string | null>();
         let sharesPath = false;
         for (const event of chunk) {
           const head = remoteHead(chains.get(event.fileId) ?? []);
@@ -5415,7 +5153,7 @@ export class SyncEngine {
           // The path the apply will decide on (`applyPushedChainLocked` prefers the state's
           // own path over the head's), kept for the read-ahead: a chain outside this
           // device's scope is never applied, and the prefetch must not read it either.
-          headPaths.set(event.fileId, this.state[event.fileId]?.plainPath ?? headPath);
+          applyPaths.set(event.fileId, this.state[event.fileId]?.plainPath ?? headPath);
           for (const path of new Set([headPath, this.state[event.fileId]?.plainPath ?? null])) {
             if (path === null) continue;
             if (seenPaths.has(path)) sharesPath = true;
@@ -5425,7 +5163,7 @@ export class SyncEngine {
 
         // The burst's read-ahead starts before the first file is applied: the apply loop
         // runs four at a time, and these are the bytes all of them are about to pull.
-        this.prefetchPushedChains(chains, headPaths);
+        this.prefetchPushedChains(chains, applyPaths);
 
         const failures: unknown[] = [];
         const applyOne = async (event: PushedFileEvent): Promise<void> => {
@@ -5596,7 +5334,7 @@ export class SyncEngine {
       // pull above, a resolution that could not be carried out is not a no-op — this was the
       // only thing that would have applied it now, and the user must not be told a conflict
       // was resolved when the note still holds their text.
-      const applied = await this.handleConflict(
+      const applied = await this.conflicts.resolve(
         fileId,
         plainPath,
         head,
@@ -5652,7 +5390,9 @@ export class SyncEngine {
   }
 
   private async pullChain(fileId: string): Promise<VersionChainEntry[]> {
-    const res = await this.opts.api.pull(this.opts.vaultId, [fileId]);
+    const res = await this.withRateLimitWaits(() =>
+      this.opts.api.pull(this.opts.vaultId, [fileId]),
+    );
     return res.files.find((f) => f.fileId === fileId)?.versions ?? [];
   }
 }

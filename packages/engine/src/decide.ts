@@ -127,7 +127,7 @@ export function decideInputFrom(context: DecideContext): DecideInput {
   };
 }
 
-export function remoteHead(chain: VersionChainEntry[]): VersionChainEntry | undefined {
+export function remoteHead(chain: readonly VersionChainEntry[]): VersionChainEntry | undefined {
   return chain.length > 0 ? chain[chain.length - 1] : undefined;
 }
 

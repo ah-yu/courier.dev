@@ -9,7 +9,7 @@
  *
  * A path inside Obsidian's config folder is the exception: a copy parked there is
  * outside the vault index, so nobody could see or act on it. Those conflicts are
- * settled by last modification time and park nothing (`handleConflict`).
+ * settled by last modification time and park nothing (`ConflictResolver`).
  *
  * Those files are never synced. They are the local audit trail of a conflict —
  * letting them travel would let one conflict produce another on the peer.

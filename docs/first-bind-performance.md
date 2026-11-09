@@ -341,7 +341,7 @@ had to carry more files than the pool has slots.
 
 **What was built: a read-ahead beside the pass, not a wider pool.** `ContentPrefetcher`
 (`packages/engine/src/content-prefetch.ts`) is fed the versions a pass or a notification burst is about
-to pull, and reads them ahead in wide batches. The per-file loop asks it first (`readRemoteContent`) and
+to pull, and reads them ahead in wide batches. The per-file loop asks it first (`ContentReader.read`) and
 falls back to the wave batch it always had.
 
 - **Only the content pipeline is widened.** `WorkPool`/`OpQueue` concurrency stays at four: it also runs

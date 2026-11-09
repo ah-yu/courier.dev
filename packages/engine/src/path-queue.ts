@@ -12,7 +12,7 @@
  * holds a path while waiting for another — so two multi-path jobs cannot form a cycle.
  *
  * A job must not call {@link run} for a path it already holds: it would wait for itself.
- * The engine's inner work (`pullRemote`, `handleConflict`, `pushFile`) is called directly
+ * The engine's inner work (`pullRemote`, `conflicts.resolve`, `pushFile`) is called directly
  * from inside the job for that reason.
  */
 export type PathJobOrigin = "event" | "pass" | "batch";
