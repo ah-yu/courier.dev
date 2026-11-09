@@ -695,8 +695,12 @@ export class SyncEngine {
   private tooLargeReported = new Set<string>();
   /** Paths reported through `onFileSkipped` in the current pass (one event each). */
   private skippedReported = new Set<string>();
-  /** `sha256("")` — the hash a `delete` version carries. Computed once, lazily. */
-  private emptyHash: string | null = null;
+  /**
+   * The in-flight (or settled) `sha256("")` — the hash a `delete` version carries.
+   * Holding the promise, not the value it settles to, is what lets the first pass's
+   * concurrent decisions share one digest instead of one each.
+   */
+  private emptyHashPromise: Promise<string> | null = null;
   /** Single-flight marker for {@link syncLocalSettings}. */
   private settingsPollRunning = false;
   /** Files the current pass has settled, and how many it has taken on (see `SyncProgress`). */
@@ -906,10 +910,13 @@ export class SyncEngine {
    *
    * A decision needs it to tell "this device's sync point is a tombstone" from "this
    * device last agreed on content", and hashing an empty string per file per pass was
-   * a Web Crypto call for a constant.
+   * a Web Crypto call for a constant. The promise is cached, not its value, so the
+   * decisions a pass starts together await one digest instead of one each; a digest
+   * that rejects stays cached too, which is enough for a constant the runtime can
+   * either hash or not.
    */
-  private async emptyContentHash(): Promise<string> {
-    return (this.emptyHash ??= await sha256Text(""));
+  private emptyContentHash(): Promise<string> {
+    return (this.emptyHashPromise ??= sha256Text(""));
   }
 
   // ── State persistence ──
