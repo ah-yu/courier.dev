@@ -230,3 +230,101 @@ export function decideFile(input: DecideInput): FileDecision {
   // 7. Both sides present and genuinely out of step → conflict.
   return { action: "conflict" };
 }
+
+/**
+ * A live remote chain that can own a local path or a set of bytes.
+ *
+ * `head` is the version an identity adoption records; a tombstone is never an owner
+ * (see {@link decideNewLocalFile}).
+ */
+export interface RemoteOwner {
+  fileId: string;
+  head: VersionChainEntry;
+}
+
+/**
+ * What the identity lookups found for a local file with no known fileId.
+ *
+ * The lookups themselves stay in the engine — they read the remote index, the state and
+ * the vault listing — but the **order** in which their answers win is a rule, and it
+ * lives here so it is tested on its own.
+ */
+export interface NewLocalFileLookup {
+  /** The content hash of the local file being decided. */
+  contentHash: string;
+  /**
+   * The chain of a `delete` this device — or this very job — already decided whose
+   * content hash matches. The delete is the other half of a move.
+   */
+  deletedFileId: string | null;
+  /** The live chain the remote index records at the path, when it records one. */
+  pathOwner: RemoteOwner | null;
+  /**
+   * The one live chain elsewhere whose head holds these bytes, whose previous path no
+   * longer holds a local file (see `SyncEngine.findRemoteFileIdByContent`).
+   */
+  contentOwner: RemoteOwner | null;
+}
+
+/**
+ * The identity a local file with no known fileId takes.
+ *
+ * Each step of the precedence exists for a specific bug:
+ *
+ * - a delete this device decided whose bytes reappear is the other half of a move: the
+ *   chain is re-pointed at the new path instead of a second chain being created for it;
+ * - a live chain the server records at the path — a peer's move this device applied
+ *   before its state update — is adopted instead of forking;
+ * - the content fallback is the last net, for a rename notification that never arrived;
+ * - otherwise the file is genuinely new and gets a chain of its own.
+ *
+ * A tombstone is deliberately not an identity: the path holds no live version, and a file
+ * written there after the deletion is somebody's new file.
+ */
+export type NewLocalFileDecision =
+  | { kind: "rename-on-deleted"; fileId: string }
+  | { kind: "adopt"; owner: RemoteOwner; sameContent: boolean }
+  | { kind: "create" };
+
+export function decideNewLocalFile(lookup: NewLocalFileLookup): NewLocalFileDecision {
+  if (lookup.deletedFileId !== null) {
+    return { kind: "rename-on-deleted", fileId: lookup.deletedFileId };
+  }
+  const owner = lookup.pathOwner ?? lookup.contentOwner;
+  if (owner === null) return { kind: "create" };
+  // The bytes on disk are the adopted head's: a rename, not an edit.
+  return { kind: "adopt", owner, sameContent: owner.head.contentHash === lookup.contentHash };
+}
+
+/**
+ * Whether a decision taken from the caller's pre-fetched bytes has to be re-taken from a
+ * fresh read before it acts.
+ *
+ * Only a `push` is safe on pre-fetched bytes: it sends what it read, and the caller's
+ * stamp check already proved the file did not move. Every other action writes to (pull,
+ * conflict) or adopts the file, so it must be taken from bytes read **now** — the chain
+ * request in between gave the file time to change, and a same-size edit inside one mtime
+ * tick is exactly what the stamp check cannot see. The reconcile re-reads before every
+ * pull/conflict for the same reason.
+ */
+export function needsFreshRead(decision: FileDecision, usedPrefetched: boolean): boolean {
+  return usedPrefetched && decision.action !== "push";
+}
+
+/** How many times one event-driven decision may be taken before a refusal is reported. */
+export const EVENT_DECISION_ATTEMPTS = 2;
+
+/** What an event-driven push does when the server refuses it with `stale_base`. */
+export type RefusedPushStep = "re-decide" | "report";
+
+/**
+ * Whether a refused push is decided again from the chain the server returned.
+ *
+ * The re-decision happens **once**: deciding again from the fresh chain while the state
+ * still holds the point both sides last agreed on is what turns "the peer's version is
+ * what my edit builds on" into the conflict it actually is, instead of a modification
+ * that silently replaces their edit. A second refusal is the caller's to report.
+ */
+export function decideRefusedPush(attempt: number): RefusedPushStep {
+  return attempt + 1 < EVENT_DECISION_ATTEMPTS ? "re-decide" : "report";
+}

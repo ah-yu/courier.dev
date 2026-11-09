@@ -14,7 +14,8 @@
 
 Shared TS sync engine, no build step (`src/index.ts` exported directly), depends only on `@courier/shared`.
 Key modules: `crypto.ts` (PBKDF2 600k + AES-256-GCM + SHA-256 on Web Crypto), `decide.ts` (pure
-versionId-aligned push/pull/conflict decisions), `engine.ts` (`SyncEngine` orchestrator: reconcile,
+decisions: versionId-aligned push/pull/conflict, the identity a new local file takes, and the event
+path's read/re-decision rules), `engine.ts` (`SyncEngine` orchestrator: reconcile,
 incremental events, echo suppression, rename-by-hash, restore helpers),
 `adapter.ts` (`SyncAdapter` + `FileStamp` — plugin provides an Obsidian adapter, CLI a filesystem adapter),
 `api.ts` (`SyncApi` + `PushFile`), `op-queue.ts` (the host-level bound on how many event-driven
@@ -34,7 +35,10 @@ counter; it isolates the two convenience listeners, `onSyncActivity` and `onProg
 three notices still call the host directly), `pass-view.ts` (the pass's
 ordering, path geometry and read-ahead candidates as pure functions over the pass's snapshot) and
 `conflict.ts` (`ConflictResolver` — the remote-wins rule, the parked copy and the config-folder
-mtime rule, behind five narrow engine calls). Engine
+mtime rule, behind five narrow engine calls) and `local-event-job.ts` (`LocalEventJob` — one burst of
+local vault events' shared state and wire mechanics: the change list, the tombstone ledger a create
+can take back, and the 100-file / 8 MiB send with its settle and abandon rules, while the phases
+that _decide_ stay in the engine). Engine
 tests use mock adapters/APIs (`packages/engine/src/*.test.ts`).
 
 `SyncEngine` composes its seams rather than containing them, so the orchestrator does not also own
@@ -45,11 +49,13 @@ pass decided from, passed as one read-only snapshot instead of seven positional 
 **decision input builders** in `decide.ts` (`DecideContext` / `decideInputFrom` / `isLocalDeletion`) —
 the same input used to be assembled in four places, and the subtle half of it (`localDeletion`) was
 written out twice with different expressions. A push is described by one `PushRequest` value object
-rather than six positional arguments (three of them strings, one nullable). The four seams this document
-describes carry the rest: **`ContentReader`** (a pull's bytes), **`ActivityReporter`** (what the host is
-told), **`ConflictResolver`** (the conflict rules) and the **`pass-view.ts`** functions (ordering, path
-geometry, read-ahead candidates). `packages/engine/src/`'s
-`decide.test.ts`, `self-events.test.ts`, `remote-index.test.ts`, `host.test.ts` and `websocket.test.ts`
+rather than six positional arguments (three of them strings, one nullable). The five seams this
+document describes carry the rest: **`ContentReader`** (a pull's bytes), **`ActivityReporter`** (what
+the host is told), **`ConflictResolver`** (the conflict rules), the **`pass-view.ts`** functions
+(ordering, path geometry, read-ahead candidates) and **`LocalEventJob`** (a burst's shared
+bookkeeping and batches). `packages/engine/src/`'s
+`decide.test.ts`, `self-events.test.ts`, `remote-index.test.ts`, `host.test.ts`,
+`local-event-job.test.ts` and `websocket.test.ts`
 are the L0 net for those — the last one with a fake global `WebSocket` and fake timers, because the
 L1/L2 suites run a real socket against a real server and therefore only ever exercise the happy path
 (a refused subscribe, the exponential retry, the 60-second quiet-socket close and a message that is not
