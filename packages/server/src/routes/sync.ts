@@ -326,7 +326,7 @@ export function syncRoutes(hub: WsHub, logger: Logger): RouteTable {
             hasBlob,
             assembleChunks: assembleUploadedChunks,
             flushBlobs: flushBlobWrites,
-            broadcast: hub.broadcastFilePushed,
+            broadcast: hub.broadcastFilesPushed,
             // The history trim inside the insert transaction removes old rows; these two
             // reclaim the blobs those rows were the last reference to, and the third
             // drops the cached usage a reclaim has just made too high.

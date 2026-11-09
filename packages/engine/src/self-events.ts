@@ -3,7 +3,7 @@
  *
  * Every local write, delete or move the engine performs comes back to it as a vault
  * event (the adapter fires it, and the host feeds it straight back in), and every push
- * comes back as a `file_pushed` echo from the server. Treating any of them as a user
+ * comes back as a `files_pushed` echo from the server. Treating any of them as a user
  * action is how a pull pushed its own result back under a second fileId, how applying a
  * peer's delete pushed a second tombstone (which made the file unrestorable), and how
  * following a peer's move pushed a second `rename` version.
@@ -45,7 +45,7 @@ export interface SelfEventLogOptions {
 
 export class SelfEventLog {
   /**
-   * Versions this engine pushed, so the `file_pushed` echo of one is never applied as
+   * Versions this engine pushed, so the `files_pushed` echo of one is never applied as
    * a peer's change (versionId → the deadline it is kept until).
    *
    * Keyed by versionId alone: a version id is a UUID minted by the pushing device, so

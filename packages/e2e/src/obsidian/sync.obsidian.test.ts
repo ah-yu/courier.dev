@@ -1282,7 +1282,7 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
     try {
       // Drop both plugins' sockets without stopping the server. The client's own
       // reconnect is a full second away, so vault B is provably unsubscribed when
-      // the peer pushes below — and its `file_pushed` notification is lost.
+      // the peer pushes below — and its `files_pushed` notification is lost.
       server.dropSockets();
 
       peer.write(path, "pushed while vault B had no socket");

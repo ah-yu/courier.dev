@@ -86,7 +86,7 @@ export type SyncActivityEvent =
   | (SyncActivityEventBase & { outcome: "applied" })
   | (SyncActivityEventBase & { outcome: "skipped"; reason: SyncActivitySkipReason });
 
-/** One `file_pushed` notification, as the host coalesced it for a batched pull. */
+/** One version from a `files_pushed` frame, as the host held it for a batched pull. */
 export interface PushedFileEvent {
   fileId: string;
   versionId: string;

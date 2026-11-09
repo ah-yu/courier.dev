@@ -217,11 +217,15 @@ export type GetReferencedContentHashesFn = (vaultId: string) => Promise<Set<stri
  */
 export type IsContentHashReferencedFn = (vaultId: string, contentHash: string) => Promise<boolean>;
 
-/** Where a version this push appended is announced (the WebSocket hub). */
-export type BroadcastFilePushedFn = (
+/**
+ * Where the versions a push committed are announced (the WebSocket hub).
+ *
+ * One call per request: the hub sends one frame for the whole batch, because a frame
+ * per version is what made a phone apply a bulk deletion one notification at a time.
+ */
+export type BroadcastFilesPushedFn = (
   vaultId: string,
-  fileId: string,
-  versionId: string,
+  files: ReadonlyArray<{ fileId: string; versionId: string }>,
   excludeSessionId?: string,
   deviceName?: string | null,
 ) => void;
@@ -254,7 +258,7 @@ export interface SyncPushInput {
   /**
    * The label the pushing client stated for itself (`null` when it stated none).
    * Stored on every version row this push appends and passed on in the peers'
-   * `file_pushed` notification — display metadata, never an identity.
+   * `files_pushed` notification — display metadata, never an identity.
    */
   deviceName?: string | null;
   files: Array<{
@@ -305,7 +309,7 @@ export interface SyncPushDeps {
    */
   flushBlobs: (vaultId: string) => Promise<void>;
   /** The WebSocket hub. A push with nowhere to announce itself still writes. */
-  broadcast: BroadcastFilePushedFn;
+  broadcast: BroadcastFilesPushedFn;
   /**
    * Whether a version row (of any chain) still names a content hash — what the blob
    * reclaim after a history trim asks before it deletes anything.
@@ -618,17 +622,18 @@ export async function handleSyncPush(
   // now an overcount: drop it and let the next check measure again.
   if (prunedContentHashes.size > 0) deps.invalidateStorageUsage?.();
 
-  // Phase 3 — announce the versions that committed, and nothing else.
+  // Phase 3 — announce the versions that committed, and nothing else. **One** call for
+  // the whole request: a frame per version made a mobile peer receive a batch as a
+  // trickle of frames and pull once per file, so the batch the server applied is what
+  // the wire carries.
+  const committed: Array<{ fileId: string; versionId: string }> = [];
   for (const [index, result] of results.entries()) {
     if (result?.status !== "ok") continue;
     const file = input.files[index]!;
-    deps.broadcast(
-      input.vaultId,
-      file.fileId,
-      file.versionId,
-      input.excludeSessionId,
-      input.deviceName,
-    );
+    committed.push({ fileId: file.fileId, versionId: file.versionId });
+  }
+  if (committed.length > 0) {
+    deps.broadcast(input.vaultId, committed, input.excludeSessionId, input.deviceName);
   }
 
   return {

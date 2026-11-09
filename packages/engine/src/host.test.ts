@@ -8,7 +8,9 @@ import {
 } from "@courier/testing";
 import { sortedCopy } from "@courier/shared";
 import {
+  LOCAL_DELETE_SEQUENCE_MS,
   LOCAL_EVENT_BURST_FLUSH_MS,
+  LOCAL_EVENT_BURST_MAX_FILES,
   LOCAL_EVENT_BURST_SIZE,
   PUSH_NOTIFICATION_FLUSH_MS,
   SyncHost,
@@ -284,7 +286,7 @@ describe("SyncHost", () => {
 
   /**
    * The server keeps no backlog: `subscribe` is answered with a session id and
-   * nothing else, so every `file_pushed` sent while the socket was down is gone.
+   * nothing else, so every `files_pushed` sent while the socket was down is gone.
    */
   it("drops an echo of its own push when the notification arrives", async () => {
     vi.useFakeTimers();
@@ -297,16 +299,18 @@ describe("SyncHost", () => {
     const engine = host.engine!;
     vi.spyOn(engine, "consumeOwnPush").mockReturnValue(true);
     const batch = vi.spyOn(engine, "handleFilePushedBatch").mockResolvedValue(undefined);
-    MockWebSocket.instances
-      .at(-1)!
-      .deliver({ type: "file_pushed", fileId: "mine", versionId: "v-mine" });
+    MockWebSocket.instances.at(-1)!.deliver({
+      type: "files_pushed",
+      vaultId: "v-1",
+      files: [{ fileId: "mine", versionId: "v-mine" }],
+    });
 
     await advanceTimersByTimeAsync(PUSH_NOTIFICATION_FLUSH_MS);
     expect(engine.consumeOwnPush).toHaveBeenCalledWith("v-mine");
     expect(batch).not.toHaveBeenCalled();
   });
 
-  it("coalesces a burst of file_pushed notifications into one batched pull", async () => {
+  it("coalesces a burst of notifications into one batched pull", async () => {
     vi.useFakeTimers();
     const { host } = await newHost({ stateStore: store(null, true) });
     track(host);
@@ -318,9 +322,13 @@ describe("SyncHost", () => {
     const batch = vi.spyOn(host.engine!, "handleFilePushedBatch").mockResolvedValue(undefined);
     const socket = MockWebSocket.instances.at(-1)!;
     for (let index = 0; index < 5; index += 1) {
-      socket.deliver({ type: "file_pushed", fileId: `f-${index}`, versionId: `v-${index}` });
+      socket.deliver({
+        type: "files_pushed",
+        vaultId: "v-1",
+        files: [{ fileId: `f-${index}`, versionId: `v-${index}` }],
+      });
     }
-    // Held for the short window, not sent one request per notification.
+    // Held for the short quiet period, not sent one request per notification.
     expect(batch).not.toHaveBeenCalled();
 
     await advanceTimersByTimeAsync(PUSH_NOTIFICATION_FLUSH_MS);
@@ -332,6 +340,158 @@ describe("SyncHost", () => {
       "f-3",
       "f-4",
     ]);
+  });
+
+  /**
+   * The regression this fix exists for: a mobile link delivers one push's frames over
+   * hundreds of milliseconds. A **fixed** 25 ms window flushed between them, one pull —
+   * and one local delete — per file, which is how a thousand deleted notes took minutes
+   * on a phone while a LAN peer applied them in one batch.
+   */
+  it("keeps coalescing notifications that arrive slower than the quiet period", async () => {
+    vi.useFakeTimers();
+    const { host } = await newHost({ stateStore: store(null, true) });
+    track(host);
+
+    await host.start();
+    subscribed();
+    await advanceTimersByTimeAsync(0);
+
+    const batch = vi.spyOn(host.engine!, "handleFilePushedBatch").mockResolvedValue(undefined);
+    const socket = MockWebSocket.instances.at(-1)!;
+    for (let index = 0; index < 5; index += 1) {
+      socket.deliver({
+        type: "files_pushed",
+        vaultId: "v-1",
+        files: [{ fileId: `f-${index}`, versionId: `v-${index}` }],
+      });
+      // Each frame lands inside the quiet period, so each one pushes the deadline back.
+      await advanceTimersByTimeAsync(10);
+    }
+    expect(batch).not.toHaveBeenCalled();
+
+    await advanceTimersByTimeAsync(PUSH_NOTIFICATION_FLUSH_MS);
+    expect(batch).toHaveBeenCalledTimes(1);
+    expect(batch.mock.calls[0]![0].map((event) => event.fileId)).toEqual([
+      "f-0",
+      "f-1",
+      "f-2",
+      "f-3",
+      "f-4",
+    ]);
+  });
+
+  it("releases a stream that never goes quiet at the cap", async () => {
+    vi.useFakeTimers();
+    const { host } = await newHost({ stateStore: store(null, true) });
+    track(host);
+
+    await host.start();
+    subscribed();
+    await advanceTimersByTimeAsync(0);
+
+    const batch = vi.spyOn(host.engine!, "handleFilePushedBatch").mockResolvedValue(undefined);
+    const socket = MockWebSocket.instances.at(-1)!;
+    for (let index = 0; index < 200 && batch.mock.calls.length === 0; index += 1) {
+      socket.deliver({
+        type: "files_pushed",
+        vaultId: "v-1",
+        files: [{ fileId: `f-${index}`, versionId: `v-${index}` }],
+      });
+      // Faster than the quiet period, forever: only the cap can release it.
+      await advanceTimersByTimeAsync(20);
+    }
+
+    expect(batch).toHaveBeenCalledTimes(1);
+    // A second of arrivals (the cap) is many files, not the one-per-window the fixed
+    // window produced.
+    expect(batch.mock.calls[0]![0].length).toBeGreaterThan(10);
+  });
+
+  it("never starts a second pull while one is in flight", async () => {
+    vi.useFakeTimers();
+    const { host } = await newHost({ stateStore: store(null, true) });
+    track(host);
+
+    await host.start();
+    subscribed();
+    await advanceTimersByTimeAsync(0);
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const batch = vi
+      .spyOn(host.engine!, "handleFilePushedBatch")
+      .mockImplementationOnce(() => gate)
+      .mockResolvedValue(undefined);
+    const socket = MockWebSocket.instances.at(-1)!;
+
+    socket.deliver({
+      type: "files_pushed",
+      vaultId: "v-1",
+      files: [{ fileId: "a", versionId: "v-a" }],
+    });
+    await advanceTimersByTimeAsync(PUSH_NOTIFICATION_FLUSH_MS);
+    expect(batch).toHaveBeenCalledTimes(1);
+
+    // Arrives while the pull is in flight: held for the next one, not queued behind it.
+    socket.deliver({
+      type: "files_pushed",
+      vaultId: "v-1",
+      files: [{ fileId: "b", versionId: "v-b" }],
+    });
+    await advanceTimersByTimeAsync(PUSH_NOTIFICATION_FLUSH_MS);
+    expect(batch).toHaveBeenCalledTimes(1);
+
+    release();
+    // The pull's tail is a microtask: let it arm the next flush, then wait it out.
+    await advanceTimersByTimeAsync(0);
+    await advanceTimersByTimeAsync(PUSH_NOTIFICATION_FLUSH_MS);
+    expect(batch).toHaveBeenCalledTimes(2);
+    expect(batch.mock.calls[1]![0].map((event) => event.fileId)).toEqual(["b"]);
+  });
+
+  it("retries the held notifications after a pull fails", async () => {
+    vi.useFakeTimers();
+    const { host } = await newHost({ stateStore: store(null, true) });
+    track(host);
+
+    await host.start();
+    subscribed();
+    await advanceTimersByTimeAsync(0);
+
+    let fail!: (err: Error) => void;
+    const gate = new Promise<void>((_, reject) => {
+      fail = reject;
+    });
+    const batch = vi
+      .spyOn(host.engine!, "handleFilePushedBatch")
+      .mockImplementationOnce(() => gate)
+      .mockResolvedValue(undefined);
+    const socket = MockWebSocket.instances.at(-1)!;
+
+    socket.deliver({
+      type: "files_pushed",
+      vaultId: "v-1",
+      files: [{ fileId: "a", versionId: "v-a" }],
+    });
+    await advanceTimersByTimeAsync(PUSH_NOTIFICATION_FLUSH_MS);
+    expect(batch).toHaveBeenCalledTimes(1);
+
+    // A second frame arrives, and the pull it waits behind fails: the tail still releases
+    // the in-flight flag and re-arms, so the held notification is not lost.
+    socket.deliver({
+      type: "files_pushed",
+      vaultId: "v-1",
+      files: [{ fileId: "b", versionId: "v-b" }],
+    });
+    fail(new Error("network down"));
+    await advanceTimersByTimeAsync(0);
+    await advanceTimersByTimeAsync(PUSH_NOTIFICATION_FLUSH_MS);
+
+    expect(batch).toHaveBeenCalledTimes(2);
+    expect(batch.mock.calls[1]![0].map((event) => event.fileId)).toEqual(["b"]);
   });
 
   it("reconciles when the socket comes back, and not on the first connect", async () => {
@@ -1220,7 +1380,8 @@ describe("SyncHost", () => {
 
       // A burst that removed a folder: the tombstones travel as one batch of `deleted`
       // paths, never as `changed` (a change is decided by reading the file, and the file
-      // is gone).
+      // is gone). The first delete of the sequence keeps its immediate push; the rest
+      // join the batch — a delete that follows a delete is a sequence, whatever the rate.
       for (let index = 0; index < LOCAL_EVENT_BURST_SIZE * 2; index += 1) {
         events.handlers!.removed(`gone/file-${index}.md`);
       }
@@ -1233,9 +1394,9 @@ describe("SyncHost", () => {
       };
       expect(first.changed).toEqual([]);
       expect(first.renamed).toEqual([]);
-      expect(first.deleted).toHaveLength(LOCAL_EVENT_BURST_SIZE);
-      // The events below the threshold went out one by one, as before.
-      expect(perDelete).toHaveBeenCalledTimes(LOCAL_EVENT_BURST_SIZE);
+      expect(first.deleted).toHaveLength(LOCAL_EVENT_BURST_SIZE * 2 - 1);
+      // Only the first delete of the sequence went out on its own.
+      expect(perDelete).toHaveBeenCalledTimes(1);
 
       // A folder rename: the moves travel as their own list of pairs, so the engine
       // re-points each chain instead of reading a destination as a new file.
@@ -1262,6 +1423,87 @@ describe("SyncHost", () => {
         expect(allPairs.has(`old-${index}.md`)).toBe(true);
       }
       expect((second as { changed?: string[] }).changed ?? []).toEqual([]);
+    });
+
+    /**
+     * The shape Obsidian's own trash loop produces: one `delete` per file, a native trash
+     * operation each, so a bulk deletion arrives at a few events a second. The dense-burst
+     * rule (4 events in 500 ms) never sees it, and each file used to be its own push —
+     * 1 000 deleted files were 1 000 requests, which a phone then applied one at a time.
+     */
+    it("batches a delete sequence that arrives below the burst threshold", async () => {
+      vi.useFakeTimers();
+      const { host, events } = await newHost({ stateStore: store(null, true) });
+      track(host);
+      await host.start();
+      await advanceTimersByTimeAsync(0);
+
+      const batch = vi.spyOn(host.engine!, "handleLocalEvents").mockResolvedValue(undefined);
+      const perDelete = vi.spyOn(host.engine!, "handleLocalDelete").mockResolvedValue(undefined);
+
+      for (let index = 0; index < 5; index += 1) {
+        events.handlers!.removed(`trashed/file-${index}.md`);
+        // Slower than the dense window, so nothing counts as a burst.
+        await advanceTimersByTimeAsync(200);
+      }
+      // The first delete went out immediately; the rest are held as one open sequence.
+      expect(perDelete).toHaveBeenCalledTimes(1);
+      expect(batch).not.toHaveBeenCalled();
+
+      // One quiet window after the last delete, the sequence travels as one job.
+      await advanceTimersByTimeAsync(LOCAL_DELETE_SEQUENCE_MS);
+      await advanceTimersByTimeAsync(0);
+      expect(batch).toHaveBeenCalledTimes(1);
+      const handed = batch.mock.calls[0]![0] as {
+        deleted?: string[];
+        changed?: string[];
+        deletedAtMs?: Record<string, number>;
+      };
+      expect(handed.changed).toEqual([]);
+      expect(handed.deleted).toHaveLength(4);
+      // The tombstone carries when the user deleted the file, not when the batch flushed.
+      for (const path of handed.deleted!) expect(handed.deletedAtMs?.[path]).toBeTypeOf("number");
+    });
+
+    it("releases a delete sequence that never goes quiet at the cap", async () => {
+      vi.useFakeTimers();
+      const { host, events } = await newHost({ stateStore: store(null, true) });
+      track(host);
+      await host.start();
+      await advanceTimersByTimeAsync(0);
+
+      const batch = vi.spyOn(host.engine!, "handleLocalEvents").mockResolvedValue(undefined);
+      vi.spyOn(host.engine!, "handleLocalDelete").mockResolvedValue(undefined);
+
+      // Faster than the sequence's quiet window, forever: only the cap can release it.
+      for (let index = 0; index < 100 && batch.mock.calls.length === 0; index += 1) {
+        events.handlers!.removed(`endless/file-${index}.md`);
+        await advanceTimersByTimeAsync(100);
+      }
+      expect(batch).toHaveBeenCalledTimes(1);
+      expect((batch.mock.calls[0]![0] as { deleted: string[] }).deleted.length).toBeGreaterThan(7);
+    });
+
+    it("hands a full burst over at once instead of waiting for quiet", async () => {
+      // A dense burst has its paths in hand: waiting out a quiet period the burst will
+      // never have is what made a script's bulk delete arrive 750 ms later than before.
+      vi.useFakeTimers();
+      const { host, events } = await newHost({ stateStore: store(null, true) });
+      track(host);
+      await host.start();
+      await advanceTimersByTimeAsync(0);
+
+      const batch = vi.spyOn(host.engine!, "handleLocalEvents").mockResolvedValue(undefined);
+      vi.spyOn(host.engine!, "handleLocalDelete").mockResolvedValue(undefined);
+
+      for (let index = 0; index < LOCAL_EVENT_BURST_MAX_FILES + 25; index += 1) {
+        events.handlers!.removed(`folder/file-${index}.md`);
+      }
+      await advanceTimersByTimeAsync(0);
+
+      expect(batch).toHaveBeenCalledTimes(1);
+      const held = batch.mock.calls[0]![0] as { deleted?: string[] };
+      expect(held.deleted).toHaveLength(LOCAL_EVENT_BURST_MAX_FILES + 25 - 1);
     });
   });
 });

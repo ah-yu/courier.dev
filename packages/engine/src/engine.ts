@@ -324,6 +324,17 @@ export interface LocalEventBatch {
   changed?: readonly string[];
   deleted?: readonly string[];
   renamed?: ReadonlyArray<{ from: string; to: string }>;
+  /**
+   * When each deleted path was removed (`Date.now()`), keyed by path.
+   *
+   * A host holds a deletion for a while before the batch runs (see
+   * `LOCAL_DELETE_SEQUENCE_MS`), and the moment a peer compares is the **deletion's**, not
+   * the flush's: a config-folder conflict is settled on that value, and reading the clock
+   * at flush time would let a deletion that happened before a peer's edit claim to be the
+   * newer change. Missing means the engine reads the clock itself (a deletion discovered
+   * by a pass, or one made with the app closed).
+   */
+  deletedAtMs?: Readonly<Record<string, number>>;
 }
 
 /**
@@ -1098,7 +1109,7 @@ export class SyncEngine {
    * Split out of {@link pushFile} so a pass can send several prepared pushes in **one**
    * request (see {@link createUntrackedFiles}); the registration has to happen here,
    * before any request, for the same reason it always did — the server broadcasts
-   * `file_pushed` while the push is still in flight, and that echo can arrive before
+   * `files_pushed` while the push is still in flight, and that echo can arrive before
    * the response resolves. Registering afterwards leaves a window in which the engine
    * reads its own change back and pushes it again, which is where the duplicate
    * `modify`/`rename` versions came from.
@@ -1243,8 +1254,8 @@ export class SyncEngine {
    * the newer change. `Date.now()` is the only honest answer when nothing recorded it (the
    * file was deleted with the app closed), and it is then kept for the retries that follow.
    */
-  private deleteMoment(entry: LocalVersionState[string] | undefined): number {
-    const moment = entry?.deletedAtMs ?? Date.now();
+  private deleteMoment(entry: LocalVersionState[string] | undefined, deletedAtMs?: number): number {
+    const moment = entry?.deletedAtMs ?? deletedAtMs ?? Date.now();
     if (entry) entry.deletedAtMs = moment;
     return moment;
   }
@@ -3477,7 +3488,9 @@ export class SyncEngine {
       const recorded = fileId ? this.remoteIndex.pathOf(fileId) : null;
       if (recorded !== null) claims.add(recorded);
     }
-    return this.schedule([...claims], () => this.applyLocalEvents(changed, deleted, renamed));
+    return this.schedule([...claims], () =>
+      this.applyLocalEvents(changed, deleted, renamed, batch.deletedAtMs ?? {}),
+    );
   }
 
   /**
@@ -3492,6 +3505,7 @@ export class SyncEngine {
     paths: readonly string[],
     deleted: readonly string[],
     renamed: ReadonlyArray<{ from: string; to: string }>,
+    deletedAtMs: Readonly<Record<string, number>>,
   ): Promise<void> {
     if (!this.initialized) return;
     const job = new LocalEventJob<PreparedPush>(
@@ -3501,7 +3515,7 @@ export class SyncEngine {
     );
     try {
       await this.applyRenames(job);
-      await this.prepareDeletions(job);
+      await this.prepareDeletions(job, deletedAtMs);
       await this.applyChangedFiles(job);
       await this.settleTrackedFiles(job);
       await job.drainTombstones();
@@ -3667,7 +3681,10 @@ export class SyncEngine {
    * **prepared** here — it is queued once every change has been decided, so a create
    * that turns out to be the other half of the move can take it back.
    */
-  private async prepareDeletions(job: LocalEventJob<PreparedPush>): Promise<void> {
+  private async prepareDeletions(
+    job: LocalEventJob<PreparedPush>,
+    deletedAtMs: Readonly<Record<string, number>>,
+  ): Promise<void> {
     for (const path of job.deletions) {
       if (job.rateLimited) break;
       // A destination this job already tombstoned for a move: the path now holds the moved
@@ -3676,16 +3693,15 @@ export class SyncEngine {
       // The engine applying a peer's delete fires this same event; it must not be echoed
       // back to the server as a second tombstone.
       if (this.consumeSelfDelete(path)) continue;
-      // A removal and a rewrite of the same path can share a window (a tool replacing a
-      // file, a watcher that reports both halves of a move). A path this batch is also
-      // rewriting is not a deletion — but only while the file is **still there**: a write
-      // followed by a delete inside one window leaves the change unreadable, and then the
-      // tombstone is the only record of what happened. The single-event path keeps its own
-      // rule (it sees the two events in order, tombstone included).
-      if (job.hasPendingChange(path) && (await this.opts.adapter.statFile(path)) !== null) {
-        continue;
-      }
-      const outcome = await this.resolveLocalDelete(path);
+      // **A path that still holds a file is not a deletion**, whatever this job was told:
+      // a recreate (trash and undo), a peer's pull, or a move landing on the path can
+      // arrive between the event and this flush, and the host holds a deletion for a
+      // while (see `LOCAL_DELETE_SEQUENCE_MS`), so that window is real. The single-event
+      // path sees the two events in order, tombstone included; a batch cannot, so the
+      // disk is asked. Without this the batch tombstoned the path's *current* chain and
+      // peers trashed a note that still exists.
+      if ((await this.opts.adapter.statFile(path)) !== null) continue;
+      const outcome = await this.resolveLocalDelete(path, undefined, deletedAtMs[path]);
       if (outcome.kind === "handled") {
         this.persist();
         continue;
@@ -4018,7 +4034,7 @@ export class SyncEngine {
    * The live chain the server records at `path`, other than `exceptFileId`, or null.
    *
    * The incremental decision is taken from the tracked chain alone, and the in-memory
-   * `RemoteIndex` can be stale when a peer's `file_pushed` never arrived (the socket was
+   * `RemoteIndex` can be stale when a peer's `files_pushed` never arrived (the socket was
    * down) and no pass has run since. A `restore` is the event push that resurrects a chain
    * this device deleted, so that is the one case worth a server read before pushing; an
    * untracked create cannot afford this on every new note (see the docs for the limit that
@@ -4158,7 +4174,7 @@ export class SyncEngine {
     if (decision.action === "push") {
       // A `restore` resurrects a chain this device deleted, so before pushing one the engine
       // asks the server whether another chain already owns the path. The in-memory index can
-      // be stale (a peer's `file_pushed` never arrived and no pass has run since), and this is
+      // be stale (a peer's `files_pushed` never arrived and no pass has run since), and this is
       // the event push worth one index read: an untracked create cannot afford it on every new
       // note, which is why the check lives here and not on that branch. A chain the index names
       // wins the path exactly as it would on a pass: this device's tombstone is retired, and
@@ -4212,17 +4228,25 @@ export class SyncEngine {
     return { kind: "handled" };
   }
 
-  async handleLocalDelete(path: string): Promise<void> {
+  /**
+   * A local file was deleted.
+   *
+   * `deletedAtMs` is when the host saw the event, carried so the tombstone records when
+   * the file was removed rather than when this job happened to run — the path's job can
+   * wait behind an exclusive operation (a large pull, a local burst), and a config-folder
+   * conflict is settled on that moment.
+   */
+  async handleLocalDelete(path: string, deletedAtMs?: number): Promise<void> {
     if (!this.isSyncable(path)) return;
     // The engine applying a peer's delete fires this same event; it must not be
     // echoed back to the server as a second tombstone.
     if (this.consumeSelfDelete(path)) return;
-    return this.schedule([path], () => this.applyLocalDelete(path));
+    return this.schedule([path], () => this.applyLocalDelete(path, deletedAtMs));
   }
 
   /** The work of {@link handleLocalDelete}, running inside its path job. */
-  private async applyLocalDelete(path: string): Promise<void> {
-    const outcome = await this.resolveLocalDelete(path);
+  private async applyLocalDelete(path: string, deletedAtMs?: number): Promise<void> {
+    const outcome = await this.resolveLocalDelete(path, undefined, deletedAtMs);
     if (outcome.kind === "handled") {
       this.persist();
       return;
@@ -4241,6 +4265,7 @@ export class SyncEngine {
   private async resolveLocalDelete(
     path: string,
     explicitFileId?: string,
+    deletedAtMs?: number,
   ): Promise<{ kind: "prepared"; prepared: PreparedPush } | { kind: "handled" }> {
     const fileId = explicitFileId ?? this.pathToFileId.get(path);
     if (!fileId) return { kind: "handled" };
@@ -4280,7 +4305,7 @@ export class SyncEngine {
         fileId,
         path,
         this.state[fileId]?.lastKnownVersionId ?? null,
-        this.deleteMoment(this.state[fileId]),
+        this.deleteMoment(this.state[fileId], deletedAtMs),
       ),
     );
     return prepared === null ? { kind: "handled" } : { kind: "prepared", prepared };
@@ -4464,7 +4489,7 @@ export class SyncEngine {
     return this.selfEvents.hasSelfRename(path);
   }
 
-  /** Remote change notification (WS `file_pushed`). */
+  /** Remote change notification (WS `files_pushed`). */
   async handleFilePushed(
     fileId: string,
     versionId: string,
@@ -4482,12 +4507,13 @@ export class SyncEngine {
   /**
    * Remote change notifications in one call, with one chain request per batch.
    *
-   * A first bind of a large vault broadcasts one `file_pushed` per file. Applying them
-   * one at a time cost one `POST /sync/pull` per file, which is 5 000 requests against
-   * a 600/minute limiter: a peer that was online during the bind landed 548 of 5 000
-   * files and then sat refused until the next pass. The host coalesces the burst and
-   * the chains of up to {@link MAX_PULL_BATCH_FILES} notifications travel together;
-   * each is still applied in arrival order, from the head the server answered with.
+   * A first bind of a large vault announces every file — one `files_pushed` frame per
+   * push request, up to the server's 100-file batch. Applying one version at a time cost
+   * one `POST /sync/pull` per file, which is 5 000 requests against a 600/minute limiter:
+   * a peer that was online during the bind landed 548 of 5 000 files and then sat refused
+   * until the next pass. The host coalesces the frames and the chains of up to
+   * {@link MAX_PULL_BATCH_FILES} versions travel together; each is still applied in
+   * arrival order, from the head the server answered with.
    */
   async handleFilePushedBatch(events: readonly PushedFileEvent[]): Promise<void> {
     // One apply per file: two notifications for one chain both decide from its latest
