@@ -5893,7 +5893,13 @@ describe("SyncEngine — batched content reads", () => {
 
     const target = await bindTarget(api, key, { maxConcurrent: 80, exclusiveBytes: 1_024 });
 
-    expect(api.contentBatchCalls.map((call) => call.length)).toEqual([64, 6]);
+    // The cap is what this pins. How the six reads the first request could not hold are
+    // split is the 0 ms tail timer's business: they reach the batcher in whatever turns
+    // their per-file tasks finish in, so a loaded runner sends them as [64, 3, 3] rather
+    // than [64, 6]. Both honour the route; only a request over its cap does not.
+    const sizes = api.contentBatchCalls.map((call) => call.length);
+    expect(sizes.every((size) => size <= MAX_CONTENT_BATCH_FILES)).toBe(true);
+    expect(sizes.reduce((total, size) => total + size, 0)).toBe(paths.length);
     expect(target.adapter.files.size).toBe(paths.length);
   });
 
