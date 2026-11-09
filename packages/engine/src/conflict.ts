@@ -2,7 +2,7 @@ import type { SyncAction, VersionChainEntry } from "@courier/shared";
 import type { FileStamp, SyncAdapter } from "./adapter";
 import { conflictFilePath } from "./conflict-file";
 import { remoteHead } from "./decide";
-import type { ConflictResolvedEvent } from "./engine";
+import type { ConflictResolvedEvent } from "./engine-events";
 import { settingsGroupOf, type SyncScope } from "./sync-scope";
 
 /** What the resolver needs from the engine: five narrow calls, no engine state. */

@@ -43,7 +43,10 @@ mechanics: the 100-file / 8 MiB bound, at most one request in flight (pipelined 
 creates), a limiter that ends the sequence and the first failure recorded; the pass's creates, the
 pass's tombstones and `LocalEventJob` all send through it) and `excluded-moves.ts`
 (`ExcludedMoveFinder` — the same-name, same-size, unique-hash fallback that recognises a move into
-an excluded folder before it becomes a tombstone, with the 30-second listing TTL it owns). Engine
+an excluded folder before it becomes a tombstone, with the 30-second listing TTL it owns) and
+`engine-events.ts` (the host-facing types — the events the engine reports and `EngineOptions` —
+re-exported by `engine.ts`, so the activity reporter and the conflict resolver can name them
+without importing the orchestrator that composes them). Engine
 tests use mock adapters/APIs (`packages/engine/src/*.test.ts`).
 
 `SyncEngine` composes its seams rather than containing them, so the orchestrator does not also own

@@ -5,7 +5,7 @@ import type {
   SettingsAppliedEvent,
   SyncActivityEvent,
   SyncProgress,
-} from "./engine";
+} from "./engine-events";
 
 /** How many settled files a pass reports before its next progress event. */
 const PROGRESS_STEP_FILES = 25;
