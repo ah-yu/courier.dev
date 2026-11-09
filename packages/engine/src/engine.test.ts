@@ -186,6 +186,28 @@ class FakeAdapter implements SyncAdapter {
 }
 
 /**
+ * A fake adapter whose deletes take a turn, so a test can see how many run at once.
+ *
+ * Without the timer the fake resolves in a microtask and four tasks that never yield
+ * look exactly like one; the timer is the window in which the overlap is observable.
+ */
+class SlowDeleteAdapter extends FakeAdapter {
+  active = 0;
+  maxActive = 0;
+
+  override async deleteFile(path: string): Promise<void> {
+    this.active += 1;
+    this.maxActive = Math.max(this.maxActive, this.active);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await super.deleteFile(path);
+    } finally {
+      this.active -= 1;
+    }
+  }
+}
+
+/**
  * A fake host that can write a file in pieces.
  *
  * It records what the engine streams, so a test can prove a large download never took
@@ -983,6 +1005,50 @@ describe("SyncEngine", () => {
     expect(pull.mock.calls[0]![1]).toEqual(fileIds);
     expect(sortedCopy(peerAdapter.files.keys())).toEqual(["a.md", "b.md"]);
     expect(new TextDecoder().decode(peerAdapter.files.get("b.md"))).toBe("b");
+  });
+
+  it("applies a burst of tombstones for tracked files four at a time", async () => {
+    // A peer that already synced these files is the case the batch's path check used to
+    // mistake for a shared path: the tombstone's recorded path and the path the state
+    // holds are the same string, so the chunk fell back to applying one file at a time.
+    // Deletes are where it shows — they transfer no content, so a serial apply is pure
+    // latency, and in a real vault every one of them is a trash operation.
+    const { engine, adapter, api, key } = await makeEngine();
+    const paths = ["a.md", "b.md", "c.md", "d.md"];
+    for (const path of paths) adapter.files.set(path, encoder.encode(path));
+    await engine.initialSync();
+    const fileIds = api.pushed.map((p) => p.fileId);
+    expect(fileIds).toHaveLength(paths.length);
+
+    const peerAdapter = new SlowDeleteAdapter();
+    const peer = new SyncEngine({
+      platform: realPlatform,
+      vaultId: "vault-1",
+      adapter: peerAdapter,
+      api,
+      encryptionKey: key,
+    });
+    await peer.initialSync();
+    expect(peerAdapter.files.size).toBe(paths.length);
+
+    // The user's deletion: the files are gone and the host reports one event each, so
+    // every tombstone is pushed as a batch rather than one request per file.
+    for (const path of paths) {
+      adapter.files.delete(path);
+      await engine.handleLocalDelete(path);
+    }
+    const events = await Promise.all(
+      fileIds.map(async (fileId) => ({
+        fileId,
+        versionId: (await api.latestVersionId(fileId))!,
+      })),
+    );
+
+    await peer.handleFilePushedBatch(events);
+
+    // Four distinct paths, four pool slots: every delete overlaps the others.
+    expect(peerAdapter.maxActive).toBe(4);
+    expect(peerAdapter.files.size).toBe(0);
   });
 
   it("reports a notification whose version content cannot be read", async () => {

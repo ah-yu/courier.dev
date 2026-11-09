@@ -5444,6 +5444,11 @@ export class SyncEngine {
         // in order, one file at a time. That is the conservative version of the path queue:
         // a peer's move can leave two chains naming one path for a moment, and the two
         // decisions must not interleave. With no shared path, four files at a time.
+        //
+        // A single event's two names are deduplicated first: for a file this device
+        // tracks, the head's path and the state's path are the same string, and counting
+        // it twice made every tracked-file burst — every delete, every edit — look like a
+        // shared path and fall back to the serial apply.
         const seenPaths = new Set<string>();
         const headPaths = new Map<string, string | null>();
         let sharesPath = false;
@@ -5454,7 +5459,7 @@ export class SyncEngine {
           // own path over the head's), kept for the read-ahead: a chain outside this
           // device's scope is never applied, and the prefetch must not read it either.
           headPaths.set(event.fileId, this.state[event.fileId]?.plainPath ?? headPath);
-          for (const path of [headPath, this.state[event.fileId]?.plainPath ?? null]) {
+          for (const path of new Set([headPath, this.state[event.fileId]?.plainPath ?? null])) {
             if (path === null) continue;
             if (seenPaths.has(path)) sharesPath = true;
             seenPaths.add(path);
