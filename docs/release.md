@@ -203,7 +203,8 @@ the plugin — [the publishing mirror](#the-publishing-mirror).
 developed in: `scripts/mirror-plugin.ts` writes it from `packages/plugin`, `packages/engine` and
 `packages/shared`, and every release replaces it wholesale.
 
-- **What it holds**: the three packages with their tests and `__mocks__` removed (the mirror runs no
+- **What it holds**: the three packages with their test files (`*.test.*`, including the
+  shared fixtures) and `__mocks__` removed (the mirror runs no
   tests, and their `@courier/testing` imports name a workspace package that is not there), the
   plugin's `scripts/build.ts` and nothing else from `scripts/`, a generated root `package.json` and
   `bun.lock`, `manifest.json` at the root, the generated `README.md`, `LICENSE`, `.bun-version`,

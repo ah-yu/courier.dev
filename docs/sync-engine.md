@@ -763,9 +763,10 @@ file now lives at.
     wired only after the bind returns, so an edit made during a slow bind would otherwise wait for the
     periodic pass. `0` makes it unconditional, `Infinity` disables it.
   - Covered by `priority.test.ts`, `work-pool.test.ts`, `path-queue.test.ts`, the
-    `SyncEngine — the order a pass works in`, `SyncEngine — how much a pass runs at once`,
-    `SyncEngine — two chains naming one path` and `SyncEngine — operation interleavings` cases in
-    `engine.batching.test.ts`, the priority/catch-up cases in
+    `SyncEngine — the order a pass works in` and `SyncEngine — how much a pass runs at once`
+    cases in `engine.batching.test.ts`, the `SyncEngine — two chains naming one path` cases in
+    `engine.events.test.ts`, the `SyncEngine — operation interleavings` cases in
+    `engine.self-writes.test.ts`, the priority/catch-up cases in
     `host.test.ts` and the plugin's `host.test.ts`, the `getVaultSyncIndex` mapping in
     `sync-handlers.test.ts`, the head/previousLive SQL in `file-versions.test.ts`, and the cold-start case
     in `sync.e2e.test.ts` / `plugin.e2e.test.ts` (mobile).

@@ -76,12 +76,15 @@ function makeJob(options: JobOptions = {}) {
 }
 
 describe("LocalEventJob — batching", () => {
-  it("sends one request for a burst of small versions", async () => {
-    const { job, pushed, applied } = makeJob();
+  it("sends one request for a burst of small versions, and saves the settled batch", async () => {
+    const { job, pushed, applied, persisted } = makeJob();
     for (let i = 0; i < 5; i++) await job.add(version(`f${i}`, 10), "create");
     await job.complete();
     expect(pushed).toEqual([["f0", "f1", "f2", "f3", "f4"]]);
     expect(applied).toEqual(["f0", "f1", "f2", "f3", "f4"]);
+    // The sync points a settled answer writes reach the state store through `persist()`;
+    // without it a restart would decide the same files again.
+    expect(persisted()).toBe(1);
   });
 
   it("bounds a batch by file count", async () => {
@@ -123,7 +126,7 @@ describe("LocalEventJob — batching", () => {
 
 describe("LocalEventJob — settlement", () => {
   it("drops every version of a request that fails, and reports the failure once", async () => {
-    const { job, forgotten, applied } = makeJob({
+    const { job, forgotten, applied, persisted } = makeJob({
       push: async () => {
         throw new Error("boom");
       },
@@ -133,6 +136,9 @@ describe("LocalEventJob — settlement", () => {
     await expect(job.complete()).rejects.toThrow("boom");
     expect(forgotten).toEqual(["a", "b"]);
     expect(applied).toEqual([]);
+    // Nothing settled, so the job saves nothing: the engine's own catch persists the state
+    // without these versions, and saving here would keep their pending entries.
+    expect(persisted()).toBe(0);
   });
 
   it("settles a per-file refusal through the host, with the version's kind", async () => {

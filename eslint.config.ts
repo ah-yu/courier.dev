@@ -106,8 +106,9 @@ const DIRECTORY_IGNORES: string[] = [
   "packages/testing/**",
   /*
    * The engine suite's shared fixtures: test-only code that lives outside a `*.test.ts`
-   * file so the topics can import it. The directory's mirror would never publish it, and
-   * the app rules (window timers, the config folder) do not apply to a fake vault.
+   * file so the topics can import it. The directory ignore for `*.test.*` does not match
+   * `*.test-helpers.ts`, and the app rules (window timers, the config folder) do not apply
+   * to a fake vault.
    */
   "**/*.test-helpers.ts",
   /*
