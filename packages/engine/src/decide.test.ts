@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { decideFile, decideInputFrom, isLocalDeletion } from "./decide";
-import type { DecideContext, TombstoneHandling } from "./decide";
+import {
+  decideFile,
+  decideInputFrom,
+  decideNewLocalFile,
+  decideRefusedPush,
+  isLocalDeletion,
+  needsFreshRead,
+} from "./decide";
+import type { DecideContext, RemoteOwner, TombstoneHandling } from "./decide";
 import type { VersionChainEntry } from "@courier/shared";
 
 function chain(...entries: Partial<VersionChainEntry>[]): VersionChainEntry[] {
@@ -565,5 +572,104 @@ describe("decideFile — the edges a mutation run found unasserted", () => {
         remoteChain: chain({ versionId: "v1" }, { versionId: "v2", contentHash: "h3" }),
       }),
     ).toEqual({ action: "synced" });
+  });
+});
+
+/** A live chain that could own a path or a set of bytes. */
+function owner(fileId: string, contentHash: string, versionId = "v9"): RemoteOwner {
+  return { fileId, head: chain({ versionId, contentHash })[0] };
+}
+
+describe("decideNewLocalFile", () => {
+  it("re-points the chain of a delete whose bytes reappear", () => {
+    // The delete is the other half of a move: creating a second chain here is what left
+    // both `old.md` and `new.md` on disk for one file.
+    expect(
+      decideNewLocalFile({
+        contentHash: "h1",
+        deletedFileId: "deleted",
+        pathOwner: owner("path-owner", "h1"),
+        contentOwner: owner("content-owner", "h1"),
+      }),
+    ).toEqual({ kind: "rename-on-deleted", fileId: "deleted" });
+  });
+
+  it("adopts the live chain the server records at the path, above the content fallback", () => {
+    expect(
+      decideNewLocalFile({
+        contentHash: "h1",
+        deletedFileId: null,
+        pathOwner: owner("path-owner", "h1"),
+        contentOwner: owner("content-owner", "h1"),
+      }),
+    ).toEqual({ kind: "adopt", owner: owner("path-owner", "h1"), sameContent: true });
+  });
+
+  it("calls the adoption a conflict when the bytes are not the head's", () => {
+    // Same identity, different content: the move is adopted, but the copy on disk did
+    // not travel with it — that is an edit to park, not a rename to push.
+    const decision = decideNewLocalFile({
+      contentHash: "h1",
+      deletedFileId: null,
+      pathOwner: owner("path-owner", "h2"),
+      contentOwner: null,
+    });
+    expect(decision.kind).toBe("adopt");
+    expect(decision.kind === "adopt" && decision.sameContent).toBe(false);
+  });
+
+  it("falls back to the content owner when no chain records the path", () => {
+    expect(
+      decideNewLocalFile({
+        contentHash: "h1",
+        deletedFileId: null,
+        pathOwner: null,
+        contentOwner: owner("content-owner", "h1"),
+      }),
+    ).toEqual({ kind: "adopt", owner: owner("content-owner", "h1"), sameContent: true });
+  });
+
+  it("creates a chain when nothing is known", () => {
+    expect(
+      decideNewLocalFile({
+        contentHash: "h1",
+        deletedFileId: null,
+        pathOwner: null,
+        contentOwner: null,
+      }),
+    ).toEqual({ kind: "create" });
+  });
+});
+
+describe("needsFreshRead", () => {
+  it("re-reads before a pull taken from the caller's pre-fetched bytes", () => {
+    // The chain request between the read and the decision gave the file time to change,
+    // and a pull overwrites it.
+    expect(needsFreshRead({ action: "pull" }, true)).toBe(true);
+  });
+
+  it("re-reads before a conflict or a synced adoption", () => {
+    expect(needsFreshRead({ action: "conflict" }, true)).toBe(true);
+    expect(needsFreshRead({ action: "synced" }, true)).toBe(true);
+  });
+
+  it("lets a push keep the bytes it read", () => {
+    // A push sends what it read, and the caller's stamp check already proved the file
+    // did not move.
+    expect(needsFreshRead({ action: "push", pushAction: "modify" }, true)).toBe(false);
+  });
+
+  it("does not re-read bytes that were just read afresh", () => {
+    expect(needsFreshRead({ action: "pull" }, false)).toBe(false);
+  });
+});
+
+describe("decideRefusedPush", () => {
+  it("decides again from the refused chain on the first attempt", () => {
+    expect(decideRefusedPush(0)).toBe("re-decide");
+  });
+
+  it("reports the second refusal instead of looping", () => {
+    expect(decideRefusedPush(1)).toBe("report");
   });
 });

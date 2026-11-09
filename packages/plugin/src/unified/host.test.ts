@@ -1157,8 +1157,8 @@ describe("EngineHost", () => {
       await host.start();
 
       // The socket names the peer that pushed; the host hands the label to the engine as
-      // part of the coalesced batch. What the engine does with it is covered in
-      // engine.test.ts.
+      // part of the coalesced batch. What the engine does with it is covered in the
+      // engine suite.
       const handle = vi.spyOn(host.engine!, "handleFilePushedBatch");
       const socket = MockWebSocket.instances.at(-1)!;
       socket.deliver({

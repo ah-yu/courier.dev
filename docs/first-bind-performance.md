@@ -76,7 +76,7 @@ COURIER_BENCH=1 COURIER_BENCH_FILES=1000 COURIER_BENCH_RTT=30 \
 
 The refused-batch reproduction that used to sit beside them was removed once the fix landed: what it
 measured — one refused batch costs one batch, not the rest of the pass — is pinned by the `a first bind
-that meets the server's limits` cases in `packages/engine/src/engine.test.ts`, which run in the default
+that meets the server's limits` cases in `engine.batching.test.ts`, which run in the default
 gate instead of behind `COURIER_BENCH`.
 
 ## Where a first bind spends its time
@@ -407,7 +407,7 @@ WebSocket would be a contract change for a transport-level win.
 **Pinned by**: the `ContentPrefetcher` cases in `content-prefetch.test.ts` (one request per hash, the
 count/byte caps, concurrency, LRU by bytes and by entries, a failed request answering "not prefetched",
 a `404` not being cached, `stop` answering its waiters); the `SyncEngine — download read-ahead` cases in
-`engine.test.ts` (a cold bind reads 64 per request, a failed read-ahead request costs the pass nothing,
+`engine.batching.test.ts` (a cold bind reads 64 per request, a failed read-ahead request costs the pass nothing,
 `contentPrefetch: false` keeps the wave, a notification burst reads ahead); and
 `bulk-write.e2e.test.ts`, where a 400-note remote lands on a fresh device in ≤ 10 content requests and the
 live peer's 700-file burst stays under 20.

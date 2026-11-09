@@ -14,7 +14,8 @@
 
 Shared TS sync engine, no build step (`src/index.ts` exported directly), depends only on `@courier/shared`.
 Key modules: `crypto.ts` (PBKDF2 600k + AES-256-GCM + SHA-256 on Web Crypto), `decide.ts` (pure
-versionId-aligned push/pull/conflict decisions), `engine.ts` (`SyncEngine` orchestrator: reconcile,
+decisions: versionId-aligned push/pull/conflict, the identity a new local file takes, and the event
+path's read/re-decision rules), `engine.ts` (`SyncEngine` orchestrator: reconcile,
 incremental events, echo suppression, rename-by-hash, restore helpers),
 `adapter.ts` (`SyncAdapter` + `FileStamp` — plugin provides an Obsidian adapter, CLI a filesystem adapter),
 `api.ts` (`SyncApi` + `PushFile`), `op-queue.ts` (the host-level bound on how many event-driven
@@ -34,7 +35,10 @@ counter; it isolates the two convenience listeners, `onSyncActivity` and `onProg
 three notices still call the host directly), `pass-view.ts` (the pass's
 ordering, path geometry and read-ahead candidates as pure functions over the pass's snapshot) and
 `conflict.ts` (`ConflictResolver` — the remote-wins rule, the parked copy and the config-folder
-mtime rule, behind five narrow engine calls). Engine
+mtime rule, behind five narrow engine calls) and `local-event-job.ts` (`LocalEventJob` — one burst of
+local vault events' shared state and wire mechanics: the change list, the tombstone ledger a create
+can take back, and the 100-file / 8 MiB send with its settle and abandon rules, while the phases
+that _decide_ stay in the engine). Engine
 tests use mock adapters/APIs (`packages/engine/src/*.test.ts`).
 
 `SyncEngine` composes its seams rather than containing them, so the orchestrator does not also own
@@ -45,11 +49,14 @@ pass decided from, passed as one read-only snapshot instead of seven positional 
 **decision input builders** in `decide.ts` (`DecideContext` / `decideInputFrom` / `isLocalDeletion`) —
 the same input used to be assembled in four places, and the subtle half of it (`localDeletion`) was
 written out twice with different expressions. A push is described by one `PushRequest` value object
-rather than six positional arguments (three of them strings, one nullable). The four seams this document
-describes carry the rest: **`ContentReader`** (a pull's bytes), **`ActivityReporter`** (what the host is
-told), **`ConflictResolver`** (the conflict rules) and the **`pass-view.ts`** functions (ordering, path
-geometry, read-ahead candidates). `packages/engine/src/`'s
-`decide.test.ts`, `self-events.test.ts`, `remote-index.test.ts`, `host.test.ts` and `websocket.test.ts`
+rather than six positional arguments (three of them strings, one nullable). The five seams this
+document describes carry the rest: **`ContentReader`** (a pull's bytes), **`ActivityReporter`** (what
+the host is told), **`ConflictResolver`** (the conflict rules), the **`pass-view.ts`** functions
+(ordering, path geometry, read-ahead candidates) and **`LocalEventJob`** (a burst's shared
+bookkeeping and batches). `packages/engine/src/`'s
+`decide.test.ts`, `pass-view.test.ts`, `conflict.test.ts`, `content-reader.test.ts`,
+`activity-reporter.test.ts`, `local-event-job.test.ts`, `self-events.test.ts`,
+`remote-index.test.ts`, `host.test.ts` and `websocket.test.ts`
 are the L0 net for those — the last one with a fake global `WebSocket` and fake timers, because the
 L1/L2 suites run a real socket against a real server and therefore only ever exercise the happy path
 (a refused subscribe, the exponential retry, the 60-second quiet-socket close and a message that is not
@@ -87,7 +94,7 @@ The rules below are the ones the e2e suites exist to protect.
     exists (this device deleted it and a peer edited it) resolves to the remote head.
     **No copy is parked and no `onConflictResolved` event is raised** — the plugin still learns about a
     remote copy through `onSettingsApplied` (its reload card), and a local win needs no message because
-    the device's file did not change. Covered by the `config-folder conflict` cases in `engine.test.ts`,
+    the device's file did not change. Covered by the `config-folder conflict` cases in `engine.scope.test.ts`,
     `settings-sync.e2e.test.ts` and `plugin.e2e.test.ts`.
   - **Content this engine wrote itself is never a divergence, because the window is gone.** A pull's
     write and its sync point are one job in the path's queue, so no other decision can run between them:
@@ -99,7 +106,7 @@ The rules below are the ones the e2e suites exist to protect.
     self-event log still suppresses the vault event an engine write fires (see
     [Self-events](#self-events)); the config-folder branch still settles by modification time. Covered by
     the `does not park a copy of the note a pull is still recording` case in `sync.e2e.test.ts` and the
-    `a notification for the peer's next version during a pull` cases in `engine.test.ts`.
+    `a notification for the peer's next version during a pull` cases in the engine suite.
   - The consequences are deliberate: the first pusher wins a two-sided edit, the losing content exists
     only on the device that detected the conflict (those files never sync — the peer would otherwise
     conflict again), and the device that detects a conflict sees the note change under it. Recovery is
@@ -135,7 +142,7 @@ The rules below are the ones the e2e suites exist to protect.
   move the sync point backwards under the device's own successful push (the next edit then conflicts
   with it). `decideIncremental` and `handleFilePushed` read the file immediately before deciding and
   need neither check. Covered by `decide.test.ts` and the `a decision that meets this device's own
-  content on the head` and `a reconcile racing an incremental event` cases in `engine.test.ts`.
+  content on the head` and `a reconcile racing an incremental event` cases in `engine.offline.test.ts`.
 
 - **A pull is one job, and the pass does not act on a snapshot an event has invalidated.** Every operation
   that reads or writes a path runs as a job in that path's queue (`PathQueue`), so a pull's write and its
@@ -145,7 +152,7 @@ The rules below are the ones the e2e suites exist to protect.
   begins (`ReconcilePass.stateAtStart`) and **skips** a file whose sync point changed since; a delete it was
   about to publish is also skipped when an event is queued behind its job (`PathQueue.hasQueued`), because
   that event's decision is newer than the pass's snapshot. The next pass decides from the fresh chain.
-  Covered by the `a reconcile racing an incremental event` cases in `engine.test.ts` and the
+  Covered by the `a reconcile racing an incremental event` cases in `engine.offline.test.ts` and the
   `does not park a copy of the note a pull is still recording` / `puts back the version a notification
   adopted before the pull's bytes landed` cases in `sync.e2e.test.ts`.
 
@@ -186,7 +193,7 @@ The rules below are the ones the e2e suites exist to protect.
     Without that, a scheduled pass read the new note as the file under this device's delete
     point and put the deleted note back on top of it, leaving two live chains at one path.
     Covered by the `does not revive its deleted chain over a peer's new file at the same path`
-    case in `engine.test.ts`.
+    case in `engine.conflicts.test.ts`.
   - **A recreate event checks the server before it restores.** A vault event decides from the tracked
     chain alone, and the in-memory remote index can be stale: a peer's `file_pushed` never arrived
     (the socket was down) and no pass has run since, so the server may already hold a new chain at
@@ -201,14 +208,14 @@ The rules below are the ones the e2e suites exist to protect.
     the same path while out of touch (or before the notification arrives) can still leave two live
     chains until one of them wins a conflict — the same limit the conflict rule already accepts.
     Covered by the `does not restore on a recreate event…` / `adopts the owner…` cases in
-    `engine.test.ts` and the `5d` case in `path-sync.e2e.test.ts`.
+    `engine.conflicts.test.ts` and the `5d` case in `path-sync.e2e.test.ts`.
   - **A tracked chain whose head is a `delete` and whose file is gone is retired too**, unless its
     sync point is the tombstone itself (the recreate case, which keeps the entry). The deletion has
     already happened on this device — the file was removed while nothing watched, or the peer deleted
     it before it was ever materialised — so keeping the pre-delete sync point would leave the state
     naming a path with no file, and the next note written at the freed path would be decided against
     the dead chain (deleted and parked) instead of becoming a new chain. Covered by the
-    `retires a peer-deleted chain whose local file was already gone` case in `engine.test.ts`.
+    `retires a peer-deleted chain whose local file was already gone` case in `engine.conflicts.test.ts`.
   - **Applying a deletion drops the chain from the identity index** (`RemoteIndex.forget`). A chain whose
     head is a `delete` lives at no path, and the index's previous **live** head is not an identity a file
     at that path can adopt: leaving it there made the file adopt a chain whose content it does not have,
@@ -216,7 +223,7 @@ The rules below are the ones the e2e suites exist to protect.
     been applied (and an empty file matched the tombstone by its empty-string content hash). The index
     also refuses a tombstone head on the adoption paths (`handleLocalChange`'s identity lookup and
     `findRemoteFileIdByContent`) as a second line. Covered by the `pushes a local file at a peer-deleted
-    path as a new chain, not a conflict` case in `engine.test.ts`, `remote-index.test.ts`, and the L2
+    path as a new chain, not a conflict` case in `engine.self-writes.test.ts`, `remote-index.test.ts`, and the L2
     `restores the copy onto a new chain after a peer deleted the original` case.
 
 The layer-by-layer coverage matrix for these bind cases is in [testing.md](testing.md#layer-coverage-the-merge-matrix).
@@ -281,7 +288,7 @@ The layer-by-layer coverage matrix for these bind cases is in [testing.md](testi
   the newest non-delete version as the restorable one — restoring a file pushed a duplicate
   `restore` (or a duplicate fileId, or a phantom conflict), pulling a new remote file pushed it back
   under a second fileId, and following a peer's move pushed a second `rename` version. Covered by the
-  `SyncEngine — the vault event caused by its own write` tests in `engine.test.ts` and by the
+  `SyncEngine — the vault event caused by its own write` tests in `engine.self-writes.test.ts` and by the
   recycle-bin cases in `plugin.e2e.test.ts` / the real-Obsidian suite.
 
 ## Identity: one path, one chain
@@ -305,7 +312,7 @@ file now lives at.
     **before** the push request goes out (`SelfEventLog.rememberPushedVersion`), because the server's
     `file_pushed` echo can beat the HTTP response back.
 
-  Covered by `engine.test.ts`, the rename cases in `plugin.e2e.test.ts`, and the root-level rename case
+  Covered by the engine suite, the rename cases in `plugin.e2e.test.ts`, and the root-level rename case
   in the real-Obsidian suite.
 
 ## Offline changes and reconciliation
@@ -393,7 +400,7 @@ file now lives at.
     `two pushes decided from the same head, in flight at once` cases in `sync.e2e.test.ts` (exactly
     one of two concurrent same-base pushes lands; an earlier large edit never becomes the head by
     finishing last; two devices editing at the same instant park the losing text instead of dropping
-    it) and by `engine.test.ts` / `sync-handlers.test.ts`.
+    it) and by the engine suite / `sync-handlers.test.ts`.
   - **A deletion that raced an edit is a conflict, not a pull.** `DecideInput.localDeletion` says a
     tracked file's absence is _this device's_ deletion — a **live** sync point of its own, nothing on
     disk, and nothing at the path the head records (a head whose path holds a local file is a peer's
@@ -404,7 +411,7 @@ file now lives at.
     a notification — and the remote side wins it: the peer's version comes back, and there is no local
     content to park (the file this device deleted is gone).
 
-  Covered by the `changes made while the connection is down` cases in `engine.test.ts`, the
+  Covered by the `changes made while the connection is down` cases in `engine.offline.test.ts`, the
   `reconciles when the socket comes back` cases in `host.test.ts` / `plugin.e2e.test.ts` /
   `cli-daemon.e2e.test.ts`, and `sync.e2e.test.ts`.
 
@@ -437,7 +444,7 @@ file now lives at.
     the same size, is missed until something else changes. Every path that can afford to read still
     reads — a push, a conflict, a file whose stamp differs — and a notification about an unchanged file
     no longer reads it at all.
-  - Covered by the `SyncEngine — what a large file costs` cases in `engine.test.ts` (the read counter on
+  - Covered by the `SyncEngine — what a large file costs` cases in `engine.content.test.ts` (the read counter on
     `FakeAdapter`, plus the bind cases that pin one read per file), the `reads an edited file once`
     cases, and the stamp cases in `large-file.e2e.test.ts` (the real filesystem, and a restart over the
     persisted state).
@@ -451,7 +458,7 @@ file now lives at.
   bytes. A `content_missing` refusal of the stamp-proved move is the one place it then reads the file, to
   finish a move whose blob the store has lost. Covered by the `reads an edited file once`, `re-reads an
   edit that lands while the chain is being fetched`, `moves a file without reading it` and `reads a moved
-  file whose stamp moved with it` cases in `engine.test.ts`.
+  file whose stamp moved with it` cases in `engine.content.test.ts`.
   - The stamp a move was proved by is recorded with its sync point, so the next pass reads nothing
     either. A `content_missing` retry sends the file's bytes only after they still hash to the
     version's content (and stages chunks above 8 MiB); a changed or vanished file throws. A decision
@@ -474,7 +481,7 @@ file now lives at.
   - A `rename` still records its **real plaintext size** even when it carries no content. Size never
     refuses a pull (the cap bounds uploads, see [sync-scope.md](sync-scope.md#size-cap)); it is what a
     peer's status surface reports and what a chunked transfer is planned from.
-  - Covered by the rename cases in `engine.test.ts` and in `large-file.e2e.test.ts` (which asserts the
+  - Covered by the rename cases in `engine.content.test.ts` and in `large-file.e2e.test.ts` (which asserts the
     payload bytes on the wire, not just the outcome).
 
 ## Batching
@@ -520,7 +527,7 @@ file now lives at.
     travels alone, and a chunked upload still runs without another request interleaved, because both
     `settle` first. At 50 000 files the read/encrypt half is ~1 ms per file, so waiting for every answer
     before reading the next batch left the network idle for about half of the bind.
-  - Covered by the batching cases in `engine.test.ts` (the fake server records each request's file
+  - Covered by the batching cases in `engine.batching.test.ts` (the fake server records each request's file
     count), the `a first bind that meets the server's limits` cases (a refused batch, the batches after
     it, a `429` wait, the read count, and "the second batch is ready while the first request is in
     flight"), and `large-file.e2e.test.ts` (250 notes → three pushes).
@@ -573,7 +580,7 @@ file now lives at.
     flight — a queue that never moves would hang the pass that waits on it.
   - Covered by `content-prefetch.test.ts` (caps, concurrency, demand-before-speculation ordering, LRU by
     bytes and entries, failure, `404`, `stop`, normalized limits), the `SyncEngine — download read-ahead`
-    cases in `engine.test.ts`, and `bulk-write.e2e.test.ts` (a 400-note remote on a fresh device in ≤ 10
+    cases in `engine.batching.test.ts`, and `bulk-write.e2e.test.ts` (a 400-note remote on a fresh device in ≤ 10
     content requests; a live peer's 700-file burst under 20).
 
 ## Chunked transfer
@@ -602,7 +609,7 @@ file now lives at.
     what lets a reader — this engine, an older peer or a dialog — pick the right framing from the
     version row alone, with no format flag on the wire.
   - A `rename` is unaffected: the threshold applies to a payload, and a move has none.
-  - Covered by the chunked cases in `engine.test.ts` (upload calls, range fetches, resume from a
+  - Covered by the chunked cases in `engine.content.test.ts` (upload calls, range fetches, resume from a
     prefix, the streaming sink, an aborted stream) and in `large-file.e2e.test.ts` (a 9 MiB
     file: three chunk requests, a content-less push, a peer fetching three ranges and writing
     them through one streamed commit, identical bytes; plus the shapes the server refuses).
@@ -756,9 +763,10 @@ file now lives at.
     wired only after the bind returns, so an edit made during a slow bind would otherwise wait for the
     periodic pass. `0` makes it unconditional, `Infinity` disables it.
   - Covered by `priority.test.ts`, `work-pool.test.ts`, `path-queue.test.ts`, the
-    `SyncEngine — the order a pass works in`, `SyncEngine — how much a pass runs at once`,
-    `SyncEngine — two chains naming one path` and `SyncEngine — operation interleavings` cases in
-    `engine.test.ts`, the priority/catch-up cases in
+    `SyncEngine — the order a pass works in` and `SyncEngine — how much a pass runs at once`
+    cases in `engine.batching.test.ts`, the `SyncEngine — two chains naming one path` cases in
+    `engine.events.test.ts`, the `SyncEngine — operation interleavings` cases in
+    `engine.self-writes.test.ts`, the priority/catch-up cases in
     `host.test.ts` and the plugin's `host.test.ts`, the `getVaultSyncIndex` mapping in
     `sync-handlers.test.ts`, the head/previousLive SQL in `file-versions.test.ts`, and the cold-start case
     in `sync.e2e.test.ts` / `plugin.e2e.test.ts` (mobile).
@@ -864,7 +872,7 @@ file now lives at.
   "resolved" by pushing the restored bytes into the occupant's chain. No server-side check is possible
   here: paths are AES-GCM encrypted with a random IV, so the server cannot tell that two rows name the
   same path — the decision is the client's. Covered by the `restoring onto a path that is no longer free`
-  tests in `engine.test.ts`, the recycle-bin cases in `plugin.e2e.test.ts`, and the real-Obsidian case.
+  tests in `engine.scope.test.ts`, the recycle-bin cases in `plugin.e2e.test.ts`, and the real-Obsidian case.
   Two consequences of the same rule, both in the plugin: `restoreFile` writes at the chain's **own live
   path** (`pathForFileId`) rather than the argument, because an open dialog's path can be one a rename has
   moved on from — writing there would leave one chain live at two paths; and the version-history view and

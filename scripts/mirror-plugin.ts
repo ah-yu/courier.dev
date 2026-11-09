@@ -17,8 +17,9 @@
  *
  * What lands in the mirror, and why:
  *
- * - `packages/{plugin,engine,shared}` with every `*.test.ts` and `__mocks__` removed: the
- *   mirror runs no tests, and their imports (`@courier/testing`) are workspace packages
+ * - `packages/{plugin,engine,shared}` with every test file (`*.test.*`, including a suite's
+ *   shared fixtures such as `engine.test-helpers.ts`) and `__mocks__` removed: the mirror
+ *   runs no tests, and their imports (`vitest`, `@courier/testing`) are workspace packages
  *   that do not exist there.
  * - `manifest.json` at the root: the directory reads it from the default branch, and the
  *   release assets are staged from it.
@@ -78,7 +79,10 @@ function excluded(rel: string): boolean {
   if (parts.some((part) => part === "node_modules" || part === "dist" || part === ".git"))
     return true;
   if (parts.some((part) => part === "__mocks__")) return true;
-  return rel.endsWith(".test.ts") || rel.endsWith(".test.js");
+  // `*.test.ts`/`*.test.js`, and a suite's shared fixtures (`*.test-helpers.ts`): the mirror
+  // runs no tests, and those files import `vitest` / `@courier/testing`, which it lacks.
+  const base = parts[parts.length - 1] ?? "";
+  return /\.test(?:[.-]|$)/.test(base);
 }
 
 /** Copy the package trees, minus the files a release artifact has no use for. */

@@ -345,7 +345,7 @@ All 3 survivors are equivalent or defensive and need no new assertions for the r
 - `lastKnown.versionId != null` → `true`: the two state fields are always written together, `lastKnownContentHash` is also null when `versionId` is null, and with a local file present the content hash cannot be null, so both sides of the comparison are false together;
 - `remoteHead`'s `chain.length > 0` → `true`, `> 0` → `>= 0`: on an empty chain `chain[-1]` is still `undefined` (the same equivalent mutant as in the first measured run).
 
-The three matching "adopt the head as the sync point when converging" spots in the engine (reconcile's `synced` branch, `decideIncremental`, `handleFilePushed`) were **not included** in the mutation scope: one mutant in `engine.test.ts` takes about 13 seconds, which by "when to do it" is not worth it; they are covered by the three new cases in `engine.test.ts`, one L2 in `plugin.e2e.test.ts` and one L3 in the real-device suite. The tool and artifacts were removed as per this document's first section, with no changes left in `package.json` / `pnpm-lock.yaml`.
+The three matching "adopt the head as the sync point when converging" spots in the engine (reconcile's `synced` branch, `decideIncremental`, `handleFilePushed`) were **not included** in the mutation scope: one mutant in the engine suite takes about 13 seconds, which by "when to do it" is not worth it; they are covered by the three new cases in the engine suite, one L2 in `plugin.e2e.test.ts` and one L3 in the real-device suite. The tool and artifacts were removed as per this document's first section, with no changes left in `package.json` / `pnpm-lock.yaml`.
 
 ## Sixth measured run (2026-10-26: the large-file sync rules)
 
@@ -358,7 +358,7 @@ suite cost, not by subject:
   `plugin/src/shared/version-content.ts`), with only those files' L0 tests: 654 mutants,
   1m11, **90.37% → 94.50%** after adding assertions (62 → 36 survivors).
 - **`engine.ts` ranges** (restore, the `content_missing` retry, `preparePush`, the
-  sync-point stamp, `decideIncremental`), with `engine.test.ts`: 264 mutants, 6m12,
+  sync-point stamp, `decideIncremental`), with the then-single `engine.test.ts`: 264 mutants, 6m12,
   **70.08% → 71.97%** (79 → 74 survivors). The low score is expected for this file: the
   ranges are dense with defence-in-depth guards that the caller already blocks.
 
@@ -409,7 +409,7 @@ Tooling notes from this run: Stryker 10 could not be installed from the local mi
 depends on `@babel/types@^8`); with an `.npmrc` pointing at the official registry through a
 proxy it installs and runs, and its sandbox runs its own `bun install`, so the registry
 must reach that too. The `engine.ts` / `host.ts` ranges were **not** surveyed here: a
-whole-file run on `engine.test.ts` costs minutes per mutant, and those ranges need the
+whole-file run on `engine.*.test.ts` costs minutes per mutant, and those ranges need the
 per-function trim described under "When to do it".
 
 ## When to do it
