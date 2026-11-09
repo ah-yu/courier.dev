@@ -5814,6 +5814,24 @@ describe("SyncEngine — a first bind that meets the server's limits", () => {
   });
 });
 
+describe("SyncEngine — the empty-content hash", () => {
+  it("shares one in-flight digest between the decisions a pass starts together", async () => {
+    const { engine } = await makeEngine();
+    const internals = engine as unknown as {
+      emptyContentHash(): Promise<string>;
+    };
+
+    const first = internals.emptyContentHash();
+    const second = internals.emptyContentHash();
+
+    // One promise, not one per decision: a pool wave awaits the same digest.
+    expect(second).toBe(first);
+    expect(await first).toBe(await sha256Text(""));
+    // The settled digest stays cached for the decisions after the wave.
+    expect(internals.emptyContentHash()).toBe(first);
+  });
+});
+
 describe("SyncEngine — batched content reads", () => {
   /** A source vault holding `paths`, bound and synced, ready to be pulled by a target. */
   async function sourceFor(
