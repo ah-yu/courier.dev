@@ -36,14 +36,14 @@ three notices still call the host directly), `pass-view.ts` (the pass's
 ordering, path geometry and read-ahead candidates as pure functions over the pass's snapshot) and
 `conflict.ts` (`ConflictResolver` — the remote-wins rule, the parked copy and the config-folder
 mtime rule, behind five narrow engine calls), `local-event-job.ts` (`LocalEventJob` — one burst of
-local vault events' shared state and wire mechanics: the change list, the tombstone ledger a create
-can take back, and the 100-file / 8 MiB send with its settle and abandon rules, while the phases
-that _decide_ stay in the engine), `push-batch.ts` (`PushBatch` — one batch's wire mechanics: the
-100-file / 8 MiB bound, at most one request in flight (pipelined for a bind's creates), a limiter
-that ends the sequence and the first failure recorded; the pass's creates, the pass's tombstones
-and `LocalEventJob` all send through it) and `excluded-moves.ts` (`ExcludedMoveFinder` — the
-same-name, same-size, unique-hash fallback that recognises a move into an excluded folder before
-it becomes a tombstone, with the 30-second listing TTL it owns). Engine
+local vault events' shared state: the change list, the tracked files waiting for the job's one bulk
+chain read, and the tombstone ledger a create can take back, while the phases that _decide_ stay in
+the engine and the send itself is `PushBatch`'s), `push-batch.ts` (`PushBatch` — one batch's wire
+mechanics: the 100-file / 8 MiB bound, at most one request in flight (pipelined for a bind's
+creates), a limiter that ends the sequence and the first failure recorded; the pass's creates, the
+pass's tombstones and `LocalEventJob` all send through it) and `excluded-moves.ts`
+(`ExcludedMoveFinder` — the same-name, same-size, unique-hash fallback that recognises a move into
+an excluded folder before it becomes a tombstone, with the 30-second listing TTL it owns). Engine
 tests use mock adapters/APIs (`packages/engine/src/*.test.ts`).
 
 `SyncEngine` composes its seams rather than containing them, so the orchestrator does not also own
