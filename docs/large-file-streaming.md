@@ -60,7 +60,7 @@ sides whole, and inspecting a restore target read the file it was about to ask a
   `writeFile` path, so an adapter bug or an unsupported platform cannot make a large pull fail
   forever.
 - **Existence checks stopped reading files.** `followRemotePath`, `inspectRestoreTarget`,
-  `parkConflictFile`, the tombstone confirmation and the notification's head-path check use
+  the conflict park, the tombstone confirmation and the notification's head-path check use
   `statFile` instead of `readFile`. The pre-pull re-check also uses the pass's stamp before it
   falls back to re-reading, so an unchanged large file is not read again before its pull.
 
@@ -118,7 +118,7 @@ why the download half came first.
 **Restore.** `restoreFile` fetches a version into one buffer because it then pushes those bytes
 back as the restore version. Streaming both halves would need the upload path above.
 
-**Conflict resolution.** `handleConflict` reads the local side whole before applying the remote
+**Conflict resolution.** `ConflictResolver.resolve` reads the local side whole before applying the remote
 one, because the local bytes are what gets parked in the conflict copy. A large attachment that
 conflicts on both sides is therefore still read whole once; the ordinary pull is not.
 

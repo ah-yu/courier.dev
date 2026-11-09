@@ -245,6 +245,11 @@ The first run picked four pure core files. This time the target was a block of n
 
 `mutate` lists only four ranges—`preparePush`'s mtime, reconcile's tombstone retry, `handleConflict` / `resolveSettingsConflict`, `applyLocalDelete`—everything else follows this document's config. 157 mutants, 8 workers, **20 seconds**. Measuring the whole file would take several minutes on this ~10-second suite, while the payoff is all in the newly added ranges.
 
+> These runs are a record of the code as it stood on 2026-10-17. The 2026-11 extraction moved part
+> of what they name: `handleConflict` / `resolveSettingsConflict` are now
+> `ConflictResolver.resolve` / `resolveSettings` in `conflict.ts`, and reconcile, `preparePush` and
+> `applyLocalDelete` stayed in `engine.ts`. The measured history is kept verbatim.
+
 | Round                                       | Score (covered)    | Survived | Uncovered |
 | ------------------------------------------- | ------------------ | -------- | --------- |
 | First round                                 | 64.33% (73.72)     | 36       | 20        |

@@ -15,7 +15,7 @@
 Shared TS sync engine, no build step (`src/index.ts` exported directly), depends only on `@courier/shared`.
 Key modules: `crypto.ts` (PBKDF2 600k + AES-256-GCM + SHA-256 on Web Crypto), `decide.ts` (pure
 versionId-aligned push/pull/conflict decisions), `engine.ts` (`SyncEngine` orchestrator: reconcile,
-incremental events, echo suppression, rename-by-hash, conflict resolution, restore helpers),
+incremental events, echo suppression, rename-by-hash, restore helpers),
 `adapter.ts` (`SyncAdapter` + `FileStamp` — plugin provides an Obsidian adapter, CLI a filesystem adapter),
 `api.ts` (`SyncApi` + `PushFile`), `op-queue.ts` (the host-level bound on how many event-driven
 operations run at once), `sync-scope.ts` (the one predicate for _which paths this device syncs_:
@@ -25,19 +25,30 @@ is the ownership rule), `conflict-file.ts` (naming the
 recovering the original path from it), `websocket.ts` (`SyncWebSocket` — user key + a self-declared device label as
 the subscribe payload), `host.ts` (`SyncHost` — the loop both hosts run), `self-events.ts`
 (`SelfEventLog` — the time-bounded records that let the engine recognise its own writes, deletes,
-moves and push echoes, on an injected clock) and `remote-index.ts` (`RemoteIndex` — the live path, head
-and content hash of every chain the server holds, which is what keeps one path on one chain). Engine
+moves and push echoes, on an injected clock), `remote-index.ts` (`RemoteIndex` — the live path, head
+and content hash of every chain the server holds, which is what keeps one path on one chain),
+`content-reader.ts` (`ContentReader` — every whole-file version's ciphertext, batched behind one seam: the
+read-ahead first, then the wave batch with its 8 MiB and 64-hash bounds), `activity-reporter.ts`
+(`ActivityReporter` — the activity feed, the once-per-pass skip notices and the coarse progress
+counter; it isolates the two convenience listeners, `onSyncActivity` and `onProgress`, while the
+three notices still call the host directly), `pass-view.ts` (the pass's
+ordering, path geometry and read-ahead candidates as pure functions over the pass's snapshot) and
+`conflict.ts` (`ConflictResolver` — the remote-wins rule, the parked copy and the config-folder
+mtime rule, behind five narrow engine calls). Engine
 tests use mock adapters/APIs (`packages/engine/src/*.test.ts`).
 
-Three things `SyncEngine` composes rather than contains, so the 2 000-line orchestrator does not also
-own them: **`SelfEventLog`** and **`RemoteIndex`** (above — the first's windows are testable by moving a
+`SyncEngine` composes its seams rather than containing them, so the orchestrator does not also own
+them: **`SelfEventLog`** and **`RemoteIndex`** (above — the first's windows are testable by moving a
 fake clock, which used to mean freezing a global `Date`; the second is the identity index every rename,
 notification and incremental event asks), the **`ReconcilePass`** value object (the maps and sets one
 pass decided from, passed as one read-only snapshot instead of seven positional arguments), and the pure
 **decision input builders** in `decide.ts` (`DecideContext` / `decideInputFrom` / `isLocalDeletion`) —
 the same input used to be assembled in four places, and the subtle half of it (`localDeletion`) was
 written out twice with different expressions. A push is described by one `PushRequest` value object
-rather than six positional arguments (three of them strings, one nullable). `packages/engine/src/`'s
+rather than six positional arguments (three of them strings, one nullable). The four seams this document
+describes carry the rest: **`ContentReader`** (a pull's bytes), **`ActivityReporter`** (what the host is
+told), **`ConflictResolver`** (the conflict rules) and the **`pass-view.ts`** functions (ordering, path
+geometry, read-ahead candidates). `packages/engine/src/`'s
 `decide.test.ts`, `self-events.test.ts`, `remote-index.test.ts`, `host.test.ts` and `websocket.test.ts`
 are the L0 net for those — the last one with a fake global `WebSocket` and fake timers, because the
 L1/L2 suites run a real socket against a real server and therefore only ever exercise the happy path
@@ -49,17 +60,20 @@ The rules below are the ones the e2e suites exist to protect.
 ## Conflicts
 
 - **A conflict is resolved by the remote version, and the local one is parked beside the note — except for
-  a config-folder path.** There is one behaviour and no policy: `handleConflict` reads the local bytes
-  (when the file exists), writes them to `{stem}-{YYYY-MM-DD-HHmmss}.conflict.md` (with a `-2`, `-3`…
+  a config-folder path.** There is one behaviour and no policy: `ConflictResolver.resolve` reads the local bytes
+  (when the file exists), applies the remote head with `pullRemote` — the version written at the path it
+  records, or the local file deleted for a tombstone — and only then writes those bytes to
+  `{stem}-{YYYY-MM-DD-HHmmss}.conflict.md` (with a `-2`, `-3`…
   suffix when that second's name is taken, so a second conflict never overwrites the copy the first one
-  parked), then applies the remote head with `pullRemote` — the version written at the path it records,
-  or the local file deleted for a tombstone. The losing side **pushes nothing**, so the chain ends at
+  parked). The copy is parked and the conflict announced only once the remote head is really in place:
+  a conflict whose content could not be read is reported as failed, and the note still holds the local
+  text. The losing side **pushes nothing**, so the chain ends at
   whatever won. `onConflictResolved` carries `{ fileId, plainPath, conflictPath, remoteAction }` to the
   host (the plugin shows one Notice per burst, the daemon logs a line).
   - **A config-folder path takes the other rule: newer modification wins, silently, with no copy.** The
     config folder is outside Obsidian's vault index, so a `*.conflict.*` copy parked there has no file
     row, no `file-menu` entry and no `app.vault` handle — there is nothing the user could see or act on.
-    `handleConflict` therefore branches on `settingsGroupOf` and compares the local file's stamp with the
+    `ConflictResolver` therefore branches on `settingsGroupOf` and compares the local file's stamp with the
     head version's `mtimeMs` (the file's own modification time on the pushing device, carried by every
     push frame and stored in `file_versions.mtime_ms`; a `delete` records the moment that device decided
     on it — held in the state's `deletedAtMs` until the tombstone is accepted, so a deletion made offline
@@ -517,7 +531,7 @@ file now lives at.
   costs `files / 4` round trips either way (measured at 30 ms: 9.25 s one request per file, 9.23 s
   batched). `ContentPrefetcher` (`content-prefetch.ts`) reads the versions a pass or a notification
   burst is **about to** pull, 64 hashes or 4 MiB per request with two requests in flight, and the
-  per-file loop takes them from its store (`readRemoteContent`) instead of issuing a request of its own.
+  per-file loop takes them from its store (`ContentReader.read`) instead of issuing a request of its own.
   Measured at an injected 30 ms: 1 001 files went from 10.1 s / 251 requests to 0.76 s / 16, and 5 001
   from 46.6 s / 1 375 to 2.1 s / 79 ([first-bind-performance.md](first-bind-performance.md)).
   - **The candidate set is a superset in the ordinary case, and a wrong guess cannot change a decision.**
@@ -678,7 +692,7 @@ file now lives at.
     (remove + create) has no L1 case of its own — a split-move scenario proved flaky on the peer's
     notification apply for reasons unrelated to the batch — and is pinned at L0 instead: the batch
     turns it into one content-less `rename` with no tombstone.
-  - **A download's content reads travel in batches too.** `fetchContentBatched` holds a read until the
+  - **A download's content reads travel in batches too.** `ContentReader.read` holds a read until the
     batch is full (`maxConcurrent` entries — the most reads the pool can have outstanding, capped at the
     route's 64 hashes), or for one turn of the event loop for the tail of a pass, and fetches them with
     one request
@@ -723,7 +737,7 @@ file now lives at.
     pass's per-file work, a notification's apply, a local change/delete/rename, a restore, the create
     batch and the move repair are all jobs, so a pull's write and its sync point are one step and no other
     decision can see the half-applied state. A job never waits for another job on a path it holds (the
-    inner work — `pullRemote`, `handleConflict`, `pushFile` — is called directly), and the wait happens
+    inner work — `pullRemote`, `conflicts.resolve`, `pushFile` — is called directly), and the wait happens
     before the job runs, so two multi-path jobs cannot form a cycle.
   - **A vault event fired by the engine's own write is queued, not waited for.** A host may feed the event
     back _inside_ the adapter call that performs the write; waiting for the event's job there would wait

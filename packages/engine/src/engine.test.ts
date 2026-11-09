@@ -6476,6 +6476,61 @@ describe("SyncEngine — download read-ahead", () => {
     expect(engine.prefetchStats()).toMatchObject({ storedEntries: 0, storedBytes: 0 });
   });
 
+  it("waits out a rate limit on the pull a burst's notifications need", async () => {
+    // The bulk chain reads wait a limiter out (`withRateLimitWaits`); the batch's chain pull
+    // used to be one that threw instead, so a burst arriving while the window was open failed
+    // the whole hand-off. (The chunk-staging calls and the pass's `getVaultSyncIndex` do not
+    // wait — they are not bulk reads, and this case pins neither of them.)
+    const { api, key } = await seedRemote(1);
+    const { engine, adapter } = newDevice(api, key);
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("wide/n-0.md")!;
+    // Content the device does **not** already hold, so the assertion below proves the retry
+    // applied something rather than merely that the file was still there.
+    await api.remoteEdit(fileId, "# note 0, from the peer");
+    const versionId = (await api.latestVersionId(fileId))!;
+
+    const realPull = api.pull.bind(api);
+    let calls = 0;
+    api.pull = async (vaultId, fileIds) => {
+      if (calls++ === 0) throw rateLimited(1);
+      return await realPull(vaultId, fileIds);
+    };
+
+    await expect(engine.handleFilePushedBatch([{ fileId, versionId }])).resolves.toBeUndefined();
+
+    // The refused request was re-sent after the wait, and the whole burst still landed.
+    expect(calls).toBe(2);
+    expect(new TextDecoder().decode(adapter.files.get("wide/n-0.md"))).toBe(
+      "# note 0, from the peer",
+    );
+  });
+
+  it("waits out a rate limit on the pull a single notification needs", async () => {
+    // The same gap on the un-coalesced path: `handleFilePushed` reads the chain before it
+    // applies the head, and that read used to throw where the bulk reads wait.
+    const { api, key } = await seedRemote(1);
+    const { engine, adapter } = newDevice(api, key);
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("wide/n-0.md")!;
+    await api.remoteEdit(fileId, "# note 0, from the peer");
+    const versionId = (await api.latestVersionId(fileId))!;
+
+    const realPull = api.pull.bind(api);
+    let calls = 0;
+    api.pull = async (vaultId, fileIds) => {
+      if (calls++ === 0) throw rateLimited(1);
+      return await realPull(vaultId, fileIds);
+    };
+
+    await expect(engine.handleFilePushed(fileId, versionId)).resolves.toBeUndefined();
+
+    expect(calls).toBe(2);
+    expect(new TextDecoder().decode(adapter.files.get("wide/n-0.md"))).toBe(
+      "# note 0, from the peer",
+    );
+  });
+
   it("normalizes a host's limits instead of stalling on them", async () => {
     // `concurrency: 0` would leave the read-ahead's queue unmoving and the pass waiting
     // on it forever; a batch wider than the route accepts would reject every read in it.
