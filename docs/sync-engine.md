@@ -510,10 +510,10 @@ file now lives at.
   those are event-driven single-file changes, where a round trip is not what the pass is spending its
   time on. A **burst** of such events is batched on both sides — the host hands it to one job whose
   versions and chain reads travel 100/200 per request (see "A burst of local vault events" below).
-  - **A refused batch costs one batch, not the pass.** The flush is always awaited before its failure is
-    recorded (`const failure = await flush(); firstFailure ??= failure;`) — `firstFailure ??= await
-    flush()` short-circuits the **call**, so one refused batch used to silently drop every batch after
-    it while their files were already recorded in the state.
+  - **A refused batch costs one batch, not the pass.** `PushBatch` settles a request before it folds
+    the answer into `batch.failure`, so one refused batch cannot swallow the batches after it — the
+    old `firstFailure ??= await flush()` short-circuited the **call** itself, and their files were
+    already recorded in the state.
   - **A file whose create was refused goes back to being untracked.** The entry (`path → fileId`) is
     written before the request so a vault event that lands meanwhile adopts the same identity; a
     refusal drops it again, so the next pass retries the file through the **batched** create path
@@ -537,10 +537,11 @@ file now lives at.
     a failed pass by a window boundary. The wait is reported (`onRateLimited`) so a host can say why
     nothing is happening — a minute of silence reads as a hang.
   - **Preparation and the request overlap.** A full batch is handed to the wire and the next one is read,
-    hashed and encrypted while it flies (`flush` starts it, `settle` awaits it); at most one batch is in
-    flight and one is being built, so a bind holds two batches of memory at most. A large file still
-    travels alone, and a chunked upload still runs without another request interleaved, because both
-    `settle` first. At 50 000 files the read/encrypt half is ~1 ms per file, so waiting for every answer
+    hashed and encrypted while it flies (`PushBatch.begin` starts it, `settle` awaits it); at most one
+    batch is in flight and one is being built, so a bind holds two batches of memory at most. A large
+    file still travels alone, and a chunked upload still runs without another request interleaved,
+    because a version that cannot share **drains** the queued batch first (`PushBatch.drain` sends it
+    and waits). At 50 000 files the read/encrypt half is ~1 ms per file, so waiting for every answer
     before reading the next batch left the network idle for about half of the bind.
   - Covered by the batching cases in `engine.batching.test.ts` (the fake server records each request's file
     count), the `a first bind that meets the server's limits` cases (a refused batch, the batches after

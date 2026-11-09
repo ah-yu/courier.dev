@@ -328,34 +328,3 @@ export type RefusedPushStep = "re-decide" | "report";
 export function decideRefusedPush(attempt: number): RefusedPushStep {
   return attempt + 1 < EVENT_DECISION_ATTEMPTS ? "re-decide" : "report";
 }
-
-/**
- * What one file's answer from the push route means.
- *
- * `content_missing` and `stale_base` are answers, not failures: the first says the store
- * does not hold the content a content-less version claimed, the second says the chain moved
- * since this push was decided. Every other status — and a result the server did not include
- * at all — is a refusal the caller reports.
- *
- * The classification is one function because the four call sites answer the three named
- * statuses differently, and inline `status === "…"` chains let a site silently treat
- * `stale_base` (or `content_missing`) as a plain refusal. A create names
- * `baseVersionId: null`, so a stale base cannot reach it — but that is a property of the
- * push, and the caller should have to state which statuses it expects.
- */
-export type PushResultOutcome = "ok" | "stale_base" | "content_missing" | "refused";
-
-export function classifyPushResult(
-  result: { status: string; error?: string } | undefined,
-): PushResultOutcome {
-  switch (result?.status) {
-    case "ok":
-      return "ok";
-    case "stale_base":
-      return "stale_base";
-    case "content_missing":
-      return "content_missing";
-    default:
-      return "refused";
-  }
-}

@@ -31,7 +31,7 @@ import { generateFileId, generateVersionId } from "./ids";
 import { isConflictFile } from "./conflict-file";
 import { historyKindFor } from "./file-types";
 import { LocalEventJob, type LocalEventJobHost, type TombstoneLedger } from "./local-event-job";
-import { PushBatch, type BatchPushResult } from "./push-batch";
+import { PushBatch, classifyPushResult, type BatchPushResult } from "./push-batch";
 import { ExcludedMoveFinder } from "./excluded-moves";
 import {
   isConfigPath,
@@ -43,13 +43,11 @@ import {
   type SyncScope,
 } from "./sync-scope";
 import type { LocalVersionState } from "./state";
-import { sameStamp } from "./state";
 import {
   decideFile,
   decideInputFrom,
   decideNewLocalFile,
   decideRefusedPush,
-  classifyPushResult,
   needsFreshRead,
   remoteHead,
   EVENT_DECISION_ATTEMPTS,
@@ -350,6 +348,23 @@ const MAX_PUSH_BATCH_BYTES = 8 * 1024 * 1024;
  */
 function isMissingContentError(err: unknown): boolean {
   return typeof err === "object" && err !== null && (err as { status?: unknown }).status === 404;
+}
+
+/**
+ * Whether two stamps describe the same file state, as far as a recorded hash may be trusted.
+ *
+ * The size and the modification time are the whole test: the engine records a hash only
+ * together with the stamp it was taken at, and every reuse compares exactly those two
+ * fields — a pass's cached hash, a pre-fetched read, the upload cap's "has this file
+ * changed since this device synced it?" question. One predicate keeps those sites from
+ * drifting on which fields count (a size-only comparison would trust an edit that kept the
+ * length; a time-only one would trust a rewritten file written inside the same tick).
+ *
+ * Local to the engine on purpose: it encodes nothing a host decides with, so it stays off
+ * the package surface (`index.ts` wildcard-exports `state.ts`, where it used to live).
+ */
+function sameStamp(a: FileStamp, b: FileStamp): boolean {
+  return a.sizeBytes === b.sizeBytes && a.mtimeMs === b.mtimeMs;
 }
 
 /**

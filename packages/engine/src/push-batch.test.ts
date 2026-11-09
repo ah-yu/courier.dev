@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   PushBatch,
+  classifyPushResult,
   type BatchPushResult,
   type BatchVersion,
   type PushBatchHost,
@@ -42,6 +43,8 @@ interface Harness {
   settled: () => number;
   /** Resolves the request a `controlled` push holds open. */
   release: (results?: readonly BatchPushResult[]) => void;
+  /** Rejects the request a `controlled` push holds open. */
+  fail: (err: unknown) => void;
 }
 
 function makeBatch(
@@ -52,7 +55,7 @@ function makeBatch(
     push?: (prepared: readonly V[]) => Promise<readonly BatchPushResult[]>;
     /** Settle a refusal; the default answers `null`. */
     refused?: PushBatchHost<V, string>["refused"];
-    /** Hold the **first** request open until {@link Harness.release} is called. */
+    /** Hold the **first** request open until {@link Harness.release} or {@link Harness.fail}. */
     controlled?: boolean;
   } = {},
 ): Harness {
@@ -62,15 +65,18 @@ function makeBatch(
   const forgotten: string[] = [];
   const refused: Array<{ name: string; meta: string; status: string }> = [];
   const settled = vi.fn();
-  let held: ((results: readonly BatchPushResult[]) => void) | null = null;
+  let held: {
+    resolve: (results: readonly BatchPushResult[]) => void;
+    reject: (err: unknown) => void;
+  } | null = null;
 
   const host: PushBatchHost<V, string> = {
     send: async (prepared) => {
       pushed.push(prepared.map((one) => one.name));
       if (options.push) return await options.push(prepared);
       if (options.controlled && pushed.length === 1) {
-        return await new Promise<readonly BatchPushResult[]>((resolve) => {
-          held = resolve;
+        return await new Promise<readonly BatchPushResult[]>((resolve, reject) => {
+          held = { resolve, reject };
         });
       }
       return prepared.map(() => ({ status: "ok" }));
@@ -101,7 +107,8 @@ function makeBatch(
     forgotten,
     refused,
     settled: () => settled.mock.calls.length,
-    release: (results = []) => held?.(results),
+    release: (results = []) => held?.resolve(results),
+    fail: (err) => held?.reject(err),
   };
 }
 
@@ -184,42 +191,62 @@ describe("PushBatch — the serial mode", () => {
 });
 
 describe("PushBatch — the pipelined mode", () => {
-  it("waits for the previous request, but not for the one it starts", async () => {
+  it("waits for the request in flight before starting the next one", async () => {
     const { batch, pushed, settled, release } = makeBatch({ maxFiles: 1, controlled: true });
-
     await batch.add(version("a", 1), "m", { pipelined: true });
     await batch.add(version("b", 1), "m", { pipelined: true });
-    // Starting b's request settled nothing (a was queued, not sent) and returned while a is
-    // still on the wire: that is the caller's window for preparing the next version.
+    // a is on the wire now, and b is queued behind it.
     expect(pushed).toEqual([["a"]]);
     expect(settled()).toBe(0);
 
+    // c's arrival crosses the bound: it must settle a (still held) before it starts b, so
+    // this add cannot resolve yet.
+    let crossed = false;
+    const addingC = batch.add(version("c", 1), "m", { pipelined: true }).then(() => {
+      crossed = true;
+    });
+    await Promise.resolve();
+    expect(crossed).toBe(false);
+
     release([{ status: "ok" }]);
-    await batch.settle();
-    expect(settled()).toBe(1);
-    await batch.drain();
+    await addingC;
     expect(pushed).toEqual([["a"], ["b"]]);
+    // b's request settles on its own turn (the harness answers it immediately); what matters
+    // is that a was settled before b started.
+    expect(settled()).toBeGreaterThanOrEqual(1);
+    await batch.drain();
+    expect(pushed).toEqual([["a"], ["b"], ["c"]]);
   });
 
-  it("records a failed request from an earlier batch, and keeps the later one", async () => {
-    let call = 0;
-    const { batch, applied } = makeBatch({
-      maxFiles: 1,
-      push: async () => {
-        call += 1;
-        if (call === 1) throw new Error("first batch failed");
-        return [{ status: "ok" }];
-      },
-    });
+  it("keeps the failure of the request it settles at a crossing, even though the next one started", async () => {
+    const { batch, pushed, forgotten, fail } = makeBatch({ maxFiles: 1, controlled: true });
     await batch.add(version("a", 1), "m", { pipelined: true });
-    // The crossing settles the previous request before starting the next one; a's failure is
-    // folded in there, and b still travels.
-    const outcome = await batch.add(version("b", 1), "m", { pipelined: true });
-    expect(outcome).toBe("queued");
-    await batch.settle();
+    // b's arrival starts a's request; it is held open.
+    await batch.add(version("b", 1), "m", { pipelined: true });
+    fail(new Error("first batch failed"));
+
+    // c's arrival settles a before starting b: the rejection has to be folded in there, or
+    // starting b would overwrite the only reference to it (the defect W11 fixed).
+    await batch.add(version("c", 1), "m", { pipelined: true });
     expect((batch.failure as Error).message).toBe("first batch failed");
+    expect(forgotten).toEqual(["a"]);
     await batch.drain();
-    expect(applied).toEqual(["b"]);
+    expect(pushed).toEqual([["a"], ["b"], ["c"]]);
+  });
+
+  it("keeps the queued batch's failure when a large version drains it", async () => {
+    const { batch, pushed, forgotten, fail } = makeBatch({ maxBytes: 10, controlled: true });
+    await batch.add(version("small", 4), "m");
+    // The large version drains the queued batch first; that request is held open and then
+    // fails. The failure must survive even though the large one is sent afterwards.
+    const addingBig = batch.add(version("big", 11), "m");
+    // The drain starts the small request on a later turn, so wait for it before failing it.
+    while (pushed.length === 0) await Promise.resolve();
+    fail(new Error("small batch failed"));
+    await addingBig;
+    expect((batch.failure as Error).message).toBe("small batch failed");
+    expect(pushed).toEqual([["small"], ["big"]]);
+    expect(forgotten).toEqual(["small"]);
   });
 });
 
@@ -306,5 +333,21 @@ describe("PushBatch — chunked versions and abandonment", () => {
     await failed.batch.add(version("a", 1), "m");
     await failed.batch.drain();
     expect(failed.settled()).toBe(0);
+  });
+});
+
+describe("classifyPushResult", () => {
+  it("names the three statuses a caller has to answer differently", () => {
+    expect(classifyPushResult({ status: "ok" })).toBe("ok");
+    expect(classifyPushResult({ status: "stale_base" })).toBe("stale_base");
+    expect(classifyPushResult({ status: "content_missing" })).toBe("content_missing");
+  });
+
+  it("treats every other status, and a missing answer, as a refusal", () => {
+    // The route answers `error`/`quota`/… for a push it will not take, and a result the
+    // server did not include at all is a refused version too (the caller reports it).
+    expect(classifyPushResult({ status: "quota" })).toBe("refused");
+    expect(classifyPushResult({ status: "error", error: "boom" })).toBe("refused");
+    expect(classifyPushResult(undefined)).toBe("refused");
   });
 });
