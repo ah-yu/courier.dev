@@ -372,6 +372,19 @@ interface ReconcilePass {
 }
 
 /**
+ * One tombstone a pass decided on, held for its batched delete push.
+ *
+ * The base is the head the decision was taken from: the batch re-checks it before the
+ * request goes out, so a version a pull adopted while the pass ran is not deleted from
+ * under a decision that never saw it.
+ */
+interface PendingTombstone {
+  readonly fileId: string;
+  readonly path: string;
+  readonly baseVersionId: string | null;
+}
+
+/**
  * One version to push, as the callers that decide it describe it.
  *
  * A single object rather than six positional arguments — three of them strings and one
@@ -1312,7 +1325,7 @@ export class SyncEngine {
    * longer has — must not exist twice.
    */
   private async pushPrepared(prepared: PreparedPush): Promise<void> {
-    const { fileId, plainPath } = prepared;
+    const { plainPath } = prepared;
 
     let content: Uint8Array | null = null;
     let contentChunks = 0;
@@ -1360,43 +1373,8 @@ export class SyncEngine {
       }
     }
     if (result?.status === "stale_base") {
-      this.forgetPushedVersion(prepared);
-      const chain = await this.pullChain(fileId);
-      const head = remoteHead(chain);
-      // The head already holds the bytes this push was carrying: either this exact
-      // push was applied and only its response was lost, or a peer converged on the
-      // same content. Nothing to write — take the head as the sync point. A **delete** is
-      // settled by its action, not its content: every tombstone carries the empty-content
-      // hash, and an empty *live* file must not be mistaken for one that landed. The mirror
-      // holds too: a live push whose bytes are empty must not treat a peer's tombstone as
-      // its own head (that would resurrect a deleted file on the next pass).
-      const landed =
-        prepared.action === "delete"
-          ? head?.action === "delete"
-          : head !== undefined &&
-            head.action !== "delete" &&
-            head.contentHash === prepared.contentHash;
-      if (head && landed) {
-        this.adoptRemoteIdentity(fileId, plainPath, head, prepared.stamp ?? null);
-        // The head is this very version (the server stores the client's versionId), so
-        // the push did land and only its response was lost. A peer that merely converged
-        // on the same bytes has a different versionId and is not reported as this
-        // device's upload.
-        if (head.versionId === prepared.versionId) {
-          this.reportActivity({
-            direction: "out",
-            outcome: "applied",
-            fileId,
-            versionId: head.versionId,
-            plainPath,
-            action: prepared.action,
-            sizeBytes: prepared.sizeBytes,
-            deviceName: null,
-          });
-        }
-        return;
-      }
-      throw new SyncPushBaseError(fileId, plainPath, chain);
+      await this.settleStaleBase(prepared);
+      return;
     }
     if (result?.status !== "ok") {
       this.forgetPushedVersion(prepared);
@@ -1404,6 +1382,62 @@ export class SyncEngine {
     }
 
     this.applyPushedVersion(prepared);
+  }
+
+  /**
+   * Settle a push the server refused with `stale_base`, from the chain it refused against.
+   *
+   * Two answers, and the difference is whether the refusal is real:
+   *
+   * - the head already holds what this push was carrying — this exact version (its response
+   *   was lost) or the same bytes a peer converged on — so the push landed: take the head
+   *   as the sync point;
+   * - the head is a version this decision never saw: raise {@link SyncPushBaseError} for
+   *   the caller, which decides again or resolves the conflict.
+   *
+   * Split out of {@link pushPrepared} so a batch that gets `stale_base` from the server's
+   * answer can settle the same way **without re-sending** the version the server just
+   * refused.
+   */
+  private async settleStaleBase(prepared: PreparedPush): Promise<void> {
+    const { fileId, plainPath } = prepared;
+    this.forgetPushedVersion(prepared);
+    const chain = await this.pullChain(fileId);
+    const head = remoteHead(chain);
+    // The head already holds the bytes this push was carrying: either this exact
+    // push was applied and only its response was lost, or a peer converged on the
+    // same content. Nothing to write — take the head as the sync point. A **delete** is
+    // settled by its action, not its content: every tombstone carries the empty-content
+    // hash, and an empty *live* file must not be mistaken for one that landed. The mirror
+    // holds too: a live push whose bytes are empty must not treat a peer's tombstone as
+    // its own head (that would resurrect a deleted file on the next pass).
+    const landed =
+      prepared.action === "delete"
+        ? head?.action === "delete"
+        : head !== undefined &&
+          head.action !== "delete" &&
+          head.contentHash === prepared.contentHash;
+    if (head && landed) {
+      this.adoptRemoteIdentity(fileId, plainPath, head, prepared.stamp ?? null);
+      // The head is this very version (the server stores the client's versionId), so
+      // the push did land and only its response was lost. A peer that merely converged
+      // on the same bytes has a different versionId and is not reported as this
+      // device's upload.
+      if (head.versionId === prepared.versionId) {
+        this.reportActivity({
+          direction: "out",
+          outcome: "applied",
+          fileId,
+          versionId: head.versionId,
+          plainPath,
+          action: prepared.action,
+          sizeBytes: prepared.sizeBytes,
+          deviceName: null,
+        });
+      }
+      return;
+    }
+    throw new SyncPushBaseError(fileId, plainPath, chain);
   }
 
   /**
@@ -2102,6 +2136,11 @@ export class SyncEngine {
     // may write the same path take turns through the engine's path queue. Everything
     // else still runs concurrently.
     let firstFailure: unknown = null;
+    // The tombstones this pass decided on. They are pushed together after every per-file
+    // job has settled: a deletion discovered by a pass is one request per file otherwise,
+    // which is what a thousand files deleted with the app closed costs against the sync
+    // allowance (see `pushTombstones`).
+    const pendingDeletes: PendingTombstone[] = [];
 
     // Every task is a different fileId, so the state mutations they make are disjoint;
     // the pool only decides how many may be in flight, and runs a large file alone.
@@ -2114,7 +2153,7 @@ export class SyncEngine {
           try {
             const failure = await this.paths.run(
               claim,
-              () => this.reconcileOne(fileId, pass),
+              () => this.reconcileOne(fileId, pass, pendingDeletes),
               "pass",
             );
             if (failure !== null) firstFailure ??= failure;
@@ -2140,6 +2179,11 @@ export class SyncEngine {
 
     // Untracked local files (no fileId anywhere) → create on the server. Its own batch
     // failures are collected inside it, for the same reason the push sites above are.
+    //
+    // Tombstones go first, creations second. The two are independent — a path this pass
+    // deletes holds no file, so it cannot also be created in the same pass — and the
+    // order only keeps a pass's deletions ahead of its creations.
+    const deleteFailure = await this.pushTombstones(pendingDeletes);
     const batchFailure = await this.createUntrackedFiles(
       pass.localHashes,
       pass.untrackedPaths,
@@ -2150,7 +2194,7 @@ export class SyncEngine {
     // The pass is over: report the final pair, whose `done === total` tells a host to stop
     // showing a counter (a create that a limiter left unsent was counted and dropped).
     this.reportProgress(true);
-    return firstFailure ?? batchFailure;
+    return firstFailure ?? deleteFailure ?? batchFailure;
   }
 
   /**
@@ -2370,8 +2414,15 @@ export class SyncEngine {
    * overlap (the engine's path queue). A failure is **returned** rather than thrown — the
    * pool's caller collects the first one and the rest of the pass still runs, exactly as
    * the serial loop did.
+   *
+   * A deletion it decides on is **collected**, not pushed: the pass sends every tombstone
+   * it found in one batched job once the per-file work has settled (see `pushTombstones`).
    */
-  private async reconcileOne(fileId: string, pass: ReconcilePass): Promise<unknown> {
+  private async reconcileOne(
+    fileId: string,
+    pass: ReconcilePass,
+    pendingDeletes: PendingTombstone[],
+  ): Promise<unknown> {
     const { localHashes, chainByFileId } = pass;
     const { skippedPaths, localStamps } = pass;
     const { adapter } = this.opts;
@@ -2660,36 +2711,16 @@ export class SyncEngine {
           const stateEntry = this.state[fileId];
           const deletedAtMs = stateEntry?.deletedAtMs ?? Date.now();
           if (stateEntry) stateEntry.deletedAtMs = deletedAtMs;
-          try {
-            await this.pushFile({
-              fileId,
-              plainPath,
-              action: "delete",
-              bytes: undefined,
-              baseVersionId: head?.versionId ?? null,
-              stamp: null,
-              mtimeMs: deletedAtMs,
-            });
-          } catch (err) {
-            if (err instanceof SyncPushBaseError) {
-              // The tombstone lost a race with a peer's edit: the remote side wins, the
-              // peer's version comes back and there is nothing local to park. That is
-              // `handleConflict(…, false)`, exactly as the local-delete path resolves it
-              // — `decideIncremental` cannot answer here because it returns early when
-              // the file is gone, which is this branch's precondition. When the peer's
-              // content cannot be read, the refusal stays the pass's failure, so the
-              // next pass (the retry) is what reports it.
-              const applied = await this.handleConflict(
-                fileId,
-                plainPath,
-                remoteHead(err.chain),
-                false,
-              );
-              if (!applied) failure ??= err;
-            } else {
-              failure ??= err;
-            }
-          }
+          // Held for the pass's one batched delete push (see `pushTombstones`): a pass
+          // that finds a thousand files gone must not spend a thousand requests on them.
+          // The base is the head this decision was taken from; the batch re-checks it,
+          // so a version a pull adopts before the batch runs is not deleted from under a
+          // decision that never saw it.
+          pendingDeletes.push({
+            fileId,
+            path: plainPath,
+            baseVersionId: head?.versionId ?? null,
+          });
           break;
         }
         if (!localExists) break;
@@ -3107,6 +3138,172 @@ export class SyncEngine {
       await settle();
     }
     return firstFailure;
+  }
+
+  /**
+   * Push the tombstones a pass decided on, in **batches**.
+   *
+   * A deletion a pass discovers — a file removed while nothing watched it, or one deleted
+   * with the app closed — is content-less and used to be pushed one request per file.
+   * Against the deployed 600 requests/minute allowance that is a thousand requests for a
+   * thousand files, so a peer sees the deletions arrive over minutes; the same files
+   * deleted while the host is running travel 100 per request through the event burst
+   * (see `applyLocalEvents`). This is the same bound on the pass's side.
+   *
+   * The batch is one job over every path it names, so an event for any of them queues
+   * behind it and its decision (a recreate, say) is applied after the tombstone. Every
+   * entry is re-checked here instead of trusted from the pass's snapshot: the file is
+   * still gone, the state still holds it at that path, no event owns the path, and the
+   * sync point is still the head the decision was taken from.
+   */
+  private async pushTombstones(pending: readonly PendingTombstone[]): Promise<unknown> {
+    if (pending.length === 0) return null;
+    return await this.paths.run(
+      pending.map((entry) => entry.path),
+      () => this.pushTombstonesLocked(pending),
+      "batch",
+    );
+  }
+
+  /** The work of {@link pushTombstones}, running inside its paths' job. */
+  private async pushTombstonesLocked(pending: readonly PendingTombstone[]): Promise<unknown> {
+    let batch: PreparedPush[] = [];
+    let firstFailure: unknown = null;
+    let rateLimitedOut = false;
+
+    /**
+     * Settle one tombstone's answer.
+     *
+     * `ok` records the sync point; `stale_base` settles from the chain the server refused
+     * against (no re-send: the server has already refused this base); anything else
+     * throws for the caller to record.
+     */
+    const settleOne = async (
+      prepared: PreparedPush,
+      result: { status: string; error?: string } | undefined,
+    ): Promise<void> => {
+      if (result?.status === "ok") {
+        this.applyPushedVersion(prepared);
+        return;
+      }
+      if (result?.status === "stale_base") {
+        await this.settleStaleBase(prepared);
+        return;
+      }
+      throw new Error(
+        `Push failed for ${prepared.plainPath}: ${result?.error ?? result?.status ?? "no result"}`,
+      );
+    };
+
+    /**
+     * Send the prepared tombstones and settle each answer.
+     *
+     * A whole-request failure drops the batch — nothing landed, so no echo can arrive for
+     * any of them — and leaves the state entries alone: the next pass finds the files
+     * still gone and decides the same tombstones again, in a batch.
+     */
+    const sendBatch = async (): Promise<void> => {
+      if (batch.length === 0) return;
+      const sending = batch;
+      batch = [];
+      let results: Array<{ status: string; error?: string }>;
+      try {
+        const response = await this.withRateLimitWaits(() =>
+          this.opts.api.push(
+            this.opts.vaultId,
+            sending.map((prepared) => ({ ...prepared.file, content: prepared.content })),
+          ),
+        );
+        results = response.results;
+      } catch (err) {
+        for (const prepared of sending) this.forgetPushedVersion(prepared);
+        // A limiter that outlasted its waits ends the batch: every further request would
+        // be refused too, and the files are better left for the next pass.
+        if (isRateLimitError(err)) rateLimitedOut = true;
+        firstFailure ??= err;
+        return;
+      }
+      for (const [index, prepared] of sending.entries()) {
+        // One entry the server, the adapter or a conflict resolution refuses must not
+        // cost the rest of the batch: the versions after it were answered by the same
+        // request, and leaving them unapplied would drop their sync points — the next
+        // pass would read those chains as deletions it never made, and a file written
+        // there later would become a new chain instead of a restore.
+        try {
+          await settleOne(prepared, results[index]);
+        } catch (err) {
+          this.forgetPushedVersion(prepared);
+          if (err instanceof SyncPushBaseError) {
+            // The tombstone lost a race with a peer's edit: the remote side wins and there
+            // is nothing local to park — the single-file path's answer, applied here too.
+            try {
+              const applied = await this.handleConflict(
+                prepared.fileId,
+                prepared.plainPath,
+                remoteHead(err.chain),
+                false,
+              );
+              if (!applied) firstFailure ??= err;
+            } catch (conflictErr) {
+              firstFailure ??= conflictErr;
+            }
+            continue;
+          }
+          firstFailure ??= err;
+        }
+      }
+    };
+
+    for (const entry of pending) {
+      if (rateLimitedOut) break;
+      try {
+        const prepared = await this.prepareTombstone(entry);
+        if (!prepared) continue;
+        batch.push(prepared);
+        if (batch.length >= MAX_PUSH_BATCH_FILES) await sendBatch();
+      } catch (err) {
+        // A stat or an encryption that fails for one path is that path's problem: the
+        // batch keeps the tombstones it already holds and the pass still creates.
+        firstFailure ??= err;
+      }
+    }
+    await sendBatch();
+    return firstFailure;
+  }
+
+  /**
+   * The tombstone one deleted path needs, or null when that decision no longer holds.
+   *
+   * Re-checked here rather than trusted from the pass's snapshot: the pass released the
+   * path after deciding, so a pull, an event or the user can have changed it before the
+   * batch runs.
+   */
+  private async prepareTombstone(entry: PendingTombstone): Promise<PreparedPush | null> {
+    const { fileId, path, baseVersionId } = entry;
+    // The state entry is the record, not the path map: a locally deleted file keeps its
+    // entry (the tombstone is retried from it) while the path mapping is already gone, so
+    // a file written there later is a recreate rather than a resurrected chain.
+    const stateEntry = this.state[fileId];
+    if (!stateEntry || stateEntry.plainPath !== path) return null;
+    // A version a pull adopted while the pass ran wins: this decision never saw it.
+    if ((stateEntry.lastKnownVersionId ?? null) !== baseVersionId) return null;
+    // An event queued behind the batch owns the path (the user recreated or moved the
+    // file); its job decides after this one.
+    if (this.paths.hasQueued(path, "event")) return null;
+    // Confirm with the adapter rather than trusting the pass's listing: a file written
+    // back between the decision and the batch is not a deletion.
+    if (await this.opts.adapter.statFile(path)) return null;
+    const deletedAtMs = stateEntry.deletedAtMs ?? Date.now();
+    stateEntry.deletedAtMs = deletedAtMs;
+    return await this.preparePush({
+      fileId,
+      plainPath: path,
+      action: "delete",
+      bytes: undefined,
+      baseVersionId,
+      stamp: null,
+      mtimeMs: deletedAtMs,
+    });
   }
 
   /**
@@ -5444,6 +5641,11 @@ export class SyncEngine {
         // in order, one file at a time. That is the conservative version of the path queue:
         // a peer's move can leave two chains naming one path for a moment, and the two
         // decisions must not interleave. With no shared path, four files at a time.
+        //
+        // A single event's two names are deduplicated first: for a file this device
+        // tracks, the head's path and the state's path are the same string, and counting
+        // it twice made every tracked-file burst — every delete, every edit — look like a
+        // shared path and fall back to the serial apply.
         const seenPaths = new Set<string>();
         const headPaths = new Map<string, string | null>();
         let sharesPath = false;
@@ -5454,7 +5656,7 @@ export class SyncEngine {
           // own path over the head's), kept for the read-ahead: a chain outside this
           // device's scope is never applied, and the prefetch must not read it either.
           headPaths.set(event.fileId, this.state[event.fileId]?.plainPath ?? headPath);
-          for (const path of [headPath, this.state[event.fileId]?.plainPath ?? null]) {
+          for (const path of new Set([headPath, this.state[event.fileId]?.plainPath ?? null])) {
             if (path === null) continue;
             if (seenPaths.has(path)) sharesPath = true;
             seenPaths.add(path);
