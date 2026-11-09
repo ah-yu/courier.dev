@@ -23,8 +23,24 @@ import {
   sha256Text,
 } from "./engine.test-helpers";
 import type { FileSkippedEvent, OpQueueLimits, SyncProgress } from "./engine.test-helpers";
+import type { Platform } from "./platform";
 
 freezeConflictClock();
+
+/**
+ * A platform whose one-shot timers never fire.
+ *
+ * The content reader's tail flush is the only one-shot timer a bind uses with the read-ahead
+ * off, and holding it forever is what makes a **full** wave deterministic: with as many
+ * reads as the request accepts, the last `read` is what flushes the batch, not a 0 ms turn.
+ * With a real clock that turn can fire between the per-file tasks and split the wave
+ * (`[61, 3]` on a loaded runner); the route accepts any split, so the cases that cannot hold
+ * the timer assert the cap instead (see "never names more hashes than the route accepts").
+ */
+const noTurnTimers: Platform = {
+  ...realPlatform,
+  after: () => ({ cancel: () => {} }),
+};
 
 describe("SyncEngine — a first bind that meets the server's limits", () => {
   it("waits out a rate limit and sends the same batch again", async () => {
@@ -389,10 +405,15 @@ async function sourceFor(
 }
 
 /** A fresh device that binds the same vault, and answers its content requests. */
-async function bindTarget(api: FakeApi, key: CryptoKey, opLimits?: OpQueueLimits) {
+async function bindTarget(
+  api: FakeApi,
+  key: CryptoKey,
+  opLimits?: OpQueueLimits,
+  platform: Platform = realPlatform,
+) {
   const adapter = new FakeAdapter();
   const engine = new SyncEngine({
-    platform: realPlatform,
+    platform,
     vaultId: "vault-1",
     adapter,
     api,
@@ -484,7 +505,7 @@ describe("SyncEngine — batched content reads", () => {
     expect(target.adapter.files.size).toBe(3);
   });
 
-  it("flushes a batch at the request's file cap", async () => {
+  it("flushes a full wave at the request's file cap", async () => {
     const paths = Array.from({ length: MAX_CONTENT_BATCH_FILES }, (_, index) => ({
       path: `cap/n-${index}.md`,
       text: `# cap ${index}`,
@@ -492,11 +513,15 @@ describe("SyncEngine — batched content reads", () => {
     const { api, key } = await sourceFor(paths);
     api.contentBatchCalls.length = 0;
 
-    // The pool may run every file at once here, which is what fills the request.
-    const target = await bindTarget(api, key, {
-      maxConcurrent: MAX_CONTENT_BATCH_FILES,
-      exclusiveBytes: 1_024,
-    });
+    // The pool runs every file at once, so the wave fills the request, and the read that
+    // fills it flushes it: the tail timer is held forever, which is what makes this case
+    // about the cap rather than about the order the per-file tasks finish in.
+    const target = await bindTarget(
+      api,
+      key,
+      { maxConcurrent: MAX_CONTENT_BATCH_FILES, exclusiveBytes: 1_024 },
+      noTurnTimers,
+    );
 
     expect(api.contentBatchCalls).toHaveLength(1);
     expect(api.contentBatchCalls[0]).toHaveLength(MAX_CONTENT_BATCH_FILES);
