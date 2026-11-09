@@ -34,8 +34,9 @@ freezeConflictClock();
  * off, and holding it forever is what makes a **full** wave deterministic: with as many
  * reads as the request accepts, the last `read` is what flushes the batch, not a 0 ms turn.
  * With a real clock that turn can fire between the per-file tasks and split the wave
- * (`[61, 3]` on a loaded runner); the route accepts any split, so the cases that cannot hold
- * the timer assert the cap instead (see "never names more hashes than the route accepts").
+ * (`[61, 3]`, or `[2, 1]` for three reads, on a loaded runner); the route accepts any split,
+ * so a case that cannot hold the timer asserts the rule rather than the split (see "sends a
+ * partial wave on the next turn" and "never names more hashes than the route accepts").
  */
 const noTurnTimers: Platform = {
   ...realPlatform,
@@ -489,8 +490,12 @@ describe("SyncEngine — batched content reads", () => {
   });
 
   it("sends a partial wave on the next turn rather than waiting for a full batch", async () => {
-    // Three reads against a pool that could run eight: the batch is not full, so the timer
-    // (one turn) is what carries it, and the pass does not keep the files waiting.
+    // Three reads against a pool that could run eight: the batch can never fill, so the pass
+    // cannot wait for one — a partial wave has to travel. Which turn each per-file task
+    // reaches the batcher in is the scheduler's business (a loaded runner splits the three
+    // reads into `[2, 1]`, which the route accepts), so this pins that every read travels and
+    // every file lands; the one-request window itself is pinned deterministically in
+    // `content-reader.test.ts`.
     const paths = Array.from({ length: 3 }, (_, index) => ({
       path: `tail/n-${index}.md`,
       text: `# tail ${index}`,
@@ -500,8 +505,8 @@ describe("SyncEngine — batched content reads", () => {
 
     const target = await bindTarget(api, key, { maxConcurrent: 8, exclusiveBytes: 1_024 });
 
-    expect(api.contentBatchCalls).toHaveLength(1);
-    expect(api.contentBatchCalls[0]).toHaveLength(3);
+    const sizes = api.contentBatchCalls.map((call) => call.length);
+    expect(sizes.reduce((total, size) => total + size, 0)).toBe(3);
     expect(target.adapter.files.size).toBe(3);
   });
 
@@ -543,16 +548,17 @@ async function seedRemote(count: number) {
 function newDevice(
   api: FakeApi,
   key: CryptoKey,
-  options: { contentPrefetch?: false } = {},
+  options: { contentPrefetch?: false; platform?: Platform } = {},
 ): { engine: SyncEngine; adapter: FakeAdapter } {
+  const { platform = realPlatform, ...engineOptions } = options;
   const adapter = new FakeAdapter();
   const engine = new SyncEngine({
-    platform: realPlatform,
+    platform,
     vaultId: "vault-1",
     adapter,
     api,
     encryptionKey: key,
-    ...options,
+    ...engineOptions,
   });
   return { engine, adapter };
 }
@@ -602,12 +608,17 @@ describe("SyncEngine — download read-ahead", () => {
     const { api, key } = await seedRemote(16);
     api.contentBatchCalls.length = 0;
 
-    const { engine, adapter } = newDevice(api, key, { contentPrefetch: false });
+    // The timer is held forever, so a wave is exactly the pool's width; a real 0 ms turn
+    // can split it on a loaded runner, which the route accepts.
+    const { engine, adapter } = newDevice(api, key, {
+      contentPrefetch: false,
+      platform: noTurnTimers,
+    });
     await engine.initialSync();
 
     // Without it, a request names one wave — the pool's four — and nothing more.
     const sizes = api.contentBatchCalls.map((call) => call.length);
-    expect(Math.max(...sizes)).toBe(4);
+    expect(sizes).toEqual([4, 4, 4, 4]);
     expect(adapter.files.size).toBe(16);
     // …and there is nothing to report: the accessor's `null` is the "off" answer.
     expect(engine.prefetchStats()).toBeNull();
@@ -994,6 +1005,7 @@ async function prepareChanges(
   count: number,
   opLimits: { maxConcurrent: number; exclusiveBytes: number },
   padding = "",
+  platform: Platform = realPlatform,
 ) {
   const { engine: source, adapter: sourceAdapter, api, key } = await makeEngine();
   for (let index = 0; index < count; index++) {
@@ -1003,7 +1015,7 @@ async function prepareChanges(
 
   const targetAdapter = new FakeAdapter();
   const target = new SyncEngine({
-    platform: realPlatform,
+    platform,
     vaultId: "vault-1",
     adapter: targetAdapter,
     api,
@@ -1020,6 +1032,7 @@ async function prepareChanges(
   }
 
   api.contentFetches.length = 0;
+  api.contentBatchCalls.length = 0;
   api.maxInFlightContent = 0;
   api.contentDelayMs = 10;
   return { target, api };
@@ -1027,10 +1040,15 @@ async function prepareChanges(
 
 describe("SyncEngine — how much a pass runs at once", () => {
   it("pulls small files concurrently, up to the pool's limit", async () => {
-    const { target, api } = await prepareChanges(9, {
-      maxConcurrent: 3,
-      exclusiveBytes: 1_024,
-    });
+    // The timer is held forever so a wave is exactly the pool's width: the read that fills
+    // it is what flushes it, and a real 0 ms turn cannot split it on a loaded runner (which
+    // the route accepts — see "sends a partial wave on the next turn").
+    const { target, api } = await prepareChanges(
+      9,
+      { maxConcurrent: 3, exclusiveBytes: 1_024 },
+      "",
+      noTurnTimers,
+    );
 
     await target.initialSync();
 
@@ -1038,7 +1056,7 @@ describe("SyncEngine — how much a pass runs at once", () => {
     // the content requests: three files travel together instead of three requests.
     expect(api.contentFetches).toHaveLength(9);
     const sizes = api.contentBatchCalls.map((call) => call.length);
-    expect(Math.max(...sizes)).toBe(3);
+    expect(sizes).toEqual([3, 3, 3]);
     expect(sizes.every((size) => size <= 3)).toBe(true);
   });
 
