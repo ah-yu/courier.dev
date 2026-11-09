@@ -43,7 +43,10 @@ mechanics: the 100-file / 8 MiB bound, at most one request in flight (pipelined 
 creates), a limiter that ends the sequence and the first failure recorded; the pass's creates, the
 pass's tombstones and `LocalEventJob` all send through it) and `excluded-moves.ts`
 (`ExcludedMoveFinder` — the same-name, same-size, unique-hash fallback that recognises a move into
-an excluded folder before it becomes a tombstone, with the 30-second listing TTL it owns) and
+an excluded folder before it becomes a tombstone, with the 30-second listing TTL it owns),
+`restore.ts` (`Restorer` — the recycle bin's rules: the free-path check before anything is
+written, the chain's live path winning over the path the caller holds, and the self-write
+record that has to precede the `restore` push) and
 `engine-events.ts` (the host-facing types — the events the engine reports and `EngineOptions` —
 re-exported by `engine.ts`, so the activity reporter and the conflict resolver can name them
 without importing the orchestrator that composes them). Engine
@@ -57,16 +60,17 @@ pass decided from, passed as one read-only snapshot instead of seven positional 
 **decision input builders** in `decide.ts` (`DecideContext` / `decideInputFrom` / `isLocalDeletion`) —
 the same input used to be assembled in four places, and the subtle half of it (`localDeletion`) was
 written out twice with different expressions. A push is described by one `PushRequest` value object
-rather than six positional arguments (three of them strings, one nullable). The seven seams this
+rather than six positional arguments (three of them strings, one nullable). The eight seams this
 document describes carry the rest: **`ContentReader`** (a pull's bytes), **`ActivityReporter`** (what
 the host is told), **`ConflictResolver`** (the conflict rules), the **`pass-view.ts`** functions
 (ordering, path geometry, read-ahead candidates), **`LocalEventJob`** (a burst's shared
-bookkeeping), **`PushBatch`** (the request window every batched sender shares) and
-**`ExcludedMoveFinder`** (the event-less move into an excluded folder).
+bookkeeping), **`PushBatch`** (the request window every batched sender shares),
+**`ExcludedMoveFinder`** (the event-less move into an excluded folder) and
+**`Restorer`** (a person asking for a version back).
 `packages/engine/src/`'s
 `decide.test.ts`, `pass-view.test.ts`, `conflict.test.ts`, `content-reader.test.ts`,
 `activity-reporter.test.ts`, `local-event-job.test.ts`, `push-batch.test.ts`,
-`excluded-moves.test.ts`, `self-events.test.ts`,
+`excluded-moves.test.ts`, `restore.test.ts`, `self-events.test.ts`,
 `remote-index.test.ts`, `host.test.ts` and `websocket.test.ts`
 are the L0 net for those — the last one with a fake global `WebSocket` and fake timers, because the
 L1/L2 suites run a real socket against a real server and therefore only ever exercise the happy path

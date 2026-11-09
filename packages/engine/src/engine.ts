@@ -80,7 +80,10 @@ import type { PushFile } from "./api";
 import type { FileStamp } from "./adapter";
 
 import type { EngineOptions, PushedFileEvent } from "./engine-events";
+import { Restorer } from "./restore";
+import type { RestoreTargetStatus } from "./restore";
 export type * from "./engine-events";
+export { RestoreBlockedError, type RestoreBlockReason, type RestoreTargetStatus } from "./restore";
 
 /**
  * What one pass's local scan found, and what it deliberately left alone.
@@ -350,40 +353,6 @@ function isMissingContentError(err: unknown): boolean {
 }
 
 /**
- * What a restore would write into, resolved *before* anything is written.
- *
- * A restore resurrects a deleted file at the path it used to live at, but that
- * path can have been taken since — a note created there, or a file this device
- * has not indexed yet. The engine never overwrites in that case; it reports the
- * shape so the caller can offer to restore under another name instead.
- */
-export interface RestoreTargetStatus {
-  /** Who currently holds the path a restore would write to. */
-  kind: "free" | "same-chain" | "other-file" | "unattributed";
-  /** The chain holding the path, when another one does (`kind: "other-file"`). */
-  holderFileId: string | null;
-}
-
-/** Why {@link SyncEngine.restoreFile} refused to write. */
-export type RestoreBlockReason = "occupied-by-other-file" | "unattributed-local-file";
-
-/**
- * Thrown by {@link SyncEngine.restoreFile} when the path it was asked to write is
- * not free. Callers turn this into a "restore under another name" dialog rather
- * than overwriting whatever is there.
- */
-export class RestoreBlockedError extends Error {
-  constructor(
-    readonly reason: RestoreBlockReason,
-    message: string,
-    readonly holderFileId: string | null = null,
-  ) {
-    super(message);
-    this.name = "RestoreBlockedError";
-  }
-}
-
-/**
  * Thrown by {@link SyncEngine}'s push path when the server refused a version
  * because the chain's head is not the base the push was decided from
  * (`status: "stale_base"`): a peer pushed while this client was deciding. Nothing
@@ -481,6 +450,8 @@ export class SyncEngine {
   private readonly conflicts: ConflictResolver;
   /** The excluded-folder fallback for an event-less move (see `ExcludedMoveFinder`). */
   private readonly excludedMoves: ExcludedMoveFinder;
+  /** The restore rules: a free-path check, the write, then the `restore` push. */
+  private readonly restorer: Restorer;
 
   constructor(private opts: EngineOptions) {
     this.scope = normalizeScope(opts.syncScope);
@@ -528,6 +499,28 @@ export class SyncEngine {
       knownSize: (fileId) => this.state[fileId]?.stamp?.sizeBytes,
       excludedFolders: () => this.scope.excludedFolders.length,
       now: () => Date.now(),
+    });
+    this.restorer = new Restorer({
+      pathFor: (fileId) => this.pathForFileId(fileId),
+      chain: (fileId) => this.pullChain(fileId),
+      versionBytes: (contentHash, sizeBytes) =>
+        this.fetchRemoteVersionBytes(this.opts.vaultId, contentHash, sizeBytes),
+      stat: (path) => this.opts.adapter.statFile(path),
+      fileIdAt: (path) => this.pathToFileId.get(path) ?? null,
+      run: (path, job) => this.paths.run([path], job, "event"),
+      beforeWrite: (path, bytes) => this.recordSelfWrite(path, bytes),
+      write: (path, bytes) => this.writing([path], () => this.opts.adapter.writeFile(path, bytes)),
+      pushRestore: async (fileId, target, bytes, baseVersionId) => {
+        await this.pushFile({
+          fileId,
+          plainPath: target,
+          action: "restore",
+          bytes,
+          baseVersionId,
+          stamp: await this.opts.adapter.statFile(target),
+        });
+      },
+      persist: () => this.persist(),
     });
   }
 
@@ -668,14 +661,7 @@ export class SyncEngine {
    * restored as-is.
    */
   async inspectRestoreTarget(fileId: string, plainPath: string): Promise<RestoreTargetStatus> {
-    const holder = this.pathToFileId.get(plainPath);
-    if (holder === fileId) return { kind: "same-chain", holderFileId: null };
-    if (holder) return { kind: "other-file", holderFileId: holder };
-    // A stat, not a read: whether a local file claims the path is the whole question,
-    // and reading a 200 MiB attachment to answer it was the cost this used to pay.
-    const stamp = await this.opts.adapter.statFile(plainPath);
-    if (stamp) return { kind: "unattributed", holderFileId: null };
-    return { kind: "free", holderFileId: null };
+    return await this.restorer.inspect(fileId, plainPath);
   }
 
   /**
@@ -709,72 +695,7 @@ export class SyncEngine {
     contentHash: string,
     options: { targetPath?: string } = {},
   ): Promise<void> {
-    const target = options.targetPath ?? this.pathForFileId(fileId) ?? plainPath;
-    // One job over the target: the "is it free?" check and the write have to agree, and a
-    // reconcile or an event deciding for this path in between would invalidate the "free"
-    // the check just returned.
-    return await this.paths.run(
-      [target],
-      async () => {
-        const status = await this.inspectRestoreTarget(fileId, target);
-        if (status.kind === "other-file") {
-          throw new RestoreBlockedError(
-            "occupied-by-other-file",
-            `${target} is already held by another file`,
-            status.holderFileId,
-          );
-        }
-        if (status.kind === "unattributed") {
-          throw new RestoreBlockedError(
-            "unattributed-local-file",
-            `${target} already has a local file that no synced chain claims`,
-          );
-        }
-
-        const chain = await this.pullChain(fileId);
-        // A version's size says whether its bytes are chunked, and the chain is the only
-        // place this call can learn it: the caller names a content hash, not a size. A
-        // hash that is not in the chain cannot be restored — guessing the head's size
-        // would read the wrong framing and allocate the wrong buffer — and a pruned
-        // version the chain no longer holds is refused the same way.
-        const version = chain.find((entry) => entry.contentHash === contentHash);
-        if (version === undefined) {
-          throw new Error(`Version ${contentHash} is not in this file's history`);
-        }
-        const bytes = await this.fetchRemoteVersionBytes(
-          this.opts.vaultId,
-          contentHash,
-          version.sizeBytes,
-        );
-        if (!bytes) {
-          throw new Error(`Version content not found for ${contentHash}`);
-        }
-        // The head this restore is decided from is the chain's, not the state's: a
-        // chain that this device deleted (applied from a peer) has no state entry at
-        // all, and a restore is a new version on top of wherever the chain stands now.
-        // A peer pushing in between still gets refused rather than overwritten.
-        // The write below fires a vault event the host feeds straight back into
-        // `handleLocalChange`, and it can arrive before `pushFile` has recorded the
-        // new state and path (the push awaits a network round trip). Mark the write
-        // as our own first, or the event is mistaken for a user edit: a second
-        // `restore` push, and a brand-new fileId when the delete came from a peer.
-        await this.recordSelfWrite(target, bytes);
-        await this.writing([target], () => this.opts.adapter.writeFile(target, bytes));
-        // The bytes are on disk now, so the version carries their real stamp instead of a
-        // "pushed just now" one: a peer compares that time when the file is a config-folder
-        // path, and the sync point gets the stamp a later pass needs to skip re-reading it.
-        await this.pushFile({
-          fileId,
-          plainPath: target,
-          action: "restore",
-          bytes,
-          baseVersionId: remoteHead(chain)?.versionId ?? null,
-          stamp: await this.opts.adapter.statFile(target),
-        });
-        this.persist();
-      },
-      "event",
-    );
+    return await this.restorer.restore(fileId, plainPath, contentHash, options);
   }
 
   /**
