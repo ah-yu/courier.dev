@@ -1,4 +1,5 @@
 import type {
+  HistoryKind,
   SyncAction,
   SyncPushResponse,
   VaultSyncIndexResponse,
@@ -44,11 +45,13 @@ import {
   type SyncScopeInput,
 } from "./sync-scope";
 import type { LocalVersionState } from "./state";
+import { sameStamp } from "./state";
 import {
   decideFile,
   decideInputFrom,
   decideNewLocalFile,
   decideRefusedPush,
+  classifyPushResult,
   needsFreshRead,
   remoteHead,
   EVENT_DECISION_ATTEMPTS,
@@ -323,6 +326,33 @@ export interface SettingsAppliedEvent {
 }
 
 /**
+ * What one pass's local scan found, and what it deliberately left alone.
+ *
+ * A value object rather than five containers threaded through six positional parameters:
+ * four of them are collections the compiler tells apart only by their type parameters, and
+ * every site that reads the result means "the scan", not "the fourth argument". Its maps are
+ * the pass's snapshot — filled here, read-only to everything after it (the create batch
+ * reuses a hash only while the bytes it re-read still match that hash's stamp).
+ */
+interface LocalScan {
+  /** plainPath → hash, for the files the scan hashed (or reused a recorded hash for). */
+  readonly hashes: Map<string, string>;
+  /** plainPath → the stamp its hash was taken at, so a converged file can be stamped. */
+  readonly stamps: Map<string, FileStamp>;
+  /** Paths the pass leaves exactly as they are (not statable, or over the size cap). */
+  readonly skipped: Set<string>;
+  /** The subset of {@link skipped} over the **upload** cap (still takes a peer's version). */
+  readonly overCap: Set<string>;
+  /**
+   * Local files the scan did **not** hash, because no chain can claim them: a file with no
+   * state entry and no remote chain can only be a `create`, and the create reads it once
+   * (see `createUntrackedFiles`). Keeping them out of {@link hashes} is what stops a first
+   * bind from reading every file twice.
+   */
+  readonly untracked: string[];
+}
+
+/**
  * Everything one reconcile pass decided from: the snapshot it took when it started
  * (the local listing's hashes and stamps, the remote chains and their paths) plus the
  * paths it must leave alone.
@@ -336,13 +366,7 @@ interface ReconcilePass {
   fileIds: Set<string>;
   /** plainPath → hash, for the files the pass hashed (or reused a recorded hash for). */
   localHashes: Map<string, string>;
-  /**
-   * Local files the pass did **not** hash, because no chain can claim them: a file with
-   * no state entry and no remote chain can only be a `create`, and the only thing that
-   * needs its hash is the create itself — which reads it once
-   * (see `createUntrackedFiles`). Keeping them out of {@link localHashes} is what stops
-   * a first bind from reading every file twice.
-   */
+  /** The scan's files it deliberately did not hash (see {@link LocalScan.untracked}). */
   untrackedPaths: readonly string[];
   /** fileId → its chain, oldest → newest. */
   chainByFileId: Map<string, VersionChainEntry[]>;
@@ -511,8 +535,14 @@ interface PreparedPush {
    * `contentChunks` instead of a payload.
    */
   chunkCount: number;
-  /** The wire entry, with `content` filled in when the request is built. */
-  file: PushFile;
+  /**
+   * Which of the vault's two retention categories the version belongs to.
+   *
+   * Decided when the push is prepared — the plaintext path is the only place the category
+   * is visible (see `historyKindFor`) — and carried until the request is built, so the
+   * wire shape has exactly one source of truth (see {@link wireFile}).
+   */
+  historyKind: HistoryKind;
 }
 
 /**
@@ -800,18 +830,7 @@ export class SyncEngine {
     const stamp = await this.opts.adapter.statFile(path);
     if (stamp === null) return false;
     if (withinFileSizeCap(this.scope, stamp.sizeBytes)) return true;
-    this.activity.reportTooLarge(path, stamp.sizeBytes);
-    this.activity.reportActivity({
-      direction: "out",
-      outcome: "skipped",
-      fileId: this.pathToFileId.get(path) ?? null,
-      versionId: null,
-      plainPath: path,
-      action: null,
-      sizeBytes: stamp.sizeBytes,
-      deviceName: null,
-      reason: "size",
-    });
+    this.activity.reportSkippedForSize(path, stamp.sizeBytes, this.pathToFileId.get(path) ?? null);
     return false;
   }
 
@@ -827,18 +846,7 @@ export class SyncEngine {
    */
   private reportOverCapLocal(path: string, stamp: FileStamp): void {
     if (this.cachedHashFor(path, stamp) !== null) return;
-    this.activity.reportTooLarge(path, stamp.sizeBytes);
-    this.activity.reportActivity({
-      direction: "out",
-      outcome: "skipped",
-      fileId: this.pathToFileId.get(path) ?? null,
-      versionId: null,
-      plainPath: path,
-      action: null,
-      sizeBytes: stamp.sizeBytes,
-      deviceName: null,
-      reason: "size",
-    });
+    this.activity.reportSkippedForSize(path, stamp.sizeBytes, this.pathToFileId.get(path) ?? null);
   }
 
   /**
@@ -1200,10 +1208,27 @@ export class SyncEngine {
     const fileId = this.pathToFileId.get(path);
     const entry = fileId ? this.state[fileId] : undefined;
     if (!entry?.lastKnownContentHash || !entry.stamp) return null;
-    if (entry.stamp.sizeBytes !== stamp.sizeBytes || entry.stamp.mtimeMs !== stamp.mtimeMs) {
-      return null;
-    }
+    if (!sameStamp(entry.stamp, stamp)) return null;
     return entry.lastKnownContentHash;
+  }
+
+  /**
+   * The hash of a file as of `stamp`: the recorded one when the stamp still proves it, the
+   * file's own after one read otherwise.
+   *
+   * `null` means the file is gone — the settings poll's "a read failure is a race, not a
+   * change" case. The reconcile scan deliberately does **not** use this: it has to decide
+   * whether a file is untracked *before* paying for the read, because an untracked file's
+   * bytes are read by its create instead. The settings poll has no untracked question —
+   * every config path it lists is tracked or about to be created, and both answers need the
+   * hash.
+   */
+  private async hashForCurrent(path: string, stamp: FileStamp): Promise<string | null> {
+    const cached = this.cachedHashFor(path, stamp);
+    if (cached !== null) return cached;
+    const bytes = await this.opts.adapter.readFile(path);
+    if (!bytes) return null;
+    return await sha256Hex(bytes);
   }
 
   /** Record a stamp for the content hash a state entry already holds. */
@@ -1231,9 +1256,7 @@ export class SyncEngine {
     if (!snapshot) return null;
     const current = await this.opts.adapter.statFile(path);
     if (!current) return null;
-    if (current.sizeBytes !== snapshot.sizeBytes || current.mtimeMs !== snapshot.mtimeMs) {
-      return null;
-    }
+    if (!sameStamp(current, snapshot)) return null;
     return current;
   }
 
@@ -1275,7 +1298,7 @@ export class SyncEngine {
     }
 
     let result = (await this.sendPush(prepared, content, contentChunks)).results[0];
-    if (result?.status === "content_missing" && prepared.reusesStoredContent) {
+    if (classifyPushResult(result) === "content_missing" && prepared.reusesStoredContent) {
       // The store does not hold those bytes after all — a chain whose blob was
       // reclaimed, or a claim that simply did not hold. Nothing was written for the
       // refused attempt, so send the content and finish the move.
@@ -1307,11 +1330,17 @@ export class SyncEngine {
         ).results[0];
       }
     }
-    if (result?.status === "stale_base") {
+    const outcome = classifyPushResult(result);
+    if (outcome === "stale_base") {
+      // A peer moved the chain between the decision and this request; the refusal names
+      // the chain it refused against, so no re-send is needed.
       await this.settleStaleBase(prepared);
       return;
     }
-    if (result?.status !== "ok") {
+    if (outcome !== "ok") {
+      // A `content_missing` here is the answer to the retry above — the bytes were sent and
+      // the store still does not hold them — or a refusal of any other kind. Neither can
+      // be fixed by sending the same claim again: the next pass reads the file and decides.
       this.forgetPushedVersion(prepared);
       throw new Error(`Push failed for ${plainPath}: ${result?.error ?? "unknown error"}`);
     }
@@ -1485,18 +1514,77 @@ export class SyncEngine {
       content: null,
       reusesStoredContent,
       chunkCount,
-      file: {
-        fileId,
-        encryptedPath,
-        action,
-        versionId,
-        contentHash,
-        sizeBytes,
-        mtimeMs,
-        baseVersionId,
-        content: null,
-        historyKind,
-      },
+      historyKind,
+    };
+  }
+
+  /**
+   * The wire entry for one prepared version.
+   *
+   * The prepared version and the request carry the same eleven fields, and keeping a second
+   * copy of them on `PreparedPush.file` meant every field added to a push had to be written
+   * twice (and every sender rebuilt the entry with its own spread). One builder is what
+   * makes "the version on the wire" a single shape: a chunked upload names its chunks
+   * instead of carrying a payload, which is the only difference between the two forms.
+   */
+  private wireFile(
+    prepared: PreparedPush,
+    content: Uint8Array | null,
+    contentChunks = 0,
+  ): PushFile {
+    return {
+      fileId: prepared.fileId,
+      encryptedPath: prepared.encryptedPath,
+      action: prepared.action,
+      versionId: prepared.versionId,
+      contentHash: prepared.contentHash,
+      sizeBytes: prepared.sizeBytes,
+      mtimeMs: prepared.mtimeMs,
+      baseVersionId: prepared.baseVersionId,
+      historyKind: prepared.historyKind,
+      content,
+      ...(contentChunks > 0 ? { contentChunks } : {}),
+    };
+  }
+
+  /**
+   * The moment this device decided on a deletion, remembered across retries.
+   *
+   * A tombstone has no file to stamp, and its `mtimeMs` is what a peer compares with its
+   * own file's modification time to settle a config-folder conflict. Recording the moment
+   * in the state — rather than reading the clock again when the push is retried, possibly
+   * hours later — keeps a deletion made *before* a peer's edit from later claiming to be
+   * the newer change. `Date.now()` is the only honest answer when nothing recorded it (the
+   * file was deleted with the app closed), and it is then kept for the retries that follow.
+   */
+  private deleteMoment(entry: LocalVersionState[string] | undefined): number {
+    const moment = entry?.deletedAtMs ?? Date.now();
+    if (entry) entry.deletedAtMs = moment;
+    return moment;
+  }
+
+  /**
+   * The version a deletion pushes: no bytes, no stamp, and the moment it was decided.
+   *
+   * Shared by the two sites that build a tombstone to send — the pass's batched delete
+   * (`prepareTombstone`) and an event's single one (`resolveLocalDelete`) — so the version's
+   * shape is stated once, and the only thing either caller contributes is the base it was
+   * decided from.
+   */
+  private tombstoneRequest(
+    fileId: string,
+    plainPath: string,
+    baseVersionId: string | null,
+    mtimeMs: number,
+  ): PushRequest {
+    return {
+      fileId,
+      plainPath,
+      action: "delete",
+      bytes: undefined,
+      baseVersionId,
+      stamp: null,
+      mtimeMs,
     };
   }
 
@@ -1591,7 +1679,9 @@ export class SyncEngine {
       await this.uploadChunks(prepared);
       prepared.plainBytes = undefined;
       const result = (await this.sendPush(prepared, null, prepared.chunkCount)).results[0];
-      if (result?.status !== "ok") {
+      // A chunked create names `baseVersionId: null`, so the server has no base to refuse
+      // as stale: every answer other than `ok` is a refusal.
+      if (classifyPushResult(result) !== "ok") {
         this.forgetPushedVersion(prepared);
         this.dropPendingCreate(prepared);
         return new Error(
@@ -1618,11 +1708,7 @@ export class SyncEngine {
     content: Uint8Array | null,
     contentChunks = 0,
   ): Promise<SyncPushResponse> {
-    const file: PushFile = {
-      ...prepared.file,
-      content,
-      ...(contentChunks > 0 ? { contentChunks } : {}),
-    };
+    const file = this.wireFile(prepared, content, contentChunks);
     return await this.withRateLimitWaits(() => this.opts.api.push(this.opts.vaultId, [file])).catch(
       (err: unknown) => {
         this.forgetPushedVersion(prepared);
@@ -1815,11 +1901,9 @@ export class SyncEngine {
           this.reportOverCapLocal(path, stamp);
           continue;
         }
-        const cached = this.cachedHashFor(path, stamp);
-        const bytes = cached === null ? await this.opts.adapter.readFile(path) : null;
-        const hash = cached ?? (bytes ? await sha256Hex(bytes) : null);
+        const hash = await this.hashForCurrent(path, stamp);
         // The listing says the file exists; a read failure is a race, not a change.
-        if (!hash) continue;
+        if (hash === null) continue;
         const fileId = this.pathToFileId.get(path);
         const known = fileId ? this.state[fileId] : undefined;
         if (!known || known.lastKnownContentHash !== hash) await this.handleLocalChange(path);
@@ -1948,45 +2032,33 @@ export class SyncEngine {
     // like a file over the cap — not "gone", which the loop below would read as this
     // device's deletion and then try to overwrite with a pull that fails with
     // `File already exists.` because the file is in fact still there.
-    const localHashes = new Map<string, string>();
-    const localStamps = new Map<string, FileStamp>();
-    const skippedPaths = new Set<string>();
-    const overCapPaths = new Set<string>();
-    const untrackedPaths: string[] = [];
-    await this.scanLocalFiles(
-      visiblePaths,
-      localHashes,
-      localStamps,
-      skippedPaths,
-      overCapPaths,
-      untrackedPaths,
-    );
+    const scan = await this.scanLocalFiles(visiblePaths);
 
     // A move made without an event is found by content (`repairMovedFile`), which needs
     // the hashes the scan skipped. That is only worth paying for when a tracked file has
     // actually gone missing: on a first bind there is no such file, and on an ordinary
     // pass every syncable file is tracked.
-    if (untrackedPaths.length > 0 && this.anyTrackedPathUnhashed(localHashes, skippedPaths)) {
+    if (scan.untracked.length > 0 && this.anyTrackedPathUnhashed(scan)) {
       const pool = new WorkPool(this.passLimits);
       await Promise.all(
-        untrackedPaths.map((p) =>
+        scan.untracked.map((p) =>
           pool.run("small", async () => {
             const bytes = await adapter.readFile(p);
             if (!bytes) return;
             const hash = await sha256Hex(bytes);
-            localHashes.set(p, hash);
-            this.rememberStamp(p, localStamps.get(p) ?? null);
+            scan.hashes.set(p, hash);
+            this.rememberStamp(p, scan.stamps.get(p) ?? null);
           }),
         ),
       );
-      untrackedPaths.length = 0;
+      scan.untracked.length = 0;
     }
 
     // Re-point the chains whose file was moved locally without an event reaching
     // the engine, so neither the tombstone branch nor the untracked branch below
     // mistakes a move for "deleted here, created there".
     for (const [fileId, entry] of Object.entries(this.state)) {
-      await this.repairMovedFile(fileId, entry, localHashes, liveFileIds, this.remoteIndex);
+      await this.repairMovedFile(fileId, entry, scan.hashes, liveFileIds, this.remoteIndex);
     }
 
     // Every fileId we know about, plus every live chain the server knows. A tracked
@@ -2000,13 +2072,13 @@ export class SyncEngine {
 
     const failure = await this.reconcileLoop({
       fileIds: allFileIds,
-      localHashes,
-      untrackedPaths,
+      localHashes: scan.hashes,
+      untrackedPaths: scan.untracked,
       chainByFileId,
       remote: this.remoteIndex,
-      skippedPaths,
-      overCapPaths,
-      localStamps,
+      skippedPaths: scan.skipped,
+      overCapPaths: scan.overCap,
+      localStamps: scan.stamps,
       priority,
       stateAtStart,
     });
@@ -2104,13 +2176,7 @@ export class SyncEngine {
     // deletes holds no file, so it cannot also be created in the same pass — and the
     // order only keeps a pass's deletions ahead of its creations.
     const deleteFailure = await this.pushTombstones(pendingDeletes);
-    const batchFailure = await this.createUntrackedFiles(
-      pass.localHashes,
-      pass.untrackedPaths,
-      pass.remote,
-      pass.localStamps,
-      pass.priority,
-    );
+    const batchFailure = await this.createUntrackedFiles(pass);
     // The pass is over: report the final pair, whose `done === total` tells a host to stop
     // showing a counter (a create that a limiter left unsent was counted and dropped).
     this.activity.reportProgress(true);
@@ -2190,78 +2256,61 @@ export class SyncEngine {
    * whole vault (`docs/first-bind-performance.md`).
    *
    * The stat rules are unchanged: a path the adapter cannot stat, or one over the size
-   * cap, is recorded in `skippedPaths` and left exactly as it is. An over-cap path is
-   * also recorded in `overCapPaths`, because the pass still has to *receive* a newer
-   * version for it (see `applyOverCapRemote`).
+   * cap, is recorded in `skipped` and left exactly as it is. An over-cap path is also
+   * recorded in `overCap`, because the pass still has to *receive* a newer version for it
+   * (see `applyOverCapRemote`).
    */
-  private async scanLocalFiles(
-    visiblePaths: readonly string[],
-    localHashes: Map<string, string>,
-    localStamps: Map<string, FileStamp>,
-    skippedPaths: Set<string>,
-    overCapPaths: Set<string>,
-    untrackedPaths: string[],
-  ): Promise<void> {
+  private async scanLocalFiles(visiblePaths: readonly string[]): Promise<LocalScan> {
+    const scan: LocalScan = {
+      hashes: new Map(),
+      stamps: new Map(),
+      skipped: new Set(),
+      overCap: new Set(),
+      untracked: [],
+    };
     // Small files read and hash concurrently, through the same pool the per-file half of
     // a pass uses: the loop used to await one file at a time, which on a 10 000-file
     // first bind is 10 000 serial read/hash pairs.
     const pool = new WorkPool(this.passLimits);
     await Promise.all(
-      visiblePaths.map((path) =>
-        pool.run("small", () =>
-          this.scanLocalFile(
-            path,
-            localHashes,
-            localStamps,
-            skippedPaths,
-            overCapPaths,
-            untrackedPaths,
-          ),
-        ),
-      ),
+      visiblePaths.map((path) => pool.run("small", () => this.scanLocalFile(path, scan))),
     );
+    return scan;
   }
 
-  private async scanLocalFile(
-    path: string,
-    localHashes: Map<string, string>,
-    localStamps: Map<string, FileStamp>,
-    skippedPaths: Set<string>,
-    overCapPaths: Set<string>,
-    untrackedPaths: string[],
-  ): Promise<void> {
+  private async scanLocalFile(path: string, scan: LocalScan): Promise<void> {
     const stamp = await this.opts.adapter.statFile(path);
     if (stamp === null) {
-      skippedPaths.add(path);
+      scan.skipped.add(path);
       return;
     }
     if (!withinFileSizeCap(this.scope, stamp.sizeBytes)) {
-      skippedPaths.add(path);
+      scan.skipped.add(path);
       // Over the **upload** cap: the pass must not push it, but it still has to take a
       // peer's newer version (`applyOverCapRemote`).
-      overCapPaths.add(path);
+      scan.overCap.add(path);
       this.reportOverCapLocal(path, stamp);
       return;
     }
     // The stamp is kept for every statable file, not only the hashed ones: it orders the
     // create work (recently edited first) and it is what `createUntrackedFiles` re-checks
     // before reusing a hash.
-    localStamps.set(path, stamp);
+    scan.stamps.set(path, stamp);
     const cached = this.cachedHashFor(path, stamp);
     if (cached !== null) {
       // The hash was recorded at exactly this stamp (`cachedHashFor` checked it), so it
       // is the one those bytes were hashed at — the adoption path below may trust it.
-      localHashes.set(path, cached);
+      scan.hashes.set(path, cached);
       return;
     }
     if (!this.pathToFileId.has(path) && this.remoteIndex.fileIdAt(path) === null) {
-      untrackedPaths.push(path);
+      scan.untracked.push(path);
       return;
     }
     const bytes = await this.opts.adapter.readFile(path);
     if (!bytes) return;
     const hash = await sha256Hex(bytes);
-    localHashes.set(path, hash);
+    scan.hashes.set(path, hash);
     // The file was read and hashed: if that hash is the one the state already records,
     // the stamp belongs to it and can be kept, which is what saves the next pass from
     // reading the file again. A hash that *differs* must not be stamped — the entry
@@ -2281,15 +2330,12 @@ export class SyncEngine {
    * only matters when a tracked file really has no hash this pass; anywhere else the
    * skipped hashes are pure savings.
    */
-  private anyTrackedPathUnhashed(
-    localHashes: Map<string, string>,
-    skippedPaths: Set<string>,
-  ): boolean {
+  private anyTrackedPathUnhashed(scan: LocalScan): boolean {
     for (const entry of Object.values(this.state)) {
       const path = entry.plainPath;
       if (!this.isSyncable(path)) continue;
-      if (skippedPaths.has(path)) continue;
-      if (!localHashes.has(path)) return true;
+      if (scan.skipped.has(path)) continue;
+      if (!scan.hashes.has(path)) return true;
     }
     return false;
   }
@@ -2640,9 +2686,7 @@ export class SyncEngine {
       // deletion happened with the app closed nothing recorded it, so it is taken now — the
       // best this pass can say — and remembered for the retries that follow (see
       // `applyLocalDelete`).
-      const stateEntry = this.state[fileId];
-      const deletedAtMs = stateEntry?.deletedAtMs ?? Date.now();
-      if (stateEntry) stateEntry.deletedAtMs = deletedAtMs;
+      this.deleteMoment(this.state[fileId]);
       // Held for the pass's one batched delete push (see `pushTombstones`): a pass that
       // finds a thousand files gone must not spend a thousand requests on them. The base is
       // the head this decision was taken from; the batch re-checks it, so a version a pull
@@ -2708,13 +2752,8 @@ export class SyncEngine {
    *   and the same batch is re-sent; only after {@link MAX_RATE_LIMIT_WAITS} waits does
    *   the pass stop and leave the remaining files to the next one.
    */
-  private async createUntrackedFiles(
-    localHashes: Map<string, string>,
-    untrackedPaths: readonly string[],
-    remote: RemoteIndex,
-    localStamps: Map<string, FileStamp>,
-    priority: ReadonlyMap<string, number>,
-  ): Promise<unknown> {
+  private async createUntrackedFiles(pass: ReconcilePass): Promise<unknown> {
+    const { localHashes, localStamps, untrackedPaths, priority } = pass;
     // Both sources are candidates: the hashes the scan took (a file a chain or a state
     // entry claims, or one the move-repair fallback hashed) and the paths the scan only
     // stamped. The latter is the common case on a first bind — the create reads each of
@@ -2737,7 +2776,7 @@ export class SyncEngine {
     // a second chain for a path an event already owns.
     return await this.paths.run(
       ordered,
-      () => this.createUntrackedFilesLocked(ordered, localHashes, remote, localStamps),
+      () => this.createUntrackedFilesLocked(ordered, pass),
       "batch",
     );
   }
@@ -2745,10 +2784,9 @@ export class SyncEngine {
   /** The work of {@link createUntrackedFiles}, running inside its paths' job. */
   private async createUntrackedFilesLocked(
     ordered: readonly string[],
-    localHashes: Map<string, string>,
-    remote: RemoteIndex,
-    localStamps: Map<string, FileStamp>,
+    pass: ReconcilePass,
   ): Promise<unknown> {
+    const { localHashes, localStamps, remote } = pass;
     let batch: PreparedPush[] = [];
     let batchBytes = 0;
     let firstFailure: unknown = null;
@@ -2770,7 +2808,7 @@ export class SyncEngine {
         const response = await this.withRateLimitWaits(() =>
           this.opts.api.push(
             this.opts.vaultId,
-            sending.map((prepared) => ({ ...prepared.file, content: prepared.content })),
+            sending.map((prepared) => this.wireFile(prepared, prepared.content)),
           ),
         );
         results = response.results;
@@ -2793,7 +2831,9 @@ export class SyncEngine {
       let failure: unknown = null;
       for (const [index, prepared] of sending.entries()) {
         const result = results[index];
-        if (result?.status === "ok") {
+        // A create names `baseVersionId: null`, so a stale base cannot reach it; every
+        // non-`ok` answer is a refusal the next pass retries in a batch.
+        if (classifyPushResult(result) === "ok") {
           this.applyPushedVersion(prepared);
           this.activity.advanceProgress();
           continue;
@@ -2862,10 +2902,7 @@ export class SyncEngine {
         // name content the push does not carry.
         const scannedStamp = localStamps.get(path);
         const knownHash =
-          scannedStamp !== undefined &&
-          read.stamp !== null &&
-          scannedStamp.sizeBytes === read.stamp.sizeBytes &&
-          scannedStamp.mtimeMs === read.stamp.mtimeMs
+          scannedStamp !== undefined && read.stamp !== null && sameStamp(scannedStamp, read.stamp)
             ? localHashes.get(path)
             : undefined;
 
@@ -3005,11 +3042,14 @@ export class SyncEngine {
       prepared: PreparedPush,
       result: { status: string; error?: string } | undefined,
     ): Promise<void> => {
-      if (result?.status === "ok") {
+      const outcome = classifyPushResult(result);
+      if (outcome === "ok") {
         this.applyPushedVersion(prepared);
         return;
       }
-      if (result?.status === "stale_base") {
+      // A tombstone always names the head it was decided from, so a stale base is reachable
+      // here and is settled from the chain the server refused against (no re-send).
+      if (outcome === "stale_base") {
         await this.settleStaleBase(prepared);
         return;
       }
@@ -3034,7 +3074,7 @@ export class SyncEngine {
         const response = await this.withRateLimitWaits(() =>
           this.opts.api.push(
             this.opts.vaultId,
-            sending.map((prepared) => ({ ...prepared.file, content: prepared.content })),
+            sending.map((prepared) => this.wireFile(prepared, prepared.content)),
           ),
         );
         results = response.results;
@@ -3116,17 +3156,9 @@ export class SyncEngine {
     // Confirm with the adapter rather than trusting the pass's listing: a file written
     // back between the decision and the batch is not a deletion.
     if (await this.opts.adapter.statFile(path)) return null;
-    const deletedAtMs = stateEntry.deletedAtMs ?? Date.now();
-    stateEntry.deletedAtMs = deletedAtMs;
-    return await this.preparePush({
-      fileId,
-      plainPath: path,
-      action: "delete",
-      bytes: undefined,
-      baseVersionId,
-      stamp: null,
-      mtimeMs: deletedAtMs,
-    });
+    return await this.preparePush(
+      this.tombstoneRequest(fileId, path, baseVersionId, this.deleteMoment(stateEntry)),
+    );
   }
 
   /**
@@ -3477,7 +3509,7 @@ export class SyncEngine {
     if (!recorded) return null;
     const stamp = await this.opts.adapter.statFile(plainPath);
     if (stamp === null) return null;
-    if (stamp.sizeBytes !== recorded.sizeBytes || stamp.mtimeMs !== recorded.mtimeMs) return null;
+    if (!sameStamp(stamp, recorded)) return null;
     const applied = await this.pullRemote(fileId, plainPath, head);
     return applied
       ? null
@@ -4024,7 +4056,7 @@ export class SyncEngine {
         const response = await this.withRateLimitWaits(() =>
           this.opts.api.push(
             this.opts.vaultId,
-            prepared.map((one) => ({ ...one.file, content: one.content })),
+            prepared.map((one) => this.wireFile(one, one.content)),
           ),
         );
         return response.results;
@@ -4776,18 +4808,14 @@ export class SyncEngine {
     // stamp, and a peer compares its `mtimeMs` with its own file's modification time.
     // Reading the clock again on a retry (the next pass, possibly hours later) would let a
     // deletion made *before* a peer's edit outrank that edit.
-    const entry = this.state[fileId];
-    const deletedAtMs = entry?.deletedAtMs ?? Date.now();
-    if (entry) entry.deletedAtMs = deletedAtMs;
-    const prepared = await this.preparePush({
-      fileId,
-      plainPath: path,
-      action: "delete",
-      bytes: undefined,
-      baseVersionId: this.state[fileId]?.lastKnownVersionId ?? null,
-      stamp: null,
-      mtimeMs: deletedAtMs,
-    });
+    const prepared = await this.preparePush(
+      this.tombstoneRequest(
+        fileId,
+        path,
+        this.state[fileId]?.lastKnownVersionId ?? null,
+        this.deleteMoment(this.state[fileId]),
+      ),
+    );
     return prepared === null ? { kind: "handled" } : { kind: "prepared", prepared };
   }
 

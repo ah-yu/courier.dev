@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  classifyPushResult,
   decideFile,
   decideInputFrom,
   decideNewLocalFile,
@@ -671,5 +672,21 @@ describe("decideRefusedPush", () => {
 
   it("reports the second refusal instead of looping", () => {
     expect(decideRefusedPush(1)).toBe("report");
+  });
+});
+
+describe("classifyPushResult", () => {
+  it("names the three statuses a caller has to answer differently", () => {
+    expect(classifyPushResult({ status: "ok" })).toBe("ok");
+    expect(classifyPushResult({ status: "stale_base" })).toBe("stale_base");
+    expect(classifyPushResult({ status: "content_missing" })).toBe("content_missing");
+  });
+
+  it("treats every other status, and a missing answer, as a refusal", () => {
+    // The route answers `error`/`quota`/… for a push it will not take, and a result the
+    // server did not include at all is a refused version too (the caller reports it).
+    expect(classifyPushResult({ status: "quota" })).toBe("refused");
+    expect(classifyPushResult({ status: "error", error: "boom" })).toBe("refused");
+    expect(classifyPushResult(undefined)).toBe("refused");
   });
 });

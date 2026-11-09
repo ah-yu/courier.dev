@@ -59,6 +59,31 @@ export class ActivityReporter {
     this.opts.onFileTooLarge?.({ plainPath, sizeBytes });
   }
 
+  /**
+   * Report a local file the size cap keeps out of this device's sync, both ways: the
+   * once-per-pass notice and the activity row for the decision itself.
+   *
+   * The two reports answer different questions — "tell the user once" and "record this
+   * decision" — and every site that skips a local file for its size has to do both, in this
+   * order. Keeping the pair here is what stops the reconcile scan and the settings poll
+   * from drifting on the row's shape (they were copied from each other once already), and
+   * it keeps `fileId` where the engine can answer it: the reporter never reads the state.
+   */
+  reportSkippedForSize(plainPath: string, sizeBytes: number, fileId: string | null): void {
+    this.reportTooLarge(plainPath, sizeBytes);
+    this.reportActivity({
+      direction: "out",
+      outcome: "skipped",
+      fileId,
+      versionId: null,
+      plainPath,
+      action: null,
+      sizeBytes,
+      deviceName: null,
+      reason: "size",
+    });
+  }
+
   /** Report a file this pass left out for a reason that is not its size (once per pass). */
   reportSkipped(plainPath: string, reason: FileSkippedEvent["reason"]): void {
     if (this.skippedReported.has(plainPath)) return;

@@ -35,3 +35,17 @@ export interface LocalVersionState {
     deletedAtMs?: number;
   };
 }
+
+/**
+ * Whether two stamps describe the same file state, as far as a recorded hash may be trusted.
+ *
+ * The size and the modification time are the whole test: the engine records a hash only
+ * together with the stamp it was taken at, and every reuse compares exactly those two
+ * fields — a pass's cached hash, a pre-fetched read, the upload cap's "has this file
+ * changed since this device synced it?" question. One predicate keeps those sites from
+ * drifting on which fields count (a size-only comparison would trust an edit that kept the
+ * length; a time-only one would trust a rewritten file written inside the same tick).
+ */
+export function sameStamp(a: FileStamp, b: FileStamp): boolean {
+  return a.sizeBytes === b.sizeBytes && a.mtimeMs === b.mtimeMs;
+}
