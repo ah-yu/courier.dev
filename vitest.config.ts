@@ -53,6 +53,10 @@ export default defineConfig({
       // Obsidian — or more build glue — instead of more real tests.
       exclude: [
         "**/*.test.ts",
+        // Test-only fixtures are the instrument, not the subject — the same rule as the
+        // e2e harness below. Counting the engine suite's fake adapter and API would let a
+        // test file's growth mask a fall in the engine's own coverage.
+        "**/*.test-helpers.ts",
         "**/*.d.ts",
         "packages/e2e/src/**",
         "packages/testing/src/**",

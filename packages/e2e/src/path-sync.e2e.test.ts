@@ -270,8 +270,8 @@ describe("sync e2e — path shapes across two clients", () => {
      * The same shape seen from the **bind** side: connecting a vault whose remote
      * already deleted the file treats the local copy as the user's own, so it is
      * pushed as a new file with a new fileId. The engine-level cases for that live
-     * in `engine.test.ts` ("revives a peer-deleted local file as a new file when
-     * binding the vault"); this file keeps the multi-device recycle-bin
+     * in `engine.conflicts.test.ts` ("revives a peer-deleted local file as a new file
+     * when binding the vault"); this file keeps the multi-device recycle-bin
      * consequences below.
      */
     it("keeps the deleted chain in the recycle bin after a binding client revives the path", async () => {

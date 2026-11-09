@@ -181,7 +181,7 @@
 Covered by `sync-scope.test.ts` (one group, one file type and one excluded folder at a time,
 ownership, the cap), `file-types.test.ts` (the extension table), `conflict-file.test.ts` (the naming
 rule), the `SyncEngine — the sync scope` and `SyncEngine — vault file types and the size cap` cases in
-`engine.test.ts`, `packages/e2e/src/settings-sync.e2e.test.ts`,
+`engine.scope.test.ts` / `engine.content.test.ts`, `packages/e2e/src/settings-sync.e2e.test.ts`,
 `packages/e2e/src/excluded-folders.e2e.test.ts`, `packages/e2e/src/attachment-sync.e2e.test.ts`, the
 `Obsidian settings sync` / `vault file types` / `excluded folders` cases in `plugin.e2e.test.ts`, and
 the config-folder, attachment and excluded-folder cases in the real-Obsidian suite.
@@ -231,7 +231,7 @@ stored binding says.
   Obsidian, so asking for a reload after one of those is how a plugin teaches users to dismiss the card
   unread. Without any of it, a sync that worked is indistinguishable from one that failed, which is exactly
   how the first field report of this feature read.
-  Covered by the `onSettingsApplied` cases in `engine.test.ts` (the event carries path, action and group),
+  Covered by the `onSettingsApplied` cases in `engine.scope.test.ts` (the event carries path, action and group),
   `settings-reload.test.ts` + `settings-reload-popup.test.ts` (which groups need a reload, that the card names
   no file, that its layout is left to the stylesheet (no inline positioning) and which classes/semantics it
   carries, and the whole show/one-at-a-time/dismiss/re-arm lifecycle against a fake element), the card

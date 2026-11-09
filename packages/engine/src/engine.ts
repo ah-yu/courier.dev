@@ -781,7 +781,7 @@ export class SyncEngine {
    *
    * The counters are {@link ContentPrefetcher.stats}'s: requests, hits, misses, and the
    * ciphertext currently buffered. They exist for measurement and diagnostics — the cases
-   * in `engine.test.ts` use them to pin the read-ahead's drops, and a host that wants to
+   * in the engine suite use them to pin the read-ahead's drops, and a host that wants to
    * check the read-ahead is paying off before tuning it has the same question — so the
    * accessor keeps that question answerable without reaching inside the engine.
    */

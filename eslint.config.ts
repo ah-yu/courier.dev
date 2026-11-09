@@ -105,6 +105,12 @@ const DIRECTORY_IGNORES: string[] = [
   "packages/build/**",
   "packages/testing/**",
   /*
+   * The engine suite's shared fixtures: test-only code that lives outside a `*.test.ts`
+   * file so the topics can import it. The directory's mirror would never publish it, and
+   * the app rules (window timers, the config folder) do not apply to a fake vault.
+   */
+  "**/*.test-helpers.ts",
+  /*
    * The repository's own tooling. It is not published either, and it is not plugin source:
    * a config file may name `.obsidian` or import `url` because it runs on a build machine,
    * not inside the app. (`scripts/**` is on the directory's list already.)
