@@ -483,6 +483,17 @@ file now lives at.
     refusal drops it again, so the next pass retries the file through the **batched** create path
     instead of `reconcileOne`'s one-request-per-file push. Measured: 201 stranded files used to cost 201
     requests; they now cost one.
+  - **A pass batches its tombstones too.** A deletion a pass discovers — the file was removed while
+    nothing watched, or the app was closed — is content-less, and used to be one request per file: a
+    thousand files deleted that way is a thousand requests against the deployed allowance, so peers saw
+    the deletion arrive over minutes. `pushTombstones` sends them 100 per request, after every per-file
+    decision has settled and before the create batch (the two are independent; the order keeps a pass's
+    deletions ahead of its creations). Each entry is re-checked inside the batch job rather than trusted
+    from the pass's snapshot: the file is still gone, the state still holds it at that path, no event
+    owns the path, and the sync point is still the head the decision was taken from — a version a pull
+    adopted meanwhile wins. A `stale_base` refusal settles through the single-file rules (the peer's
+    version comes back, nothing local to park), and a failed request leaves the state entries alone so
+    the next pass retries them in a batch.
   - **A `429` is waited out, not failed.** The server states the window (`Retry-After`); the batch is
     re-sent after that wait, up to `MAX_RATE_LIMIT_WAITS` times, and only then does the pass stop and
     leave the remaining files untracked for the next one. The same wait applies to a single-file push
@@ -590,12 +601,14 @@ file now lives at.
   until its next pass. The host holds notifications for at most `PUSH_NOTIFICATION_FLUSH_MS` (25 ms) or a
   full `PUSH_NOTIFICATION_BATCH` (200), and the engine then fetches those chains with one request per 200
   files (`handleFilePushedBatch`), applying them from the head the server answered with. Applications run
-  through `WorkPool` four at a time **only when the chunk names no path twice** — the head's path and the
-  path this device already holds for the chain both count, and a chunk that shares one applies in order;
-  the state is written **once per batch**, not once per file (a per-file write rewrote a megabyte-scale
-  state thousands of times and was most of a live pull's cost: 5 000 files, 59 s → 18 s, measured in a real
-  Obsidian). The trade is crash granularity, not behaviour: a crash mid-batch leaves up to one batch of
-  files to re-decide on the next pass. A lone remote edit still costs one request, 25 ms later.
+  through `WorkPool` four at a time **only when the chunk names no path twice** — two _different_ files
+  naming one path (a peer's move can leave two chains there for a moment) apply in order, while the two
+  names a single event contributes (the head's path and the path this device already holds, the same string
+  for a tracked file) are deduplicated first; the state is written **once per batch**, not once per file
+  (a per-file write rewrote a megabyte-scale state thousands of times and was most of a live pull's cost:
+  5 000 files, 59 s → 18 s, measured in a real Obsidian). The trade is crash granularity, not behaviour: a
+  crash mid-batch leaves up to one batch of files to re-decide on the next pass. A lone remote edit still
+  costs one request, 25 ms later.
 - **A burst of local vault events is carried out as one job, not one request per file.** An agent, a
   script or a folder operation writes hundreds of files in a few seconds and the watcher reports one
   event per file; handled one at a time that is one `POST /sync/push` per file — and, for a file this

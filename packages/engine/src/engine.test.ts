@@ -208,6 +208,39 @@ class SlowDeleteAdapter extends FakeAdapter {
 }
 
 /**
+ * A fake adapter whose writes and moves take a turn, so a test can see how many run at
+ * once.
+ *
+ * The write/move twin of {@link SlowDeleteAdapter}: a batch that must serialise two
+ * decisions about one path is visible in the overlap.
+ */
+class SlowWriteAdapter extends FakeAdapter {
+  active = 0;
+  maxActive = 0;
+  ops = 0;
+
+  private async slow<T>(run: () => Promise<T>): Promise<T> {
+    this.active += 1;
+    this.ops += 1;
+    this.maxActive = Math.max(this.maxActive, this.active);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return await run();
+    } finally {
+      this.active -= 1;
+    }
+  }
+
+  override async writeFile(path: string, bytes: Uint8Array): Promise<void> {
+    await this.slow(() => super.writeFile(path, bytes));
+  }
+
+  override async renameFile(from: string, to: string): Promise<void> {
+    await this.slow(() => super.renameFile(from, to));
+  }
+}
+
+/**
  * A fake host that can write a file in pieces.
  *
  * It records what the engine streams, so a test can prove a large download never took
@@ -1051,6 +1084,46 @@ describe("SyncEngine", () => {
     expect(peerAdapter.files.size).toBe(0);
   });
 
+  it("applies two notifications naming one path one at a time", async () => {
+    // The other side of the same guard: two *different* chains can name one path for a
+    // moment (a peer's move in flight), and their applies must not interleave — the
+    // single-event dedupe must not weaken this.
+    const { engine, adapter, api, key } = await makeEngine();
+    // Different sizes, so neither apply can mistake the other's file for its own bytes.
+    adapter.files.set("p.md", encoder.encode("pppppppppp"));
+    adapter.files.set("q.md", encoder.encode("q"));
+    await engine.initialSync();
+    const pId = engine.fileIdForPath("p.md")!;
+    const qId = engine.fileIdForPath("q.md")!;
+
+    const peerAdapter = new SlowWriteAdapter();
+    const peer = new SyncEngine({
+      platform: realPlatform,
+      vaultId: "vault-1",
+      adapter: peerAdapter,
+      api,
+      encryptionKey: key,
+    });
+    await peer.initialSync();
+    expect(peerAdapter.files.size).toBe(2);
+    peerAdapter.maxActive = 0;
+    peerAdapter.ops = 0;
+
+    // Both chains now record `r.md`: two chains naming one path.
+    await api.remoteRename(pId, await encryptString(key, "r.md"));
+    await api.remoteRename(qId, await encryptString(key, "r.md"));
+    const events = [
+      { fileId: pId, versionId: (await api.latestVersionId(pId))! },
+      { fileId: qId, versionId: (await api.latestVersionId(qId))! },
+    ];
+
+    await peer.handleFilePushedBatch(events);
+
+    // The applies really moved/wrote (one of them into a conflict), and never two at once.
+    expect(peerAdapter.ops).toBeGreaterThan(1);
+    expect(peerAdapter.maxActive).toBe(1);
+  });
+
   it("reports a notification whose version content cannot be read", async () => {
     const { engine, adapter, api, key } = await makeEngine();
     adapter.files.set("n.md", encoder.encode("v1"));
@@ -1766,6 +1839,96 @@ describe("SyncEngine — changes made while the connection is down", () => {
     expect(api.chains.get(fileId)!.map((v) => v.action)).toEqual(["create", "delete"]);
   });
 
+  it("pushes a pass's tombstones in one request", async () => {
+    // The files disappear with nothing watching — the app was closed, or the host never
+    // saw the delete — so the pass discovers them. Each tombstone used to be its own
+    // request: a thousand files deleted that way is a thousand requests against the
+    // deployed allowance, and the peers see the deletion arrive over minutes.
+    const { engine, adapter, api } = await makeEngine();
+    const paths = ["a.md", "b.md", "c.md"];
+    for (const path of paths) adapter.files.set(path, encoder.encode(path));
+    await engine.initialSync();
+    api.pushCalls.length = 0;
+
+    for (const path of paths) adapter.files.delete(path);
+    await engine.initialSync();
+
+    expect(api.pushCalls).toEqual([paths.length]);
+    expect(api.pushed.filter((p) => p.action === "delete")).toHaveLength(paths.length);
+    for (const path of paths) expect(adapter.files.has(path)).toBe(false);
+  });
+
+  it("sends a pass's tombstones 100 per request", async () => {
+    // The server's own cap, the same bound the create batch uses.
+    const { engine, adapter, api } = await makeEngine();
+    const paths = Array.from({ length: 101 }, (_, index) => `notes/${index}.md`);
+    for (const path of paths) adapter.files.set(path, encoder.encode(path));
+    await engine.initialSync();
+    api.pushCalls.length = 0;
+
+    for (const path of paths) adapter.files.delete(path);
+    await engine.initialSync();
+
+    expect(api.pushCalls).toEqual([100, 1]);
+    expect(api.pushed.filter((p) => p.action === "delete")).toHaveLength(paths.length);
+  });
+
+  it("leaves a rate-limited tombstone batch for the next pass", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("a.md", encoder.encode("a"));
+    await engine.initialSync();
+    const fileId = await syncedFileId(api);
+
+    // The limiter outlasts the pass's waits: nothing landed, so the state entry has to
+    // survive and the next pass has to retry the tombstone — in a batch, not one request.
+    const realPush = api.push.bind(api);
+    let limited = true;
+    api.push = async (vaultId, files) => {
+      if (limited && files.some((file) => file.action === "delete")) throw rateLimited();
+      return await realPush(vaultId, files);
+    };
+
+    adapter.files.delete("a.md");
+    await expect(engine.initialSync()).rejects.toMatchObject({ status: 429 });
+    expect(api.chains.get(fileId)!.map((v) => v.action)).toEqual(["create"]);
+
+    limited = false;
+    await engine.initialSync();
+    expect(api.chains.get(fileId)!.map((v) => v.action)).toEqual(["create", "delete"]);
+  });
+
+  it("reports a refused tombstone and retries it on the next pass", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("a.md", encoder.encode("a"));
+    await engine.initialSync();
+    const fileId = await syncedFileId(api);
+
+    // A refusal a wait cannot fix (a quota, say): the pass reports it, and the state
+    // entry stays so the next pass decides the same tombstone again.
+    const realPush = api.push.bind(api);
+    let refuse = true;
+    api.push = async (vaultId, files) => {
+      if (refuse && files.some((file) => file.action === "delete")) {
+        refuse = false;
+        return {
+          results: files.map((file) => ({
+            fileId: file.fileId,
+            status: "error" as const,
+            error: "quota exceeded",
+          })),
+        };
+      }
+      return await realPush(vaultId, files);
+    };
+
+    adapter.files.delete("a.md");
+    await expect(engine.initialSync()).rejects.toThrow("quota exceeded");
+    expect(api.chains.get(fileId)!.map((v) => v.action)).toEqual(["create"]);
+
+    await engine.initialSync();
+    expect(api.chains.get(fileId)!.map((v) => v.action)).toEqual(["create", "delete"]);
+  });
+
   it("resolves a tombstone a peer's edit refused during a pass", async () => {
     const { engine, adapter, api } = await makeEngine();
     adapter.files.set("n.md", encoder.encode("v1"));
@@ -1783,6 +1946,12 @@ describe("SyncEngine — changes made while the connection is down", () => {
     // which is a deletion racing an edit. That refusal is the case this branch exists
     // for: it has to resolve as the peer's version coming back, not be dropped into
     // `firstFailure` and forgotten until the next pass.
+    const sent: string[][] = [];
+    const realPush = api.push.bind(api);
+    api.push = async (vaultId, files) => {
+      sent.push(files.map((file) => file.fileId));
+      return await realPush(vaultId, files);
+    };
     api.onPush = async (files) => {
       api.onPush = null;
       for (const file of files) await api.remoteEdit(file.fileId, "peer-rushed");
@@ -1792,6 +1961,104 @@ describe("SyncEngine — changes made while the connection is down", () => {
     expect(new TextDecoder().decode(adapter.files.get("n.md"))).toBe("peer-rushed");
     expect(api.chains.get(fileId)!.map((v) => v.action)).toEqual(["create", "modify"]);
     expect(adapter.files.has(conflictFilePath("n.md"))).toBe(false);
+    // The refusal is settled from the chain the server answered with, not by re-sending
+    // the base it just refused: one request, not two.
+    expect(sent).toEqual([[fileId]]);
+  });
+
+  it("keeps the rest of a tombstone batch when one conflict cannot be applied", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("a.md", encoder.encode("a"));
+    adapter.files.set("b.md", encoder.encode("b"));
+    await engine.initialSync();
+    const aId = engine.fileIdForPath("a.md")!;
+    const bId = engine.fileIdForPath("b.md")!;
+
+    // A peer edits `a.md` while the batch is on the wire, so its tombstone is refused; the
+    // peer's version then cannot be written (the disk refuses). `b.md` travelled in the
+    // same request and its answer is `ok`: one failed conflict must not leave that answer
+    // unapplied — the next pass would read the chain as a deletion this device never made
+    // and a file written there later would become a new chain instead of a restore.
+    api.onPush = async (files) => {
+      if (!files.some((file) => file.fileId === aId)) return;
+      api.onPush = null;
+      await api.remoteEdit(aId, "peer-rushed");
+    };
+    const write = adapter.writeFile.bind(adapter);
+    adapter.writeFile = async (path, bytes) => {
+      if (path === "a.md") throw new Error("disk full");
+      return await write(path, bytes);
+    };
+
+    adapter.files.delete("a.md");
+    adapter.files.delete("b.md");
+    await expect(engine.initialSync()).rejects.toThrow("disk full");
+
+    expect(api.chains.get(bId)!.at(-1)!.action).toBe("delete");
+    // A tombstone keeps the path mapped to its chain, so a file written there later is a
+    // recreate — the identity that a missing `applyPushedVersion` would have lost.
+    expect(engine.fileIdForPath("b.md")).toBe(bId);
+  });
+
+  it("leaves a tombstone alone when its file is written back before the batch", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    const paths = Array.from({ length: 101 }, (_, index) => `notes/${index}.md`);
+    for (const path of paths) adapter.files.set(path, encoder.encode(path));
+    await engine.initialSync();
+    const idOf = (path: string): string => engine.fileIdForPath(path)!;
+
+    // The first 100 tombstones go out while the 101st is still being prepared. A file
+    // written back in that window is not a deletion any more.
+    let writtenBack: string | null = null;
+    api.onPush = async (files) => {
+      if (writtenBack !== null) return;
+      const inBatch = new Set(files.map((file) => file.fileId));
+      writtenBack = paths.find((path) => !inBatch.has(idOf(path)))!;
+      adapter.files.set(writtenBack, encoder.encode(writtenBack));
+    };
+
+    for (const path of paths) adapter.files.delete(path);
+    await engine.initialSync();
+
+    expect(writtenBack).not.toBeNull();
+    expect(
+      api.pushed.filter((p) => p.fileId === idOf(writtenBack!) && p.action === "delete"),
+    ).toHaveLength(0);
+    expect(adapter.files.has(writtenBack!)).toBe(true);
+  });
+
+  it("leaves a tombstone to the event that already owns its path", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    const paths = Array.from({ length: 101 }, (_, index) => `notes/${index}.md`);
+    for (const path of paths) adapter.files.set(path, encoder.encode(path));
+    await engine.initialSync();
+    const idOf = (path: string): string => engine.fileIdForPath(path)!;
+
+    // While the first 100 are on the wire, a delete event for the 101st is queued behind
+    // the batch: it owns that path, so the batch leaves it to the event's own decision.
+    const sent: string[][] = [];
+    const realPush = api.push.bind(api);
+    api.push = async (vaultId, files) => {
+      sent.push(files.map((file) => file.fileId));
+      return await realPush(vaultId, files);
+    };
+    let owned: string | null = null;
+    api.onPush = async (files) => {
+      if (owned !== null) return;
+      const inBatch = new Set(files.map((file) => file.fileId));
+      owned = paths.find((path) => !inBatch.has(idOf(path)))!;
+      void engine.handleLocalDelete(owned);
+    };
+
+    for (const path of paths) adapter.files.delete(path);
+    await engine.initialSync();
+    await engine.whenIdle();
+
+    // The batch sent 100; the 101st travelled alone, from the event, after it.
+    expect(sent[0]).toHaveLength(100);
+    const carrying = sent.filter((batch) => batch.includes(idOf(owned!)));
+    expect(carrying).toHaveLength(1);
+    expect(carrying[0]).toHaveLength(1);
   });
 
   it("pushes that tombstone after a restart as well", async () => {

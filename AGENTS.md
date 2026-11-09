@@ -223,7 +223,8 @@ protocol or a security hole. Read the linked section before changing one.
     with the original name plus `-1`, e.g. `hero.md` → `hero-1.md`), and the chosen name must
     stay in this device's scope when the restored file is in it. See [sync-engine.md](docs/sync-engine.md#restore).
 11. **Cost is bounded.** A stamp is only recorded with the hash of the bytes at that stamp (and
-    a missing stamp costs one re-read). Creates are batched (100 files / 8 MiB); a burst of local
+    a missing stamp costs one re-read). Creates are batched (100 files / 8 MiB), and the tombstones
+    a pass discovers travel 100 per request; a burst of local
     vault events becomes one engine job whose versions and chain reads travel in batches (100 and
     200 per request), with one listing per job and no pass; a download's content reads travel in
     batches too (up to 64 hashes / 8 MiB), and a read-ahead beside the per-file loop pulls them
