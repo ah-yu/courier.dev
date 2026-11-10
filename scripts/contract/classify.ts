@@ -418,6 +418,11 @@ function describeShape(shape: Shape): string {
   if ("tuple" in shape) return "a tuple";
   if ("union" in shape) return shape.union.map(describeShape).join(" | ");
   if ("intersection" in shape) return shape.intersection.map(describeShape).join(" & ");
-  if ("object" in shape) return "an object";
+  if ("object" in shape) {
+    // Name the members: "an object" is useless in a failure message, and a union of
+    // discriminated objects is exactly where one member can differ from another.
+    const keys = Object.keys(shape.object);
+    return keys.length === 0 ? "an object" : `an object { ${keys.join(", ")} }`;
+  }
   return shape.text;
 }
