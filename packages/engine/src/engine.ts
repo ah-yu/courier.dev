@@ -2896,23 +2896,24 @@ export class SyncEngine {
         },
         applied: (prepared) => this.applyPushedVersion(prepared),
         refused: async (prepared, _meta, result) => {
-          if (classifyPushResult(result) !== "stale_base") {
-            return new Error(
-              `Push failed for ${prepared.plainPath}: ${result?.error ?? result?.status ?? "no result"}`,
-            );
+          const kind = classifyPushResult(result);
+          // Both answers have a settle in the single-file path: `content_missing` reads and
+          // verifies the file and sends the payload (the store no longer holds the bytes a
+          // stamp-proved rename named), `stale_base` re-decides from the fresh chain. Without
+          // this a reclaimed blob refused the same rename on every pass, forever.
+          if (kind === "content_missing" || kind === "stale_base") {
+            try {
+              await this.pushPrepared(prepared);
+              return null;
+            } catch (err) {
+              if (!(err instanceof SyncPushBaseError)) return err;
+              await this.decideIncremental(prepared.fileId, prepared.plainPath);
+              return null;
+            }
           }
-          try {
-            await this.settleStaleBase(prepared);
-            return null;
-          } catch (err) {
-            if (!(err instanceof SyncPushBaseError)) return err;
-            // The chain moved under the pass between the decision and the request: decide
-            // this file again from the fresh chain, the answer the single-file rename gives.
-            // Reporting it as a pass failure here failed the whole reconcile (and on a bind
-            // armed the bind-retry loop).
-            await this.decideIncremental(prepared.fileId, prepared.plainPath);
-            return null;
-          }
+          return new Error(
+            `Push failed for ${prepared.plainPath}: ${result?.error ?? result?.status ?? "no result"}`,
+          );
         },
         forget: (prepared) => this.forgetPushedVersion(prepared),
       },

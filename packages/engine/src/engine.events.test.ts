@@ -1348,6 +1348,29 @@ describe("SyncEngine — a batch of local events", () => {
     expect(rename.content).toBeNull();
   });
 
+  it("sends the payload when a silent re-point's blob was reclaimed", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("old.md", encoder.encode("moved bytes"));
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("old.md")!;
+    // The store no longer holds the blob this rename names (a reclaimed row): the rename is
+    // refused with `content_missing`, and has to be re-sent with the verified payload, or
+    // the move is refused on every pass from then on.
+    for (const [hash] of api.blobs) {
+      if (api.chains.get(fileId)!.some((version) => version.contentHash === hash)) {
+        api.blobs.delete(hash);
+      }
+    }
+
+    adapter.files.delete("old.md");
+    adapter.files.set("new.md", encoder.encode("moved bytes"));
+    await engine.initialSync();
+
+    expect(api.chains.get(fileId)!.map((version) => version.action)).toEqual(["create", "rename"]);
+    // The retry carried the bytes, so the blob is stored again under the same hash.
+    expect(api.blobs.has(api.chains.get(fileId)!.at(-1)!.contentHash)).toBe(true);
+  });
+
   it("turns a move the watcher reports as delete+create into one rename", async () => {
     const { engine, adapter, api } = await makeEngine();
     adapter.files.set("old.md", encoder.encode("moved bytes"));
