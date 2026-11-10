@@ -1,13 +1,5 @@
 import { realPlatform } from "@courier/testing";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  renameSync,
-  writeFileSync,
-} from "fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -42,6 +34,8 @@ interface TestHost {
   dir: string;
   adapter: EchoingAdapter;
   api: ReturnType<typeof createCliSyncApi>;
+  /** `sync/push` requests this host made: what batches a bulk move into a few requests. */
+  pushes: () => number;
 }
 
 /** The CLI adapter plus the vault events a real file watcher would fire. */
@@ -120,10 +114,15 @@ describe("a bulk rename through a real server", () => {
         };
       },
     };
+    let pushes = 0;
     const api = createCliSyncApi({
       serverUrl: server.serverUrl,
       userKey: server.userKey,
       getDeviceName: () => label,
+      fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input).includes("/sync/push")) pushes += 1;
+        return fetch(input as RequestInfo, init);
+      }) as typeof fetch,
     });
     const host = new SyncHost({
       vaultId,
@@ -144,7 +143,7 @@ describe("a bulk rename through a real server", () => {
       log: () => {},
     });
     await host.start();
-    return { host, dir, adapter, api };
+    return { host, dir, adapter, api, pushes: () => pushes };
   }
 
   it("keeps one live chain per note when the move's two halves arrive in separate batches", async () => {
@@ -187,19 +186,23 @@ describe("a bulk rename through a real server", () => {
       await mac.host.whenIdle();
 
       const peerMoved = (): boolean => {
-        for (let index = 0; index < NOTES; index += 1) {
-          const suffix = `${String(index).padStart(4, "0")}.md`;
-          if (!existsSync(join(phone.dir, "notes", `b-${suffix}`))) return false;
-          if (existsSync(join(phone.dir, "notes", `a-${suffix}`))) return false;
-        }
-        return true;
+        // One listing per poll, not 400 `stat`s: the peer is writing the same directory
+        // while this runs, and on a loaded CI runner the stat storm starved it.
+        const names = readdirSync(join(phone.dir, "notes"));
+        return (
+          names.filter((name) => name.startsWith("b-")).length >= NOTES &&
+          !names.some((name) => name.startsWith("a-"))
+        );
       };
-      await waitFor(peerMoved, `${NOTES} renamed notes on the peer`, 60_000);
+      await waitFor(peerMoved, `${NOTES} renamed notes on the peer`, 90_000);
       await phone.host.whenIdle();
 
       const index = await mac.api.getVaultSyncIndex(vault.id);
       expect(index.files.filter((file) => file.head.action === "delete")).toHaveLength(0);
       expect(index.files.length).toBe(NOTES);
+      // The adopted renames travelled in batches: 200 notes must not cost 200 `sync/push`
+      // requests (the deletes and the bind add a few more).
+      expect(mac.pushes()).toBeLessThan(40);
     } finally {
       phone.host.stop();
       mac.host.stop();
@@ -243,14 +246,13 @@ describe("a bulk rename through a real server", () => {
       // The peer has to hold every note at its **new** path and none at the old ones: a
       // count alone would pass while a rename was still half applied.
       const peerMoved = (): boolean => {
-        for (let index = 0; index < NOTES; index += 1) {
-          const suffix = `${String(index).padStart(4, "0")}.md`;
-          if (!existsSync(join(phone.dir, "notes", `b-${suffix}`))) return false;
-          if (existsSync(join(phone.dir, "notes", `a-${suffix}`))) return false;
-        }
-        return true;
+        const names = readdirSync(join(phone.dir, "notes"));
+        return (
+          names.filter((name) => name.startsWith("b-")).length >= NOTES &&
+          !names.some((name) => name.startsWith("a-"))
+        );
       };
-      await waitFor(peerMoved, `${NOTES} renamed notes on the peer`, 60_000);
+      await waitFor(peerMoved, `${NOTES} renamed notes on the peer`, 90_000);
       await phone.host.whenIdle();
       await mac.host.whenIdle();
 

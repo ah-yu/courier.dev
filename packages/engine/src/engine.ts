@@ -2582,12 +2582,15 @@ export class SyncEngine {
   ): Promise<unknown> {
     const { localHashes, localStamps, remote } = pass;
     const batch = this.createBatch();
+    // Adopted renames travel in their own batch, 100 per request like every other bulk
+    // path: a pass that overtakes a 1 000-note rename must not cost 1 000 requests.
+    const renames = this.renameBatch();
 
     // The order is the pass's (a note the user just created or opened first); it was
     // computed by the caller, which also queued this job for every candidate path.
     try {
       for (const path of ordered) {
-        if (batch.rateLimited) break;
+        if (batch.rateLimited || renames.rateLimited) break;
         if (this.pathToFileId.has(path) || remote.fileIdAt(path) !== null) continue;
         const read = await this.readWithStamp(path);
         if (!read) continue;
@@ -2639,14 +2642,8 @@ export class SyncEngine {
               stamp: read.stamp,
             });
             if (prepared) {
-              try {
-                await this.pushPrepared(prepared);
-              } catch (err) {
-                // A refused move (the chain advanced under us) is settled by the next pass,
-                // which decides from the fresh chain. Letting it throw here would abandon
-                // the rest of the create batch over one raced note.
-                if (!(err instanceof SyncPushBaseError)) throw err;
-              }
+              const outcome = await renames.add(prepared, undefined, { pipelined: true });
+              if (outcome === "dropped") break;
             }
             continue;
           }
@@ -2689,12 +2686,14 @@ export class SyncEngine {
       // entries (or the request on the wire) behind: that is the stranded-file path again.
       await batch.settle();
       batch.abandon();
+      renames.abandon();
       throw err;
     }
 
-    // The last full batch, then the tail of the vault.
+    // The last full batches, then the tail of the vault.
+    await renames.drain();
     await batch.drain();
-    return batch.failure;
+    return batch.failure ?? renames.failure;
   }
 
   /**
@@ -2817,6 +2816,52 @@ export class SyncEngine {
         contentFor: (prepared) => this.contentFor(prepared),
         applied: (prepared) => this.applyPushedVersion(prepared),
         refused: (prepared, _meta, result) => this.settleTombstoneRefusal(prepared, result),
+        forget: (prepared) => this.forgetPushedVersion(prepared),
+      },
+      { maxFiles: MAX_PUSH_BATCH_FILES, maxBytes: MAX_PUSH_BATCH_BYTES },
+    );
+  }
+
+  /**
+   * The batch a pass's adopted renames travel in.
+   *
+   * A move the pass overtook is still a move: N notes must not cost N `sync/push` requests
+   * (invariant 11), and the same operation over an event burst travels 100 versions per
+   * request. A refusal is the single-file rename's answer — a `stale_base` means the chain
+   * advanced under the pass, so it is re-decided from the fresh chain and the next pass
+   * retries anything else.
+   */
+  private renameBatch(): PushBatch<PreparedPush, void> {
+    return new PushBatch<PreparedPush, void>(
+      {
+        send: async (prepared) => {
+          const response = await this.withRateLimitWaits(() =>
+            this.opts.api.push(
+              this.opts.vaultId,
+              prepared.map((one) => this.wireFile(one, one.content)),
+            ),
+          );
+          return response.results;
+        },
+        contentFor: (prepared) => this.contentFor(prepared),
+        sendAlone: async (prepared) => {
+          const failure = await this.sendPreparedChunked(prepared);
+          return failure;
+        },
+        applied: (prepared) => this.applyPushedVersion(prepared),
+        refused: async (prepared, _meta, result) => {
+          if (classifyPushResult(result) !== "stale_base") {
+            return new Error(
+              `Push failed for ${prepared.plainPath}: ${result?.error ?? result?.status ?? "no result"}`,
+            );
+          }
+          try {
+            await this.settleStaleBase(prepared);
+            return null;
+          } catch (err) {
+            return err;
+          }
+        },
         forget: (prepared) => this.forgetPushedVersion(prepared),
       },
       { maxFiles: MAX_PUSH_BATCH_FILES, maxBytes: MAX_PUSH_BATCH_BYTES },
