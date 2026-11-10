@@ -10,7 +10,7 @@ import {
   type SyncProgress,
 } from "./engine";
 import type { HistoryLimits, HealthResponse, ContractVerdict } from "@courier/shared";
-import { contractVerdict, isHealthResponse } from "@courier/shared";
+import { CONTRACT_GENERATION, contractVerdict, isHealthResponse } from "@courier/shared";
 import type { SyncAdapter } from "./adapter";
 import type { SyncApi } from "./api";
 import { DEFAULT_OP_QUEUE_LIMITS, OpQueue, weightForSize, type OpQueueLimits } from "./op-queue";
@@ -443,8 +443,41 @@ export function authFailureReason(err: unknown): AuthFailureReason | null {
 }
 
 /**
- * Whether the error says the vault itself is gone (or is not this account's).
+ * The server refused this build's contract on an ordinary request (`426 CONTRACT_MISMATCH`),
+ * read from the error's body, or null when the error is anything else.
  *
+ * The probe at `start()` is the readable path — it runs before anything is written — but a
+ * host can start while the server is unreachable and meet a server of another generation
+ * later. Without this the refusal would be one more transient failure: logged, retried for
+ * ever, and the lease held while the user is told nothing.
+ */
+export function contractMismatchInfo(err: unknown): ServerContractInfo | null {
+  if (typeof err !== "object" || err === null) return null;
+  const { code, body } = err as { code?: unknown; body?: unknown };
+  if (code !== "CONTRACT_MISMATCH") return null;
+  if (typeof body !== "object" || body === null) return null;
+  const { serverContract, minClient, serverVersion } = body as {
+    serverContract?: unknown;
+    minClient?: unknown;
+    serverVersion?: unknown;
+  };
+  if (typeof serverContract !== "number" || typeof minClient !== "number") return null;
+  const verdict: ContractVerdict =
+    CONTRACT_GENERATION < minClient
+      ? "client-too-old"
+      : CONTRACT_GENERATION > serverContract
+        ? "server-too-old"
+        : "ok";
+  return {
+    verdict,
+    serverGeneration: serverContract,
+    serverMinClient: minClient,
+    serverVersion: typeof serverVersion === "string" ? serverVersion : null,
+  };
+}
+
+/**
+ * Whether the error says the vault itself is gone (or is not this account's).
  * The server answers both with `404`, so the binding is dead either way: a host drops it
  * and keeps the key. Only the sync routes can produce it here — a missing blob is
  * handled inside the engine as "content missing", not thrown to the host.
@@ -586,15 +619,6 @@ export class SyncHost {
     return this.engineInstance?.fileIdForPath(path) ?? null;
   }
 
-  /**
-   * Ask the server what it speaks, and answer what that means for this build.
-   *
-   * A probe that cannot reach the server answers `null` and is **not** a mismatch: the pass
-   * that follows reports the outage the ordinary way and the host keeps its retry loop.
-   * Only a server that answers, and answers with a window this build is outside, stops the
-   * host — which is why the answer is read from `/api/health` rather than inferred from a
-   * failed call.
-   */
   /** Settle with `work`, or reject once `ms` has passed — on the host's own timer. */
   private withinTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
     return new Promise<T>((resolve, reject) => {
@@ -612,6 +636,15 @@ export class SyncHost {
     });
   }
 
+  /**
+   * Ask the server what it speaks, and answer what that means for this build.
+   *
+   * A probe that cannot reach the server answers `null` and is **not** a mismatch: the pass
+   * that follows reports the outage the ordinary way and the host keeps its retry loop.
+   * Only a server that answers, and answers with a window this build is outside, stops the
+   * host — which is why the answer is read from `/api/health` rather than inferred from a
+   * failed call.
+   */
   private async probeServerContract(): Promise<ServerContractInfo | null> {
     const api = this.opts.api;
     if (api.getServerInfo === undefined) return null;
@@ -702,7 +735,11 @@ export class SyncHost {
       // A dead credential — or a vault that is gone — is not a bind that will succeed on
       // the next retry: the host stops (see `fail`) and the caller decides what the
       // binding is worth.
-      if (authFailureReason(err) !== null || isVaultGone(err)) {
+      if (
+        authFailureReason(err) !== null ||
+        isVaultGone(err) ||
+        contractMismatchInfo(err) !== null
+      ) {
         this.fail("the bind pass", err);
         return;
       }
@@ -957,6 +994,22 @@ export class SyncHost {
    * key: it is reported as a deleted vault, not as a revoked credential.
    */
   private fail(label: string, err: unknown): void {
+    // A refused contract is terminal in the same way a dead credential is: the host cannot
+    // do anything this server will accept, and the probe only runs at `start()` — a host
+    // that began while the server was down would otherwise log 426s forever, holding the
+    // vault lease, with no message about which side has to move.
+    const mismatch = contractMismatchInfo(err);
+    if (mismatch !== null) {
+      if (this.stopped) return;
+      this.log(
+        `${label} failed: the server refused this build's contract (${mismatch.verdict})`,
+        err,
+      );
+      this.stop();
+      this.opts.onServerContract?.(mismatch);
+      return;
+    }
+
     const reason = authFailureReason(err);
     if (reason === null) {
       if (isVaultGone(err)) {

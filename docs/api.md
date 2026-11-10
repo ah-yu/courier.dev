@@ -110,8 +110,9 @@ sides share — and compares it with `packages/shared/contract/<CONTRACT_GENERAT
 what the change means:
 
 ```
-bun run contract             # check the code against its generation's surface file
-bun run contract bump --write  # classify the diff, then write the numbers and the next surface
+bun run contract                        # check the code against its generation's surface file
+bun run contract bump --write           # classify the diff, then write the numbers and the next surface
+bun run contract bump --write --keep-floor  # the generation moves, the floor stays (see below)
 ```
 
 The surface is a tree, not a text file: `Array<T>` and `T[]` are the same shape, formatting is
@@ -124,6 +125,12 @@ Two things the tool cannot see, and both are answered by the same question above
 - whether a **client actually depends** on what was added (the tool greps the plugin and CLI for the
   added names and prints them — a hint for the reviewer; it moves no number, because a client needs
   a server at its own generation either way).
+
+`--keep-floor` exists for the one case the tool cannot decide: a change that makes an older peer
+**degrade without misreading** (a renamed notification type it ignores, an added field). The
+classification is "breaking" — a member of the surface is gone — but the floor is reserved for
+corruption, so the generation moves and the floor stays. Use it deliberately and say why in the
+commit; the printed message asks for that.
 
 Never edit a number by hand: `bump --write` writes both together, and `write` only creates a
 generation's file when there is none.

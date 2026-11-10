@@ -57,6 +57,7 @@ import {
   ApiClientError,
   contractVerdict,
   historyLimitsOf,
+  isHealthResponse,
   normalizeDeviceName,
   runtimeLabel,
   type CreateVaultResponse,
@@ -753,7 +754,8 @@ export function createProgram(): Command {
       // out why. An unreachable server renders no row, exactly like the limits above.
       let contractIssue: ContractIssue | null = null;
       try {
-        const health = await client.getServerInfo();
+        const health: unknown = await client.getServerInfo();
+        if (!isHealthResponse(health)) return;
         const verdict = contractVerdict(health);
         if (verdict !== "ok") contractIssue = { verdict };
       } catch {

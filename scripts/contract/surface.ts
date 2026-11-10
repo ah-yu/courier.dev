@@ -405,13 +405,17 @@ function normalize(text: string): string {
 }
 
 /**
- * Drop comments before the text is collapsed onto one line.
+ * Drop comments from a **constant whose value is an `as const` array**, before the text is
+ * collapsed onto one line.
  *
  * A constant is stored as its printed source, and `normalize` folds newlines away — so a
  * `// …` left in place would swallow every member after it, and `arrayMembers` would fall
- * back to comparing text. Stripping first keeps the stored value the *value*.
+ * back to comparing text. Only the array form is processed: a naive strip over an arbitrary
+ * expression would truncate a string literal that contains `//` (a URL), and the gate would
+ * then compare a value against itself.
  */
 export function stripComments(text: string): string {
+  if (!/\]\s*as const\s*$/.test(text)) return text;
   return text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 }
 

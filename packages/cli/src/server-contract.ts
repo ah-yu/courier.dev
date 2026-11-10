@@ -1,4 +1,4 @@
-import { contractVerdict } from "@courier/shared";
+import { contractVerdict, isHealthResponse } from "@courier/shared";
 import { createCliClient } from "./api";
 import { t } from "./i18n";
 
@@ -40,6 +40,10 @@ export async function ensureCompatibleServer(config: {
 }): Promise<void> {
   const client = createCliClient({ serverUrl: config.serverUrl, userKey: config.userKey });
   const health = await withTimeout(client.getServerInfo(), PROBE_TIMEOUT_MS);
+  // A 200 whose body is not the health document (a proxy's error page, a captive portal)
+  // is not an answer about the contract: let the caller's own "cannot reach" path report it
+  // rather than telling the user to upgrade a server that is merely behind a proxy.
+  if (!isHealthResponse(health)) return;
   const verdict = contractVerdict(health);
   if (verdict === "ok") return;
 

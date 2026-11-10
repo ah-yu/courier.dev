@@ -911,6 +911,29 @@ describe("SyncHost", () => {
    * while its watcher and interval kept running against a credential that could
    * never work again. The host stops first, then reports.
    */
+  it("stops and reports when a pass is refused for the contract", async () => {
+    // The probe only runs at start(), so a host that began while the server was down meets a
+    // server of another generation on its first pass. Without this the refusal would be one
+    // more transient failure: retried for ever, the lease held, and nothing said.
+    const onServerContract = vi.fn();
+    const { host, api } = await newHost({ onServerContract });
+    track(host);
+    api.getVaultSyncIndex.mockRejectedValueOnce(
+      Object.assign(new Error("426"), {
+        status: 426,
+        code: "CONTRACT_MISMATCH",
+        body: { serverContract: 1, minClient: 1, serverVersion: "0.5.2" },
+      }),
+    );
+
+    await host.start();
+
+    expect(onServerContract).toHaveBeenCalledWith(
+      expect.objectContaining({ verdict: "server-too-old", serverVersion: "0.5.2" }),
+    );
+    expect(host.engine).toBeNull();
+    expect(host.wsState).toBe("disconnected");
+  });
   it("stops the loop when the credential is revoked or the vault is gone", async () => {
     const onAuthFailure = vi.fn();
     const { host, events } = await newHost({ onAuthFailure });

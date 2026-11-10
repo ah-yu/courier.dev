@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { arrayMembers, classify } from "./classify";
+import { stripComments } from "./surface";
 import { byCodeUnits } from "./surface";
 import type { Property, Surface } from "./surface";
 
@@ -187,5 +188,20 @@ describe("arrayMembers", () => {
     expect(arrayMembers("4 * 1024 * 1024")).toBeNull();
     expect(arrayMembers("[SOME_REFERENCE] as const")).toBeNull();
     expect(arrayMembers('["a"]')).toBeNull();
+  });
+});
+
+describe("stripComments", () => {
+  it("drops a comment inside an `as const` set", () => {
+    expect(stripComments('[\n  "A", // why A exists\n  "B",\n] as const')).toBe(
+      '[\n  "A", \n  "B",\n] as const',
+    );
+  });
+
+  it("leaves a value whose text merely contains // alone", () => {
+    // A URL in a string literal is not a comment. Stripping it would make two different
+    // constants compare equal — the one thing the gate must never do.
+    expect(stripComments('"https://a.example/x"')).toBe('"https://a.example/x"');
+    expect(stripComments("4 * 1024 * 1024")).toBe("4 * 1024 * 1024");
   });
 });

@@ -34,6 +34,7 @@ const command = process.argv[2] ?? "check";
 const apply = process.argv.includes("--write");
 const assumeClientUsage = process.argv.includes("--server");
 const denyClientUsage = process.argv.includes("--no-server");
+const keepFloor = process.argv.includes("--keep-floor");
 
 const generations = readGenerations(repoRoot);
 const surface = readSurface(repoRoot);
@@ -51,7 +52,7 @@ switch (command) {
     break;
   default:
     console.error(`Unknown command: ${command}`);
-    console.error("Usage: bun run contract [check | bump [--write] | write]");
+    console.error("Usage: bun run contract [check | bump [--write] [--keep-floor] | write]");
     process.exit(2);
 }
 
@@ -150,7 +151,14 @@ interface Plan {
 function plan(classification: Classification): Plan {
   const next = generations.contract + 1;
   if (classification.verdict === "breaking") {
-    return { generations: { contract: next, minClient: next }, usage: [] };
+    // `--keep-floor` is the documented escape hatch for a change that *degrades* an older
+    // peer without corrupting its reading (a renamed notification type it ignores): the
+    // generation moves because the wire changed, and the floor stays because those clients
+    // are still served. Say why in the commit; the tool cannot tell the two apart.
+    return {
+      generations: { contract: next, minClient: keepFloor ? generations.minClient : next },
+      usage: [],
+    };
   }
 
   const usage = assumeClientUsage
@@ -188,6 +196,11 @@ function printRecommendation(classification: Classification, recommendation: Pla
       "\nThe server's floor stays put unless the server stops reading older clients.\n" +
         "A client needs a server at its own generation either way, so an additive release\n" +
         "moves only CONTRACT_GENERATION.",
+    );
+  } else if (keepFloor) {
+    console.log(
+      "\nThe floor stays where it is (--keep-floor): an older peer is degraded, not misread.\n" +
+        "Say which, in the commit message; only a corruption moves the floor.",
     );
   }
 

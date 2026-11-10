@@ -258,8 +258,10 @@ protocol or a security hole. Read the linked section before changing one.
     anything a peer can observe — a shared wire type, a route, an error code, a shared constant —
     and `bun run verify` fails on the `contract` gate until `packages/shared/src/contract.ts`
     says what the change means; the gate prints the numbers, and adding a generation's
-    surface file is the bump. Never edit a number by hand, and never raise `MIN_CLIENT_CONTRACT`
-    without a change that an older client would misread. See
+    surface file is the bump. Never edit a number by hand — `bump --write` writes them, and
+    `--keep-floor` is the one deliberate exception: a change that degrades an older peer without
+    misreading it still moves the generation, and the floor stays, with the reason in the commit.
+    Never raise `MIN_CLIENT_CONTRACT` for a change an older client reads correctly. See
     [api.md](docs/api.md#contract-generation).
 
 ## Destructive operations (hard rules)
