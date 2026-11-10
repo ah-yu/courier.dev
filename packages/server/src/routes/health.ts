@@ -1,4 +1,4 @@
-import { CONTRACT_GENERATION, MIN_CLIENT_CONTRACT } from "@courier/shared";
+import { CONTRACT_GENERATION, MIN_CLIENT_CONTRACT, type HealthResponse } from "@courier/shared";
 import { json, withAccessLog, type RouteTable } from "../http/router";
 import { config } from "../config";
 import type { Logger } from "../lib/logger";
@@ -23,14 +23,18 @@ export function healthRoutes(logger: Logger): RouteTable {
     "/api/health": {
       GET: withAccessLog(
         logger,
-        () =>
-          json({
+        () => {
+          // Typed against the shared interface: this payload is the handshake, and a rename
+          // on one side (or the other) has to fail here rather than at a user's screen.
+          const body: HealthResponse = {
             status: "ok",
             timestamp: new Date().toISOString(),
             generation: CONTRACT_GENERATION,
             minClient: MIN_CLIENT_CONTRACT,
             version: VERSION,
-          }),
+          };
+          return json(body);
+        },
         config.LOG_SLOW_MS,
       ),
     },

@@ -534,6 +534,10 @@ export class SyncHost {
     } catch {
       return null;
     }
+    // A transport can answer a 200 with something that is not this shape (a captive-portal
+    // page, a proxy's JSON error). That is not an answer about the contract: treat it like
+    // an unreachable server, or `contractVerdict` would throw out of `start()`.
+    if (typeof health !== "object" || health === null) return null;
 
     const verdict = contractVerdict(health);
     const info: ServerContractInfo = {

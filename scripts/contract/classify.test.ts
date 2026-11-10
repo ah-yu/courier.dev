@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { arrayMembers, classify } from "./classify";
+import { byCodeUnits } from "./surface";
 import type { Property, Surface } from "./surface";
 
 /**
@@ -141,6 +142,19 @@ describe("classify", () => {
       surface({ constants: { CHUNK_PLAINTEXT_BYTES: "8 * 1024 * 1024" } }),
     );
     expect(result.verdict).toBe("breaking");
+  });
+});
+
+describe("byCodeUnits", () => {
+  it("orders by code unit, not by the machine's locale", () => {
+    // `localeCompare` puts "a" before "Z" (and orders punctuation differently per locale);
+    // the surface is committed and compared on three CI platforms, so the order has to be a
+    // property of the bytes — this exact difference turned a union into "a member was
+    // removed and another added" on a runner with a different ICU setting.
+    expect(byCodeUnits("Z", "a")).toBeLessThan(0);
+    // The locale disagrees: collation puts "a" before "Z", which is what made the same\n    // union come out in two orders on two runners.\n    expect("a".localeCompare("Z")).toBeLessThan(0);
+    expect(byCodeUnits("a", "a")).toBe(0);
+    expect(byCodeUnits("b", "a")).toBeGreaterThan(0);
   });
 });
 

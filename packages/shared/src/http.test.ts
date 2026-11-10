@@ -8,6 +8,7 @@ import {
   type TransportRequest,
   type TransportResponse,
 } from "./http";
+import { CONTRACT_GENERATION } from "./contract";
 import { buildContentBatchBody } from "./wire";
 
 /**
@@ -211,6 +212,51 @@ describe("createCourierClient — request assembly", () => {
     expect(calls[0]!.headers["X-Courier-Session-Id"]).toBe("session-1");
     // A dropped session (socket closed) must stop claiming an identity.
     expect(calls[1]!.headers["X-Courier-Session-Id"]).toBeUndefined();
+  });
+
+  it("states this build's contract generation on every request", async () => {
+    // The server's half of the refusal reads this header; without it every client would read
+    // as generation 1 while each client's own probe still passed. The constant is pinned by
+    // the contract surface, the *use* is pinned here.
+    const { transport, calls } = fakeTransport(jsonResponse({ vaults: [] }));
+    const client = createCourierClient({
+      baseUrl: "http://srv",
+      getUserKey: () => "ck_x",
+      transport,
+    });
+
+    await client.listVaults();
+    await client.getServerInfo();
+
+    expect(calls[0]!.headers["X-Courier-Contract"]).toBe(String(CONTRACT_GENERATION));
+    expect(calls[1]!.headers["X-Courier-Contract"]).toBe(String(CONTRACT_GENERATION));
+  });
+
+  it("keeps the server's refusal body on the error, so a caller can name both sides", async () => {
+    const { transport } = fakeTransport(
+      jsonResponse(
+        {
+          error: "CONTRACT_MISMATCH",
+          message: "This client speaks contract 3, but this server speaks 2.",
+          serverContract: 2,
+          minClient: 1,
+          clientContract: 3,
+        },
+        426,
+      ),
+    );
+    const client = createCourierClient({
+      baseUrl: "http://srv",
+      getUserKey: () => "ck_x",
+      transport,
+    });
+
+    const error = await client.listVaults().catch((err: unknown) => err);
+    expect(error).toMatchObject({
+      status: 426,
+      code: "CONTRACT_MISMATCH",
+      body: { serverContract: 2, clientContract: 3 },
+    });
   });
 
   it("fetches the per-chain sync index from its own route", async () => {

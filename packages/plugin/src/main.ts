@@ -1804,7 +1804,14 @@ export default class CourierPlugin extends Plugin {
         method: "GET",
         throw: false,
       });
-      health = response.json as HealthResponse;
+      // Only a 200 with an object body is an answer. A 404, a 500 or a gateway error page
+      // is a *failure*, and reading its JSON (or its absence) as a health answer would tell
+      // the user to upgrade a server that is merely unhappy — the "an error read as a
+      // state" mistake the reload card exists to avoid.
+      if (response.status !== 200) return;
+      const body = response.json as unknown;
+      if (typeof body !== "object" || body === null) return;
+      health = body as HealthResponse;
     } catch {
       return;
     }

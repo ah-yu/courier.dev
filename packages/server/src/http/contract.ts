@@ -23,35 +23,52 @@ import { VERSION } from "../version";
  * An absent header reads as generation 1, which is what every build before the header
  * existed was. That is what lets the field arrive without a flag day.
  */
-export function requireContract(request: Request, log: Logger = processLogger): void {
+/** The window a server serves, injectable so the refusal can be tested at any floor. */
+export interface ContractWindow {
+  generation: number;
+  minClient: number;
+}
+
+/** The window this build serves: the constants, which is what production uses. */
+const BUILD_WINDOW: ContractWindow = {
+  generation: CONTRACT_GENERATION,
+  minClient: MIN_CLIENT_CONTRACT,
+};
+
+export function requireContract(
+  request: Request,
+  options: { window?: ContractWindow; log?: Logger } = {},
+): void {
+  const window = options.window ?? BUILD_WINDOW;
+  const log = options.log ?? processLogger;
   const clientContract = contractGenerationOf(request.headers.get(CONTRACT_HEADER));
 
-  if (clientContract < MIN_CLIENT_CONTRACT) {
+  if (clientContract < window.minClient) {
     log.info(
-      `refused a client of contract ${clientContract}: this server serves >= ${MIN_CLIENT_CONTRACT}`,
+      `refused a client of contract ${clientContract}: this server serves >= ${window.minClient}`,
     );
     throw new ContractMismatchError(
       `This client speaks contract ${clientContract}, but this server serves contract ` +
-        `${MIN_CLIENT_CONTRACT} and newer. Update the plugin or CLI.`,
+        `${window.minClient} and newer. Update the plugin or CLI.`,
       {
-        serverContract: CONTRACT_GENERATION,
-        minClient: MIN_CLIENT_CONTRACT,
+        serverContract: window.generation,
+        minClient: window.minClient,
         clientContract,
         serverVersion: VERSION,
       },
     );
   }
 
-  if (clientContract > CONTRACT_GENERATION) {
+  if (clientContract > window.generation) {
     log.info(
-      `refused a client of contract ${clientContract}: this server speaks ${CONTRACT_GENERATION}`,
+      `refused a client of contract ${clientContract}: this server speaks ${window.generation}`,
     );
     throw new ContractMismatchError(
       `This client speaks contract ${clientContract}, but this server speaks ` +
-        `${CONTRACT_GENERATION}. Update the server.`,
+        `${window.generation}. Update the server.`,
       {
-        serverContract: CONTRACT_GENERATION,
-        minClient: MIN_CLIENT_CONTRACT,
+        serverContract: window.generation,
+        minClient: window.minClient,
         clientContract,
         serverVersion: VERSION,
       },

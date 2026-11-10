@@ -16,7 +16,7 @@
  * "upgrade" prompt; erring the other way is a client that talks to a server it does not
  * understand.
  */
-import type { Property, Shape, Surface } from "./surface";
+import { byCodeUnits, type Property, type Shape, type Surface } from "./surface";
 
 export type Verdict = "unchanged" | "additive" | "breaking";
 
@@ -43,7 +43,9 @@ export function classify(previous: Surface, current: Surface): Classification {
   diffRoutes(previous.routes, current.routes, changes);
   diffConstants(previous.constants, current.constants, changes);
 
-  const sorted = changes.toSorted((left, right) => left.path.localeCompare(right.path));
+  // Code units again: the printed order is what a reviewer reads, so it must not depend on
+  // the machine's locale either.
+  const sorted = changes.toSorted((left, right) => byCodeUnits(left.path, right.path));
   return { changes: sorted, verdict: verdictOf(sorted) };
 }
 

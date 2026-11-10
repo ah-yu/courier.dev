@@ -374,6 +374,14 @@ function shapeOf(node: ts.TypeNode, source: ts.SourceFile): Shape {
   return PRIMITIVE_KEYWORDS.has(text) ? { primitive: text } : { text };
 }
 
+/**
+ * A union's members, in one order.
+ *
+ * **Code units, never `localeCompare`.** The surface is committed and compared on three CI
+ * platforms, and `localeCompare` orders by the runtime's locale — a runner with a different
+ * ICU setting sorted the same union differently and the gate reported a member as removed and
+ * re-added, which read as "breaking". The order has to be a property of the bytes.
+ */
 function sortedShapes(shapes: Shape[]): Shape[] {
   const seen = new Set<string>();
   const unique: Shape[] = [];
@@ -383,9 +391,13 @@ function sortedShapes(shapes: Shape[]): Shape[] {
     seen.add(key);
     unique.push(shape);
   }
-  return unique.toSorted((left, right) =>
-    JSON.stringify(left).localeCompare(JSON.stringify(right)),
-  );
+  return unique.toSorted((left, right) => byCodeUnits(JSON.stringify(left), JSON.stringify(right)));
+}
+
+/** Compare two strings by code unit, so the result never depends on the machine's locale. */
+export function byCodeUnits(left: string, right: string): number {
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
 }
 
 function normalize(text: string): string {
