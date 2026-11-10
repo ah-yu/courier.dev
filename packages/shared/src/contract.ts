@@ -44,14 +44,16 @@
  * A client states it on every request (`X-Courier-Contract`), a server publishes it on
  * `/api/health`. Mismatched peers are refused, and the refusal names the side to upgrade.
  */
-export const CONTRACT_GENERATION = 1;
+export const CONTRACT_GENERATION = 2;
 
 /**
  * The oldest client generation this server still serves, published on `/api/health`.
  *
- * It follows the last breaking change: after one, only clients of the new generation are
- * served. Between breaking changes it stays put, which is what lets one server serve the
- * several plugin versions a group of users will inevitably be running.
+ * It follows the last change that made an **older client misread** something — not the
+ * newest generation. Adding a field, a route or an error code leaves it alone, because a
+ * client that predates them simply ignores what it does not know (and never sends the
+ * header, which reads as generation 1). Only a change that would corrupt an old client's
+ * reading moves this floor, and moving it is what refuses those clients.
  */
 export const MIN_CLIENT_CONTRACT = 1;
 
@@ -62,4 +64,51 @@ export const MIN_CLIENT_CONTRACT = 1;
  * before, so an additive release does not tell every user to upgrade a server that is
  * already fine.
  */
-export const MIN_SERVER_CONTRACT = 1;
+export const MIN_SERVER_CONTRACT = 2;
+
+/**
+ * The request header that states a client's generation.
+ *
+ * One spelling, in one place: the client's header builder and the server's gate both read
+ * this, so a typo cannot make the whole check silently pass.
+ */
+export const CONTRACT_HEADER = "X-Courier-Contract";
+
+/**
+ * What a server publishes about itself on its health endpoint.
+ *
+ * Every field past `timestamp` is optional on purpose: a server built before the fields
+ * existed answers without them, and "absent" is defined as **generation 1** — the first
+ * generation, which is what every build before the mechanism was. That is what lets the
+ * field be introduced without a flag day, and it is why `contractVerdict` is the only place
+ * that reads these numbers: the defaulting lives here, once.
+ */
+export interface HealthResponse {
+  status: string;
+  timestamp: string;
+  /** The contract generation the server speaks; absent means 1. */
+  generation?: number;
+  /** The oldest client generation the server still serves; absent means 1. */
+  minClient?: number;
+  /** The server's release version, for the message a user reads. Absent on an old build. */
+  version?: string;
+}
+
+/** Which side has to move, from the client's point of view (`/api/health`). */
+export type ContractVerdict = "ok" | "client-too-old" | "server-too-old";
+
+/**
+ * Whether *this* client build can work with the server that answered.
+ *
+ * Two questions, and both are needed: a client below the server's floor is not served, and
+ * a client that needs more than the server provides cannot work either. Everything else is
+ * fine — the generations do not have to be equal, which is what lets one server serve the
+ * several plugin versions its users are running.
+ */
+export function contractVerdict(
+  health: Pick<HealthResponse, "generation" | "minClient">,
+): ContractVerdict {
+  if ((health.minClient ?? 1) > CONTRACT_GENERATION) return "client-too-old";
+  if ((health.generation ?? 1) < MIN_SERVER_CONTRACT) return "server-too-old";
+  return "ok";
+}

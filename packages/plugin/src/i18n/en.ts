@@ -75,6 +75,10 @@ export const en: Record<PluginMessageKey, string> = {
     "The user key has expired. Syncing is paused — resume it in Settings after renewal.",
   "notice.keyDisabled":
     "The user key has been disabled. Syncing is paused — resume it in Settings once it is enabled again.",
+  "notice.contractServerOutdated":
+    "This server ({server}) is older than this plugin can use. Syncing is paused — upgrade the server, then resume it in Settings. If the server is not yours, ask whoever runs it.",
+  "notice.contractClientOutdated":
+    "This plugin ({plugin}) is older than this server ({server}) still supports. Syncing is paused — update the Courier plugin, then resume it in Settings.",
   "notice.manualReload": "Quit and reopen Obsidian manually.",
 
   // ── Settings page: login / choose / locked ──

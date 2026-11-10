@@ -19,6 +19,7 @@ function fakeClient(): {
   const pushes: Array<{ vaultId: string; body: Uint8Array }> = [];
   const client: CourierClient = {
     setSessionId: vi.fn(),
+    getServerInfo: vi.fn(),
     createVault: vi.fn(),
     listVaults: vi.fn(),
     updateVault: vi.fn(),

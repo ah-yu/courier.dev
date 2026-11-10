@@ -76,9 +76,7 @@ whole model:
 A peer is served when it falls inside the other side's window, and a peer outside it is refused with
 the side that has to move — not with a generic failure. One server therefore serves the several
 plugin versions its users are running: only a client below `MIN_CLIENT_CONTRACT` is turned away, and
-only a server below `MIN_SERVER_CONTRACT` is turned away by the client. (What exists today is the
-numbers and the gate below; the endpoints that publish and compare them are specified with the
-endpoints.)
+only a server below `MIN_SERVER_CONTRACT` is turned away by the client.
 
 ### The rules
 
@@ -121,8 +119,38 @@ Two things the tool cannot see, and both are answered by the same question above
 Never edit a number by hand: `bump --write` writes all three together, and `write` only creates a
 generation's file when there is none.
 
-The wire form — the generation published on `/api/health`, stated on every request, and refused with
-`426 CONTRACT_MISMATCH` — belongs to the endpoints that read it, and is specified with them.
+### On the wire
+
+A client states its generation on **every request**, in `X-Courier-Contract`. The server
+refuses a peer it cannot serve with `426 CONTRACT_MISMATCH`, whose body carries both numbers
+and the server's version:
+
+```json
+{
+  "error": "CONTRACT_MISMATCH",
+  "message": "This client speaks contract 3, but this server speaks 2. Update the server.",
+  "serverContract": 2,
+  "minClient": 1,
+  "clientContract": 3,
+  "serverVersion": "0.6.0"
+}
+```
+
+Two comparisons, and the asymmetry is the point:
+
+- **`client < minClient`** — the server will not misread an older client's bytes, it will
+  simply not serve one this old. The client is told to update the plugin/CLI.
+- **`client > generation`** — the server cannot know what a newer client is saying. This
+  client is told to upgrade the server.
+
+Anything else is served, including a client whose generation is older than the server's:
+that is the additive case, and it is what lets one server keep serving the several plugin
+versions its users are running. An absent header reads as generation `1`.
+
+The refusal happens **before the key is read**: the credential may be perfectly good, and
+"upgrade the server" is a different answer from "your credential is wrong". The WebSocket
+handshake is not gated here — a real client asks `/api/health` before it connects, so a
+mismatched client never reaches the socket.
 
 ---
 
@@ -134,16 +162,32 @@ The wire form — the generation published on `/api/health`, stated on every req
 GET /api/health
 ```
 
-Checks whether the service is running normally.
+Checks whether the service is running normally, and says which contract generation it
+speaks. **Unauthenticated and never refusing**: a server that would not answer the
+handshake could not tell a client why, and an installer probing it would read a healthy
+server as down.
 
 **Response** `200 OK`
 
 ```json
 {
   "status": "ok",
-  "timestamp": "2026-06-10T21:00:00.000Z"
+  "timestamp": "2026-06-10T21:00:00.000Z",
+  "generation": 2,
+  "minClient": 1,
+  "version": "0.6.0"
 }
 ```
+
+| Field        | Description                                                                                                        |
+| ------------ | ------------------------------------------------------------------------------------------------------------------ |
+| `generation` | The contract generation this server speaks (see [Contract generation](#contract-generation))                       |
+| `minClient`  | The oldest client generation it still serves; a client below this is refused with its own upgrade message          |
+| `version`    | The server's release version, for the sentence a user reads; `dev` on a build that was not made by the release job |
+
+The last three are **absent on a server built before the contract check existed**, and an
+absent field reads as generation `1` — which is what every such build was. That is what let
+the fields arrive without a flag day.
 
 ---
 
@@ -681,6 +725,7 @@ Every error returns the same structure:
 | `KEY_EXPIRED`           | 403              | The user key or host key has expired                                            |
 | `KEY_DISABLED`          | 403              | The host disabled the account; its data is kept                                 |
 | `INSUFFICIENT_SCOPE`    | 403              | The host key lacks the scope this endpoint needs                                |
+| `CONTRACT_MISMATCH`     | 426              | The client's contract generation is outside what this server serves             |
 | `RATE_LIMITED`          | 429              | Too many requests; `Retry-After` states the seconds until the window ends       |
 | `QUOTA_EXCEEDED`        | 413              | Exceeds the user's storage quota                                                |
 | `VAULT_LIMIT_REACHED`   | 409              | The account already owns its allowed vaults                                     |

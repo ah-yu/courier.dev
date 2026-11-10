@@ -77,6 +77,10 @@ export const zh = {
   "cli.error.takeOverFailed": "无法从对方手中接管这个 Vault（--take-over）。",
   "cli.error.leaseFailed":
     "无法访问同步锁：{error}。这是文件系统错误（权限、空间或文件损坏），不是另一个同步进程。",
+  "cli.error.contractServerOutdated":
+    "服务端（{server}）比本 CLI（{cli}）能用的版本旧。请升级服务端，然后重新执行这条命令。",
+  "cli.error.contractClientOutdated":
+    "本 CLI（{cli}）比这台服务端还支持的版本旧（服务端 {server}）。请更新 courier-cli，然后重新执行这条命令。",
 
   "cli.register.saved": "已保存设备名称「{deviceName}」。",
   "cli.register.vaultCount": "本机当前绑定 {count} 个 Vault。",

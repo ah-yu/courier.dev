@@ -18,6 +18,7 @@ import { httpToWsUrl } from "@courier/shared";
 import { plural, t } from "./i18n";
 import { FsAdapter } from "./fs-adapter";
 import { createCliClient, createCliSyncApi } from "./api";
+import { VERSION } from "./version";
 import { LeaseStore, watchLeaseRelease } from "./lease";
 import {
   loadBindCompleted,
@@ -668,6 +669,22 @@ export async function runDaemon(
         fatal = true;
         runtime.set({ phase: "stopped", reason: "vault-deleted" });
         log(opts, t("cli.log.vaultDeleted"));
+      },
+      onContractMismatch: (info) => {
+        // The command already asked before taking the lease, so this is the narrow race
+        // where the server changed in between (or a host built by another caller). It is
+        // still fatal: the daemon cannot wait for a server upgrade it cannot perform.
+        // `lastError` is where `status` reads a reason it has no field for.
+        fatal = true;
+        const server = info.serverVersion ?? `contract ${info.serverGeneration}`;
+        const message = t(
+          info.verdict === "client-too-old"
+            ? "cli.error.contractClientOutdated"
+            : "cli.error.contractServerOutdated",
+          { server, cli: VERSION },
+        );
+        runtime.set({ phase: "stopped", reason: "failed", lastError: message });
+        log(opts, message);
       },
     });
     try {

@@ -69,6 +69,10 @@ export const zh = {
   "notice.userKeyRevoked": "用户密钥已被撤销，正在断开连接。",
   "notice.keyExpired": "用户密钥已过期，同步已暂停。续期后在设置中继续同步。",
   "notice.keyDisabled": "用户密钥已被停用，同步已暂停。重新启用后在设置中继续同步。",
+  "notice.contractServerOutdated":
+    "服务端（{server}）比本插件能用的版本旧，同步已暂停。请升级服务端，然后在设置中继续同步；如果服务端不是你管的，请联系管理员。",
+  "notice.contractClientOutdated":
+    "本插件（{plugin}）比这台服务端还支持的版本旧，同步已暂停。请更新 Courier 插件，然后在设置中继续同步。",
   "notice.manualReload": "请手动退出并重新打开 Obsidian。",
 
   // ── Settings page: login / choose / locked ──

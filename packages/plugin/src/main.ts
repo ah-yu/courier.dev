@@ -57,6 +57,7 @@ import {
   SyncLease,
   type AuthFailureReason,
   type ConflictResolvedEvent,
+  type ContractMismatchInfo,
   type FileTooLargeEvent,
   type FileTypeGroup,
   type SettingsGroup,
@@ -1274,6 +1275,7 @@ export default class CourierPlugin extends Plugin {
       onVaultDeleted: () => void this.handleRemoteVaultDeleted(),
       onVaultSettings: (limits) => this.handleVaultSettings(limits),
       onAuthFailure: (reason) => void this.handleAuthFailure(reason),
+      onContractMismatch: (info) => void this.handleContractMismatch(info),
       // One writer per vault. The CLI takes the same lease, so this host does not start
       // its engine while that process owns the vault.
       lease: new SyncLease({
@@ -1762,6 +1764,39 @@ export default class CourierPlugin extends Plugin {
     }
     this.stopHost();
     showNotice(t(reason === "expired" ? "notice.keyExpired" : "notice.keyDisabled"));
+    this.refreshSettings();
+  }
+
+  /**
+   * This plugin and the server do not speak the same contract generation.
+   *
+   * The host has already stopped and written nothing, so the only decision left is what the
+   * vault's state becomes. **Paused, not unbound**: the key, the vault and every version
+   * are still there on both sides, and upgrading the side that is behind makes this same
+   * binding work again — dropping it would make the user re-enter a password to fix a
+   * version problem. That is the `expired` / `disabled` shape, and this reuses it.
+   *
+   * The message names the side that has to move, because on a self-hosted server the person
+   * reading it may not be the person who can upgrade the server.
+   */
+  private async handleContractMismatch(info: ContractMismatchInfo): Promise<void> {
+    const server = info.serverVersion ?? `contract ${info.serverGeneration}`;
+    if (!this.settings.syncPaused) {
+      this.settings.syncPaused = true;
+      try {
+        await this.saveSettings();
+      } catch (err) {
+        // The in-memory flag already governs this session; a disk failure must not leave
+        // the host running against a server it cannot talk to.
+        console.error("Courier: saving the paused state failed:", err);
+      }
+    }
+    this.stopHost();
+    showNotice(
+      info.verdict === "client-too-old"
+        ? t("notice.contractClientOutdated", { server, plugin: this.manifest.version })
+        : t("notice.contractServerOutdated", { server }),
+    );
     this.refreshSettings();
   }
 

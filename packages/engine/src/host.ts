@@ -9,7 +9,8 @@ import {
   type SyncActivityEvent,
   type SyncProgress,
 } from "./engine";
-import type { HistoryLimits } from "@courier/shared";
+import type { HistoryLimits, HealthResponse, ContractVerdict } from "@courier/shared";
+import { contractVerdict } from "@courier/shared";
 import type { SyncAdapter } from "./adapter";
 import type { SyncApi } from "./api";
 import { DEFAULT_OP_QUEUE_LIMITS, OpQueue, weightForSize, type OpQueueLimits } from "./op-queue";
@@ -338,8 +339,26 @@ export interface SyncHostOptions {
    * is a pause the same key can be resumed from.
    */
   onAuthFailure?: (reason: AuthFailureReason) => void;
+  /**
+   * This build and the server do not speak the same contract generation.
+   *
+   * The host has already stopped and built nothing — no engine, no bind, no write — so a
+   * caller that holds a resource (the vault lease) has to release it, and one with a user
+   * in front of it has to say which side must move. Nothing retries on its own: a
+   * mismatch does not resolve itself, and a pass cannot fix it.
+   */
+  onContractMismatch?: (info: ContractMismatchInfo) => void;
   /** The bind pass could not be completed. A report, not a terminal state. */
   onBindFailed?: (error: unknown) => void;
+}
+
+/** Which side is too old, and what the server said about itself. */
+export interface ContractMismatchInfo {
+  verdict: Exclude<ContractVerdict, "ok">;
+  serverGeneration: number;
+  serverMinClient: number;
+  /** The server's release version; null on a build old enough not to report one. */
+  serverVersion: string | null;
 }
 
 /** Why a credential stopped working, as a host has to act on it. */
@@ -491,9 +510,51 @@ export class SyncHost {
     return this.engineInstance?.fileIdForPath(path) ?? null;
   }
 
+  /**
+   * Whether the server this host talks to can serve this build.
+   *
+   * A probe that cannot reach the server is **not** a mismatch: the pass that follows
+   * reports the outage the ordinary way and the host keeps its retry loop. Only a server
+   * that answers, and answers with a window this build is outside, stops the host — which
+   * is why the answer is read from `/api/health` rather than inferred from a failed call.
+   */
+  private async serverContractMismatch(): Promise<ContractMismatchInfo | null> {
+    const api = this.opts.api;
+    if (api.getServerInfo === undefined) return null;
+
+    let health: HealthResponse;
+    try {
+      health = await api.getServerInfo();
+    } catch {
+      return null;
+    }
+
+    const verdict = contractVerdict(health);
+    if (verdict === "ok") return null;
+
+    const serverGeneration = health.generation ?? 1;
+    const serverMinClient = health.minClient ?? 1;
+    const serverVersion = health.version ?? null;
+    this.log(
+      `the server speaks contract ${serverGeneration} (serves clients >= ${serverMinClient}); ` +
+        `this build cannot use it (${verdict})`,
+    );
+    return { verdict, serverGeneration, serverMinClient, serverVersion };
+  }
+
   /** Start (or restart) the engine, the event source and the vault WebSocket. */
   async start(): Promise<void> {
     this.stop();
+
+    // Before anything is built or written: can these two builds work together at all?
+    // A mismatch is not a transient failure — retrying it every pass produces a client
+    // that looks like it is syncing while nothing it sends can be read, the same shape as
+    // a dead credential. Nothing is constructed on this path, so there is nothing to drain.
+    const mismatch = await this.serverContractMismatch();
+    if (mismatch !== null) {
+      this.opts.onContractMismatch?.(mismatch);
+      return;
+    }
 
     const generation = ++this.generation;
     // One controller per start: a stopped pass keeps its own (aborted) signal, so a

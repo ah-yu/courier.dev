@@ -8,6 +8,7 @@ import {
   normalizeScope,
   type AuthFailureReason,
   type ConflictResolvedEvent,
+  type ContractMismatchInfo,
   type FileTooLargeEvent,
   type LocalVersionState,
   type SettingsAppliedEvent,
@@ -148,6 +149,13 @@ export interface EngineHostOptions {
    * disabled one pauses it and keeps everything the user would have to retype.
    */
   onAuthFailure?: (reason: AuthFailureReason) => void;
+  /**
+   * This plugin and the server speak different contract generations.
+   *
+   * The host has stopped and built nothing, so the plugin decides what the vault becomes
+   * (it pauses, rather than dropping a binding both sides still hold).
+   */
+  onContractMismatch?: (info: ContractMismatchInfo) => void;
   /**
    * The bind pass — this host's first look at the vault — could not be completed.
    *
@@ -505,6 +513,7 @@ export class EngineHost {
         this.opts.onVaultSettings?.(limits);
       },
       onAuthFailure: this.opts.onAuthFailure,
+      onContractMismatch: this.opts.onContractMismatch,
       onBindFailed: this.opts.onBindFailed,
       // The status bar reads this to say how far a first pass has got. Kept here, not in
       // the plugin, so the value dies with the host that produced it: a stopped host's

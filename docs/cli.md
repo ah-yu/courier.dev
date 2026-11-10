@@ -179,6 +179,32 @@ repository move means for an installer is in
 
 The complete release workflow (CI, tagging and published assets) is in [release.md](release.md).
 
+## When the CLI and the server are different versions
+
+A release ships the CLI and the server together, but a machine upgrades them at different
+times. Before `run`, `vault connect` and `vault create` touch anything, the CLI asks
+`/api/health` which contract generation the server speaks and compares it with its own
+([api.md](api.md#contract-generation)):
+
+- **the server is older** than this CLI can use — including a server built before the check
+  existed — the command prints one line naming the server's version and exits with **`78`**;
+- **this CLI is older** than the server still serves, the line says to update `courier-cli`
+  instead, and the exit code is the same;
+- anything else works: an older CLI keeps syncing against a newer server, because an
+  additive release does not move the server's floor.
+
+Nothing is left half-done: no vault is created, no binding is written, and the daemon does
+not take the vault lease before the check, so the plugin is never blocked by a CLI that is
+about to exit.
+
+`78` is `EX_CONFIG` from `sysexits.h`, and it is distinct on purpose: a supervisor that
+restarts on any failure would loop forever over a mismatch nobody is fixing. The service
+unit in [Service setup](#service-setup-systemd-user-service) therefore carries
+`RestartPreventExitStatus=78`.
+
+A server that cannot be reached is **not** this case: it stays the ordinary "cannot reach"
+error and keeps its retry path.
+
 ## Commands
 
 ### Save this machine's sync configuration
@@ -693,6 +719,10 @@ Type=simple
 ExecStart=%h/courier/courier-cli run --vault vault-a
 Restart=on-failure
 RestartSec=5
+# A server this CLI cannot talk to is not a crash: the process exits 78 and stays down
+# until someone upgrades the side that is behind (see "When the CLI and the server are
+# different versions"). Restarting it every five seconds only fills the journal.
+RestartPreventExitStatus=78
 StandardOutput=journal
 StandardError=journal
 

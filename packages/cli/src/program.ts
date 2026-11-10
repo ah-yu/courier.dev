@@ -39,6 +39,11 @@ import { LeaseStore } from "./lease";
 import { cliPlatform } from "./platform";
 import { FsAdapter } from "./fs-adapter";
 import { runDaemon, runOnceSync, type RunnerHandle } from "./runner";
+import {
+  EXIT_CONTRACT_MISMATCH,
+  ensureCompatibleServer,
+  ServerContractError,
+} from "./server-contract";
 import { clearActivityLog } from "./history";
 import { daemonStatus } from "./runtime";
 import { buildStatusReport, formatStatusLines, type VaultStatusInput } from "./status";
@@ -63,9 +68,25 @@ function requireConfig(): CliConfig {
 }
 
 /** Print an error and exit, for the action-level refusals. */
-function fail(message: string): never {
+function fail(message: string, code = 1): never {
   console.error(message);
-  process.exit(1);
+  process.exit(code);
+}
+
+/**
+ * Refuse to go on when this CLI and the server speak different contract generations.
+ *
+ * A mismatch is a configuration fact, not a transient fault: it exits with its own code so
+ * a supervisor can be told not to restart it, and it is checked **before** a lease is taken
+ * or a binding is written, so nothing is left half-done. A server that cannot be reached is
+ * not this: that stays the caller's retry path.
+ */
+async function requireCompatibleServer(config: CliConfig): Promise<void> {
+  try {
+    await ensureCompatibleServer(config);
+  } catch (err) {
+    if (err instanceof ServerContractError) fail(err.message, EXIT_CONTRACT_MISMATCH);
+  }
 }
 
 /** What binding one local folder to a known remote vault needs. */
@@ -367,6 +388,9 @@ export function createProgram(): Command {
         if (options.deviceName !== undefined && !options.deviceName.trim()) {
           fail(t("cli.error.deviceNameRequired"));
         }
+        // Before anything is written: a binding to a server this build cannot talk to
+        // would only be a folder that never syncs.
+        await requireCompatibleServer(config);
         const {
           vault: bound,
           count,
@@ -442,6 +466,8 @@ export function createProgram(): Command {
         // Refuse a taken folder before the remote vault exists: creating one and then
         // failing to bind it would leave a vault nobody asked for.
         assertPathFree(config, "", options.path);
+        // ...and refuse an incompatible server before creating one, for the same reason.
+        await requireCompatibleServer(config);
 
         const client = createCliClient({ serverUrl: config.serverUrl, userKey: config.userKey });
         let created: CreateVaultResponse;
@@ -632,6 +658,10 @@ export function createProgram(): Command {
         } catch (err) {
           fail(err instanceof Error ? err.message : String(err));
         }
+        // Before the lease, before the engine, before anything: a server this build cannot
+        // talk to is a configuration fact, and the daemon must not sit in a retry loop over
+        // it. `--once` is refused here too, so both forms answer the same way.
+        await requireCompatibleServer(config);
         try {
           if (options.once) {
             await runOnceSync(config, selected, {

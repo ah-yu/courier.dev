@@ -87,6 +87,10 @@ export const en: Record<MessageKey, string> = {
   "cli.error.takeOverFailed": "Could not take the vault from its writer (--take-over).",
   "cli.error.leaseFailed":
     "Cannot access the sync lease: {error}. This is a filesystem error (permissions, space, or a damaged path), not another syncer.",
+  "cli.error.contractServerOutdated":
+    "This server ({server}) is older than this CLI ({cli}) can use. Upgrade the server, then start this command again.",
+  "cli.error.contractClientOutdated":
+    "This CLI ({cli}) is older than this server ({server}) still supports. Update courier-cli, then start this command again.",
 
   "cli.register.saved": 'Saved device name "{deviceName}".',
   "cli.register.vaultCount": "{count} vault(s) currently bound on this machine.",

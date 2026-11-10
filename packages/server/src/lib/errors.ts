@@ -18,6 +18,8 @@ export class AppError extends Error {
     message: string,
     /** Extra response headers the error requires (e.g. `Content-Range` on a 416). */
     public headers?: Record<string, string>,
+    /** Extra fields the body carries beyond `error` and `message` (a contract refusal). */
+    public extra?: Record<string, unknown>,
   ) {
     super(message);
     this.name = "AppError";
@@ -127,6 +129,30 @@ export class RangeNotSatisfiableError extends AppError {
     super(416, "RANGE_NOT_SATISFIABLE", "Range is not satisfiable", {
       "Content-Range": `bytes */${size}`,
     });
+  }
+}
+
+/**
+ * The client and this server speak different contract generations.
+ *
+ * `426 Upgrade Required` rather than `400`: the request is well formed, the two sides are
+ * simply not the same interface. The body carries both numbers and the server's release
+ * version, so a caller that never asked `/api/health` can still render which side is old.
+ *
+ * A client is refused **before** its key is even read: the key may be perfectly good, and
+ * "upgrade the server" is a different answer from "your credential is wrong".
+ */
+export class ContractMismatchError extends AppError {
+  constructor(
+    message: string,
+    extra: {
+      serverContract: number;
+      minClient: number;
+      clientContract: number;
+      serverVersion: string;
+    },
+  ) {
+    super(426, "CONTRACT_MISMATCH", message, undefined, extra);
   }
 }
 
