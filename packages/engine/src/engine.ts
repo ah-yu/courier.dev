@@ -180,6 +180,8 @@ interface SyncedSettlement {
   entry: LocalVersionState[string] | undefined;
   localExists: boolean;
   pass: ReconcilePass;
+  /** The pass's owner map, refreshed when this settlement pushes a rename. */
+  owners: Map<string, string>;
 }
 
 /** What {@link SyncEngine.settlePushed} needs once a pass decision is `push`. */
@@ -2192,7 +2194,7 @@ export class SyncEngine {
     }
 
     switch (decision.action) {
-      case "synced":
+      case "synced": {
         return await this.settleSynced({
           fileId,
           plainPath,
@@ -2202,7 +2204,9 @@ export class SyncEngine {
           entry,
           localExists,
           pass,
+          owners,
         });
+      }
       case "none":
         break;
       case "push": {
@@ -2227,6 +2231,11 @@ export class SyncEngine {
       case "pull": {
         if (!head || !plainPath) break;
         await this.pullRemote(fileId, plainPath, head, localContentHash);
+        // The path now holds this chain's head; later decisions must not undo it. A `delete`
+        // head leaves the path free for whoever owns it next, so it is not an owner.
+        const claimed = recordedPath ?? plainPath;
+        if (head.action === "delete") owners.delete(claimed);
+        else owners.set(claimed, fileId);
         break;
       }
       case "conflict": {
@@ -2234,6 +2243,14 @@ export class SyncEngine {
         // same reason the `pull` case above tolerates it: a pass is the retry, and the next
         // one decides again from the same bytes.
         await this.conflicts.resolve(fileId, plainPath, head, localExists);
+        // The resolution left the head's bytes at the path (and parked the local ones), so
+        // the head's chain is what the rest of the pass must treat as the content there —
+        // unless the head is a tombstone, which leaves the path free.
+        const claimed = recordedPath ?? plainPath;
+        if (claimed !== null) {
+          if (head?.action === "delete") owners.delete(claimed);
+          else owners.set(claimed, fileId);
+        }
         break;
       }
     }
@@ -2246,7 +2263,8 @@ export class SyncEngine {
    * could not reach the server.
    */
   private async settleSynced(settlement: SyncedSettlement): Promise<unknown> {
-    const { fileId, plainPath, recordedPath, chain, head, entry, localExists, pass } = settlement;
+    const { fileId, plainPath, recordedPath, chain, head, entry, localExists, pass, owners } =
+      settlement;
     const { localStamps } = pass;
     let failure: unknown = null;
 
@@ -2371,6 +2389,9 @@ export class SyncEngine {
             baseVersionId: head.versionId,
             stamp: read.stamp,
           });
+          // The chain is the path's newest on the server now; the rest of the pass must
+          // not decide from its start-of-pass map and let a rival overwrite those bytes.
+          owners.set(plainPath, fileId);
         } catch (err) {
           if (err instanceof SyncPushBaseError) {
             await this.decideIncremental(fileId, plainPath);
@@ -2574,7 +2595,16 @@ export class SyncEngine {
               baseVersionId: moved.lastKnownVersionId,
               stamp: read.stamp,
             });
-            if (prepared) await this.pushPrepared(prepared);
+            if (prepared) {
+              try {
+                await this.pushPrepared(prepared);
+              } catch (err) {
+                // A refused move (the chain advanced under us) is settled by the next pass,
+                // which decides from the fresh chain. Letting it throw here would abandon
+                // the rest of the create batch over one raced note.
+                if (!(err instanceof SyncPushBaseError)) throw err;
+              }
+            }
             continue;
           }
         }
@@ -4289,6 +4319,23 @@ export class SyncEngine {
         },
       };
     }
+    // The pass's owner rule applies to an event's apply too: a chain that is not the
+    // newest at the path the apply writes (the head's recorded path) must not write over
+    // the owner's file. Without this, an edit of the moved chain's old path resolved a
+    // conflict that replaced the owner's bytes with this chain's head.
+    if ((decision.action === "pull" || decision.action === "conflict") && head) {
+      const written = (await this.decryptPath(head)) ?? path;
+      const rival = this.remoteIndex.newestAt(written);
+      const removesTheDeletedBytes = decision.action === "pull" && head.action === "delete";
+      if (
+        rival !== null &&
+        rival.fileId !== fileId &&
+        !removesTheDeletedBytes &&
+        isNewerHead(rival, { fileId, head })
+      ) {
+        return { kind: "handled" };
+      }
+    }
     if (decision.action === "synced") {
       // The head already holds the bytes on disk, while our sync point is behind it:
       // another operation on this path pushed them and this decision fetched the chain
@@ -4817,10 +4864,14 @@ export class SyncEngine {
     // the last one recorded, which is what makes every device agree.
     const writtenPath = headPath ?? plainPath;
     const rival = this.remoteIndex.newestAt(writtenPath) ?? this.remoteIndex.newestAt(plainPath);
+    // Mirror the pass exactly: only a `pull` that removes the deleted bytes is exempt, not
+    // every delete head. A delete-head *conflict* deletes the owner's file and parks its
+    // bytes, which is the write this rule exists to stop.
+    const removesTheDeletedBytes = decision.action === "pull" && head.action === "delete";
     const losesThePath =
       rival !== null &&
       rival.fileId !== fileId &&
-      head.action !== "delete" &&
+      !removesTheDeletedBytes &&
       isNewerHead(rival, { fileId, head });
 
     if (decision.action === "pull") {

@@ -274,14 +274,16 @@ describe("RemoteIndex", () => {
     expect(index.newestAt("notes/a.md")?.fileId).toBe("newer");
   });
 
-  it("breaks a same-millisecond tie by fileId, and forgets a chain that owned the path", () => {
+  it("breaks a same-millisecond tie by fileId, and falls back when the newest is forgotten", () => {
     const index = new RemoteIndex();
     index.remember("b", head("v1", "h1"), "notes/a.md");
     index.remember("a", head("v2", "h2"), "notes/a.md");
 
     expect(index.newestAt("notes/a.md")?.fileId).toBe("a");
 
+    // Forgetting the newest chain must not answer "nobody owns this path": the other chain
+    // naming it is still live, and a notification for it has to see the real owner.
     index.forget("a");
-    expect(index.newestAt("notes/a.md")).toBeNull();
+    expect(index.newestAt("notes/a.md")?.fileId).toBe("b");
   });
 });

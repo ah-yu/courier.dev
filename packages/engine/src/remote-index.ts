@@ -55,9 +55,10 @@ export class RemoteIndex {
    *
    * `pathToFileId` answers "which chain was recorded here last", which is order, not
    * authority: a pass rebuilds it in server order, a notification overwrites it, and
-   * neither is a tie-break two devices would agree on.
+   * neither is a tie-break two devices would agree on. Every chain recorded at a path is
+   * kept here, so forgetting or moving the newest one falls back to the next.
    */
-  private readonly newestByPath = new Map<string, ChainRef>();
+  private readonly newestByPath = new Map<string, Map<string, ChainRef>>();
 
   /**
    * Every chain whose live head holds a given content hash.
@@ -105,9 +106,17 @@ export class RemoteIndex {
    * path, in the pass and on a notification alike (`pathOwners` is the pass's whole-vault
    * answer). Unlike {@link fileIdAt} it is not "the last one recorded": it keeps the head
    * the server stamped latest, with the fileId breaking a tie, so every device agrees.
+   * When that chain is forgotten or moves away, the answer falls back to the next chain
+   * still recorded at the path — a removed newest must not look like an empty path.
    */
   newestAt(path: string): ChainRef | null {
-    return this.newestByPath.get(path) ?? null;
+    const atPath = this.newestByPath.get(path);
+    if (atPath === undefined) return null;
+    let newest: ChainRef | null = null;
+    for (const ref of atPath.values()) {
+      if (newest === null || isNewerHead(ref, newest)) newest = ref;
+    }
+    return newest;
   }
 
   /** The live path recorded for a chain, or null. */
@@ -154,11 +163,14 @@ export class RemoteIndex {
     this.fileIdToHash.set(fileId, head.contentHash);
     this.recordHash(fileId, head.contentHash);
     // Two chains can name one path; only the newer head decides the file (see
-    // `newestAt`). Re-recording the same chain refreshes its own entry.
-    const newest = this.newestByPath.get(path);
-    if (newest === undefined || newest.fileId === fileId || isNewerHead({ fileId, head }, newest)) {
-      this.newestByPath.set(path, { fileId, head });
+    // `newestAt`). Every chain recorded at the path is kept, so forgetting the newest one
+    // falls back to the next instead of answering "nobody owns it".
+    let atPath = this.newestByPath.get(path);
+    if (atPath === undefined) {
+      atPath = new Map();
+      this.newestByPath.set(path, atPath);
     }
+    atPath.set(fileId, { fileId, head });
   }
 
   /**
@@ -177,14 +189,20 @@ export class RemoteIndex {
     if (path !== undefined && this.pathToFileId.get(path) === fileId) {
       this.pathToFileId.delete(path);
     }
-    if (path !== undefined && this.newestByPath.get(path)?.fileId === fileId) {
-      this.newestByPath.delete(path);
-    }
+    if (path !== undefined) this.forgetAt(path, fileId);
     const hash = this.fileIdToHash.get(fileId);
     if (hash !== undefined) this.dropHash(fileId, hash);
     this.fileIdToPath.delete(fileId);
     this.fileIdToHead.delete(fileId);
     this.fileIdToHash.delete(fileId);
+  }
+
+  /** Drop one chain from a path's owner set, keeping the other chains recorded there. */
+  private forgetAt(path: string, fileId: string): void {
+    const atPath = this.newestByPath.get(path);
+    if (atPath === undefined) return;
+    atPath.delete(fileId);
+    if (atPath.size === 0) this.newestByPath.delete(path);
   }
 
   /** Record that `fileId`'s head now holds `hash`, as the most recent owner. */
@@ -235,12 +253,8 @@ export class RemoteIndex {
     ) {
       this.pathToFileId.delete(previousPath);
     }
-    if (
-      previousPath !== undefined &&
-      previousPath !== keepPath &&
-      this.newestByPath.get(previousPath)?.fileId === fileId
-    ) {
-      this.newestByPath.delete(previousPath);
+    if (previousPath !== undefined && previousPath !== keepPath) {
+      this.forgetAt(previousPath, fileId);
     }
   }
 }
