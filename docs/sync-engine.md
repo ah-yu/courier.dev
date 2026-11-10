@@ -331,6 +331,20 @@ file now lives at.
   Covered by the engine suite, the rename cases in `plugin.e2e.test.ts`, and the root-level rename case
   in the real-Obsidian suite.
 
+- **Two live chains can name one path for a while, and only one of them decides the file.** That is
+  what two devices that create the same note while out of touch leave behind (and what a create racing
+  a move can leave for a moment). Ownership settles it: `pathOwners` gives the path to the chain whose
+  head the **server** stamped latest (`createdAt`, with the fileId breaking a tie), so every device
+  picks the same winner and converges on the same content. The other chain may still `push` — that is
+  how its bytes catch up with the winner — but it never `pull`s or resolves a conflict over that path.
+  Without that tie-break each device resolved the conflict in the _other_ chain's favour, pushed the
+  bytes it had just been given onto its own chain, and two devices traded the note's content on every
+  pass (measured: both devices alternated between each other's text indefinitely, one conflict copy
+  each). The loser's bytes are parked once, on the device that held them. A `delete` head applying its
+  own deletion is not such a write: the bytes it removes are the ones the tombstone deleted, which is
+  what frees the path for the chain that now owns it. Covered by `pathOwners` in `pass-view.test.ts`
+  and the two-chain cases in `engine.events.test.ts`.
+
 ## Offline changes and reconciliation
 
 - **A change made while the connection is down reaches the server on the next reconcile, and that pass

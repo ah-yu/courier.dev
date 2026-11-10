@@ -65,6 +65,7 @@ import {
 import {
   chainPaths,
   orderedFileIds,
+  pathOwners,
   prefetchCandidatesForBurst,
   prefetchCandidatesForPass,
   weightOfFile,
@@ -1813,6 +1814,9 @@ export class SyncEngine {
     // The set answers "which files does this pass consider"; the array is what gives
     // the user's own files a head start (see `orderedFileIds`).
     const ordered = orderedFileIds([...pass.fileIds], pass, this.state);
+    // Which chain decides each path when two of them name it (see `pathOwners`): the one
+    // the server stamped latest, so every device picks the same winner.
+    const owners = pathOwners(pass, this.state);
     // Progress starts from the chains this pass already knows about; the creates add
     // themselves as the vault is walked (see `createUntrackedFiles`).
     this.activity.beginProgress(ordered.length);
@@ -1842,7 +1846,7 @@ export class SyncEngine {
           try {
             const failure = await this.paths.run(
               claim,
-              () => this.reconcileOne(fileId, pass, pendingDeletes),
+              () => this.reconcileOne(fileId, pass, pendingDeletes, owners),
               "pass",
             );
             if (failure !== null) firstFailure ??= failure;
@@ -2054,6 +2058,7 @@ export class SyncEngine {
     fileId: string,
     pass: ReconcilePass,
     pendingDeletes: PendingTombstone[],
+    owners: ReadonlyMap<string, string>,
   ): Promise<unknown> {
     const { localHashes, chainByFileId } = pass;
     const { skippedPaths, localStamps } = pass;
@@ -2164,6 +2169,26 @@ export class SyncEngine {
 
     // No event can be handling this path now: this job holds it, and an event's job for
     // the same path either ran before it or waits behind it (see `PathQueue`).
+
+    // Two live chains can name one path (two devices created the note while out of touch,
+    // or a create raced a move). Only the chain the server stamped latest decides the
+    // file's *content*; the other one may still push, but it must never write. Without
+    // that tie-break each device resolved the conflict in the *other* chain's favour,
+    // then pushed the bytes it had just been given onto its own chain, so two devices
+    // traded the note's content on every pass and never converged (see `pathOwners`).
+    //
+    // A `delete` head applying its deletion is not such a write: the bytes it removes are
+    // the ones the tombstone deleted (that is the only case `decideFile` pulls one), which
+    // is what frees the path for the chain that now owns it. A conflict is: it parks a
+    // file that belongs to somebody else.
+    if ((decision.action === "pull" || decision.action === "conflict") && plainPath !== null) {
+      // A pull writes where the head records its path (a peer's move); a conflict parks
+      // beside the path this device holds.
+      const claimed = decision.action === "pull" ? (recordedPath ?? plainPath) : plainPath;
+      const owner = owners.get(claimed);
+      const removesTheDeletedBytes = decision.action === "pull" && head?.action === "delete";
+      if (owner !== undefined && owner !== fileId && !removesTheDeletedBytes) return null;
+    }
 
     switch (decision.action) {
       case "synced":

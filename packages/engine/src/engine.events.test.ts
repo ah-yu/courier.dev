@@ -8,6 +8,7 @@ import {
   deriveEncryptionKey,
   describe,
   encoder,
+  encryptCombinedBytes,
   encryptString,
   expect,
   expectConsistent,
@@ -117,6 +118,104 @@ describe("SyncEngine — two chains naming one path", () => {
     expect(textOf(targetAdapter, "old.md")).toBe("new note");
     expect(conflictPaths(targetAdapter)).toEqual([]);
     expect(conflicts).toEqual([]);
+  });
+
+  it("keeps the path's own bytes when an older chain names it too", async () => {
+    const key = await deriveEncryptionKey(
+      "password",
+      btoa(String.fromCharCode(...new Uint8Array(32))),
+    );
+    const api = new FakeApi(key);
+    const adapter = new FakeAdapter();
+    adapter.files.set("note.md", encoder.encode("v2-new"));
+    const engine = new SyncEngine({
+      platform: realPlatform,
+      vaultId: "vault-1",
+      adapter,
+      api,
+      encryptionKey: key,
+    });
+    await engine.initialSync();
+    const owner = engine.fileIdForPath("note.md")!;
+    const pathCipher = api.chains.get(owner)![0]!.encryptedPath;
+
+    // A second chain that also records `note.md`, with older bytes and an older head: the
+    // leftover of a rename that forked, or a device that arrived with the same path.
+    const olderBytes = encoder.encode("v1-old");
+    const olderHash = await sha256Hex(olderBytes);
+    api.blobs.set(
+      olderHash,
+      await encryptCombinedBytes(key, olderBytes as Uint8Array<ArrayBuffer>),
+    );
+    api.paths.set("fileId-older", pathCipher);
+    api.chains.set("fileId-older", [
+      {
+        versionId: "version-older",
+        contentHash: olderHash,
+        encryptedPath: pathCipher,
+        action: "create",
+        sizeBytes: olderBytes.byteLength,
+        mtimeMs: 1,
+        createdAt: "2020-01-01T00:00:00.000Z",
+      },
+    ]);
+
+    await engine.initialSync();
+
+    // The older chain may not decide the file: no revert, and no conflict copy of bytes
+    // that were never in conflict with it.
+    expect(textOf(adapter, "note.md")).toBe("v2-new");
+    expect(conflictPaths(adapter)).toEqual([]);
+  });
+
+  it("converges two devices that created the same path out of touch", async () => {
+    const key = await deriveEncryptionKey(
+      "password",
+      btoa(String.fromCharCode(...new Uint8Array(32))),
+    );
+    const api = new FakeApi(key);
+    const aAdapter = new FakeAdapter();
+    const bAdapter = new FakeAdapter();
+    const a = new SyncEngine({
+      platform: realPlatform,
+      vaultId: "vault-1",
+      adapter: aAdapter,
+      api,
+      encryptionKey: key,
+    });
+    const b = new SyncEngine({
+      platform: realPlatform,
+      vaultId: "vault-1",
+      adapter: bAdapter,
+      api,
+      encryptionKey: key,
+    });
+
+    // B creates the note; A cannot see that chain yet and creates its own at the same
+    // path, exactly what two devices out of touch leave behind.
+    bAdapter.files.set("note.md", encoder.encode("from-b"));
+    await b.initialSync();
+    const bChain = [...api.chains.entries()];
+    for (const [fileId] of bChain) api.chains.delete(fileId);
+    aAdapter.files.set("note.md", encoder.encode("from-a"));
+    await a.initialSync();
+    for (const [fileId, chain] of bChain) api.chains.set(fileId, chain);
+
+    // The frozen clock stamps both heads in the same millisecond, so the fileId is the
+    // tie-break both devices apply (see `pathOwners`).
+    const winner = [...api.chains.keys()].reduce((left, right) => (left < right ? left : right));
+    const winningText = winner === a.fileIdForPath("note.md") ? "from-a" : "from-b";
+    for (let round = 0; round < 3; round += 1) {
+      await a.initialSync();
+      await b.initialSync();
+      // Both devices pick the same chain by the server's own stamp, so the note settles
+      // instead of each device handing the other's bytes back to its own chain.
+      expect(textOf(aAdapter, "note.md"), `round ${round} on a`).toBe(winningText);
+      expect(textOf(bAdapter, "note.md"), `round ${round} on b`).toBe(winningText);
+    }
+    // The loser is parked once, on the device that held it, and never again.
+    const parked = [...conflictPaths(aAdapter), ...conflictPaths(bAdapter)];
+    expect(parked).toHaveLength(1);
   });
 });
 
