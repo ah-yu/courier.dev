@@ -180,8 +180,8 @@ interface SyncedSettlement {
   entry: LocalVersionState[string] | undefined;
   localExists: boolean;
   pass: ReconcilePass;
-  /** The pass's owner map, refreshed when this settlement pushes a rename. */
-  owners: Map<string, string>;
+  /** The pass's renames waiting for the batch it sends after the per-file loop. */
+  pendingRenames: PreparedPush[];
 }
 
 /** What {@link SyncEngine.settlePushed} needs once a pass decision is `push`. */
@@ -1836,6 +1836,10 @@ export class SyncEngine {
     // which is what a thousand files deleted with the app closed costs against the sync
     // allowance (see `pushTombstones`).
     const pendingDeletes: PendingTombstone[] = [];
+    // The renames this pass decided on: a move no host reported (`repairMovedFile`
+    // re-pointed the entries) is still a rename per file, and they travel together after
+    // the per-file loop, 100 per request, like every other bulk path.
+    const pendingRenames: PreparedPush[] = [];
 
     // Every task is a different fileId, so the state mutations they make are disjoint;
     // the pool only decides how many may be in flight, and runs a large file alone.
@@ -1848,7 +1852,7 @@ export class SyncEngine {
           try {
             const failure = await this.paths.run(
               claim,
-              () => this.reconcileOne(fileId, pass, pendingDeletes, owners),
+              () => this.reconcileOne(fileId, pass, pendingDeletes, pendingRenames, owners),
               "pass",
             );
             if (failure !== null) firstFailure ??= failure;
@@ -1878,12 +1882,46 @@ export class SyncEngine {
     // Tombstones go first, creations second. The two are independent — a path this pass
     // deletes holds no file, so it cannot also be created in the same pass — and the
     // order only keeps a pass's deletions ahead of its creations.
+    // Renames first: they are about files that are there. Then the tombstones, then the
+    // creations — each its own batch, failures collected the same way.
+    const renameFailure = await this.pushPassRenames(pendingRenames);
     const deleteFailure = await this.pushTombstones(pendingDeletes);
     const batchFailure = await this.createUntrackedFiles(pass);
     // The pass is over: report the final pair, whose `done === total` tells a host to stop
     // showing a counter (a create that a limiter left unsent was counted and dropped).
     this.activity.reportProgress(true);
-    return firstFailure ?? deleteFailure ?? batchFailure;
+    return firstFailure ?? renameFailure ?? deleteFailure ?? batchFailure;
+  }
+
+  /**
+   * Push the renames a pass decided on, in **one batch**.
+   *
+   * A move no host reported 鈥?a vault reorganised while the plugin or the CLI was stopped 鈥?   * is re-pointed by `repairMovedFile` and then decided as `synced` with a recorded path
+   * that disagrees with the local one. Pushing those one request per file is the 201-requests
+   * regression the event burst exists to avoid; they travel with the create batch's bounds.
+   */
+  private async pushPassRenames(pending: readonly PreparedPush[]): Promise<unknown> {
+    if (pending.length === 0) return null;
+    return await this.paths.run(
+      pending.map((prepared) => prepared.plainPath),
+      async () => {
+        const batch = this.renameBatch();
+        try {
+          for (const prepared of pending) {
+            if (batch.rateLimited) break;
+            const outcome = await batch.add(prepared, undefined, { pipelined: true });
+            if (outcome === "dropped") break;
+          }
+        } catch (err) {
+          await batch.settle();
+          batch.abandon();
+          throw err;
+        }
+        await batch.drain();
+        return batch.failure;
+      },
+      "batch",
+    );
   }
 
   /**
@@ -2087,6 +2125,7 @@ export class SyncEngine {
     fileId: string,
     pass: ReconcilePass,
     pendingDeletes: PendingTombstone[],
+    pendingRenames: PreparedPush[],
     owners: Map<string, string>,
   ): Promise<unknown> {
     const { localHashes, chainByFileId } = pass;
@@ -2240,7 +2279,7 @@ export class SyncEngine {
           entry,
           localExists,
           pass,
-          owners,
+          pendingRenames,
         });
       }
       case "none":
@@ -2306,8 +2345,17 @@ export class SyncEngine {
    * could not reach the server.
    */
   private async settleSynced(settlement: SyncedSettlement): Promise<unknown> {
-    const { fileId, plainPath, recordedPath, chain, head, entry, localExists, pass, owners } =
-      settlement;
+    const {
+      fileId,
+      plainPath,
+      recordedPath,
+      chain,
+      head,
+      entry,
+      localExists,
+      pass,
+      pendingRenames,
+    } = settlement;
     const { localStamps } = pass;
     let failure: unknown = null;
 
@@ -2422,27 +2470,19 @@ export class SyncEngine {
       const read = await this.readWithStamp(plainPath);
       if (read) {
         // Decided from this pass's chain: that head is the base, so a peer that pushed
-        // during the pass has its version refused rather than built over.
-        try {
-          await this.pushFile({
-            fileId,
-            plainPath,
-            action: "rename",
-            bytes: read.bytes,
-            baseVersionId: head.versionId,
-            stamp: read.stamp,
-          });
-          // The chain is the path's newest on the server now; the rest of the pass must
-          // not decide from its start-of-pass map and let a rival overwrite those bytes.
-          owners.set(plainPath, fileId);
-        } catch (err) {
-          if (err instanceof SyncPushBaseError) {
-            await this.decideIncremental(fileId, plainPath);
-          } else {
-            // A push that failed is retried by the next pass; this one keeps going.
-            failure = err;
-          }
-        }
+        // during the pass has its version refused rather than built over. Prepared here and
+        // pushed with the pass's other renames, 100 per request: a bulk move no host
+        // reported (`repairMovedFile` re-pointed every entry) must not cost one request per
+        // note.
+        const prepared = await this.preparePush({
+          fileId,
+          plainPath,
+          action: "rename",
+          bytes: read.bytes,
+          baseVersionId: head.versionId,
+          stamp: read.stamp,
+        });
+        if (prepared) pendingRenames.push(prepared);
       }
     }
     return failure;
@@ -2686,6 +2726,7 @@ export class SyncEngine {
       // entries (or the request on the wire) behind: that is the stranded-file path again.
       await batch.settle();
       batch.abandon();
+      await renames.settle();
       renames.abandon();
       throw err;
     }
@@ -2859,7 +2900,13 @@ export class SyncEngine {
             await this.settleStaleBase(prepared);
             return null;
           } catch (err) {
-            return err;
+            if (!(err instanceof SyncPushBaseError)) return err;
+            // The chain moved under the pass between the decision and the request: decide
+            // this file again from the fresh chain, the answer the single-file rename gives.
+            // Reporting it as a pass failure here failed the whole reconcile (and on a bind
+            // armed the bind-retry loop).
+            await this.decideIncremental(prepared.fileId, prepared.plainPath);
+            return null;
           }
         },
         forget: (prepared) => this.forgetPushedVersion(prepared),

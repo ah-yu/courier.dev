@@ -278,4 +278,52 @@ describe("a bulk rename through a real server", () => {
       mac.host.stop();
     }
   }, 120_000);
+
+  it("re-points a move no host reported without one request per note", async () => {
+    // The host was stopped while the vault was reorganised (the shape `repairMovedFile`
+    // exists for): no rename, delete or create event ever fires, and the next pass finds
+    // every chain's recorded path gone and one unclaimed file holding its bytes. Those
+    // renames have to travel as one batch, like every other bulk path.
+    const vault = await createTestVault(server, "bulk-rename-silent", material);
+    const mac = await startHost(vault.id, mkdtempSync(join(tmpdir(), "silent-mac-")), "mac");
+    const phone = await startHost(vault.id, mkdtempSync(join(tmpdir(), "silent-phone-")), "phone");
+
+    try {
+      const events = mac.adapter.handlers!;
+      for (let index = 0; index < NOTES; index += 1) {
+        const path = `notes/a-${String(index).padStart(4, "0")}.md`;
+        const body = `# note ${index}\n\nbody ${index}\n`;
+        mkdirSync(join(mac.dir, dirname(path)), { recursive: true });
+        writeFileSync(join(mac.dir, path), body);
+        events.changed(path, Buffer.byteLength(body));
+      }
+      await waitFor(() => countNotes(phone.dir) === NOTES, `${NOTES} seeded notes`, 60_000);
+      await phone.host.whenIdle();
+      await mac.host.whenIdle();
+
+      // No event at all: the watcher never sees this move.
+      for (let index = 0; index < NOTES; index += 1) {
+        const suffix = `${String(index).padStart(4, "0")}.md`;
+        renameSync(join(mac.dir, "notes", `a-${suffix}`), join(mac.dir, "notes", `b-${suffix}`));
+      }
+
+      const peerMoved = (): boolean => {
+        const names = readdirSync(join(phone.dir, "notes"));
+        return (
+          names.filter((name) => name.startsWith("b-")).length >= NOTES &&
+          !names.some((name) => name.startsWith("a-"))
+        );
+      };
+      await waitFor(peerMoved, `${NOTES} silently renamed notes on the peer`, 90_000);
+
+      const index = await mac.api.getVaultSyncIndex(vault.id);
+      expect(index.files.filter((file) => file.head.action === "delete")).toHaveLength(0);
+      expect(index.files.length).toBe(NOTES);
+      // The renames went out in batches: 200 notes must not cost 200 `sync/push` requests.
+      expect(mac.pushes()).toBeLessThan(40);
+    } finally {
+      phone.host.stop();
+      mac.host.stop();
+    }
+  }, 120_000);
 });
