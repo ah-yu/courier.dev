@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { DEFAULT_RECONCILE_INTERVAL_MS } from "./host";
 import { DEFAULT_RENAME_WINDOW_MS, MAX_PENDING_DELETES, SelfEventLog } from "./self-events";
 
 /**
@@ -359,5 +360,13 @@ describe("SelfEventLog — a delete awaiting a rename", () => {
     // the deletes it made last (its earliest files are the ones that fork).
     expect(log.matchDeletedFile("hash-0")).toBeNull();
     expect(log.matchDeletedFile("newest-hash")).toMatchObject({ fileId: "newest" });
+  });
+
+  it("sizes the window to one reconcile interval, so the two cannot drift", () => {
+    // The engine cannot import `host.ts` (the host imports the engine), so the window is a
+    // literal there and this pins it to the pass interval it is sized for: a pass is when
+    // the file would get an identity anyway, so a longer memory cannot help and a shorter
+    // one forks a bulk move whose halves straddle a pass.
+    expect(DEFAULT_RENAME_WINDOW_MS).toBe(DEFAULT_RECONCILE_INTERVAL_MS);
   });
 });

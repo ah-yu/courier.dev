@@ -1,5 +1,26 @@
 import type { VersionChainEntry } from "@courier/shared";
 
+/** A chain and its live head: the pair the path-owner rule compares. */
+export interface ChainRef {
+  fileId: string;
+  head: VersionChainEntry;
+}
+
+/**
+ * Whether `left` is the newer of two chains that name one path.
+ *
+ * The **server's** `createdAt` decides, and a tie falls back to the fileId, so every
+ * device computes the same answer (a local mtime or an arrival order would not): that is
+ * what lets two devices converge on one content instead of trading the note back and
+ * forth (see `pathOwners` in `pass-view.ts`).
+ */
+export function isNewerHead(left: ChainRef, right: ChainRef): boolean {
+  if (left.head.createdAt !== right.head.createdAt) {
+    return left.head.createdAt > right.head.createdAt;
+  }
+  return left.fileId < right.fileId;
+}
+
 /**
  * What the server holds, as far as this device knows: which path each live chain lives
  * at, what its head is, and which content hash belongs to which chain.
@@ -28,6 +49,16 @@ export class RemoteIndex {
   private readonly fileIdToPath = new Map<string, string>();
   private readonly fileIdToHead = new Map<string, VersionChainEntry>();
   private readonly hashToFileId = new Map<string, string>();
+  /**
+   * The newest live chain recorded at each path, which is the one that decides the file
+   * when two chains name it (see {@link newestAt}).
+   *
+   * `pathToFileId` answers "which chain was recorded here last", which is order, not
+   * authority: a pass rebuilds it in server order, a notification overwrites it, and
+   * neither is a tie-break two devices would agree on.
+   */
+  private readonly newestByPath = new Map<string, ChainRef>();
+
   /**
    * Every chain whose live head holds a given content hash.
    *
@@ -59,11 +90,24 @@ export class RemoteIndex {
     this.hashToFileId.clear();
     this.hashToFileIds.clear();
     this.fileIdToHash.clear();
+    this.newestByPath.clear();
   }
 
   /** The fileId the server tracks at `path`, or null when it tracks none. */
   fileIdAt(path: string): string | null {
     return this.pathToFileId.get(path) ?? null;
+  }
+
+  /**
+   * The newest live chain recorded at `path`, or null.
+   *
+   * This is the authority for "which chain decides this file" when two chains name one
+   * path, in the pass and on a notification alike (`pathOwners` is the pass's whole-vault
+   * answer). Unlike {@link fileIdAt} it is not "the last one recorded": it keeps the head
+   * the server stamped latest, with the fileId breaking a tie, so every device agrees.
+   */
+  newestAt(path: string): ChainRef | null {
+    return this.newestByPath.get(path) ?? null;
   }
 
   /** The live path recorded for a chain, or null. */
@@ -109,6 +153,12 @@ export class RemoteIndex {
     this.fileIdToHead.set(fileId, head);
     this.fileIdToHash.set(fileId, head.contentHash);
     this.recordHash(fileId, head.contentHash);
+    // Two chains can name one path; only the newer head decides the file (see
+    // `newestAt`). Re-recording the same chain refreshes its own entry.
+    const newest = this.newestByPath.get(path);
+    if (newest === undefined || newest.fileId === fileId || isNewerHead({ fileId, head }, newest)) {
+      this.newestByPath.set(path, { fileId, head });
+    }
   }
 
   /**
@@ -126,6 +176,9 @@ export class RemoteIndex {
     // still this chain's (see `forgetPrevious`).
     if (path !== undefined && this.pathToFileId.get(path) === fileId) {
       this.pathToFileId.delete(path);
+    }
+    if (path !== undefined && this.newestByPath.get(path)?.fileId === fileId) {
+      this.newestByPath.delete(path);
     }
     const hash = this.fileIdToHash.get(fileId);
     if (hash !== undefined) this.dropHash(fileId, hash);
@@ -181,6 +234,13 @@ export class RemoteIndex {
       this.pathToFileId.get(previousPath) === fileId
     ) {
       this.pathToFileId.delete(previousPath);
+    }
+    if (
+      previousPath !== undefined &&
+      previousPath !== keepPath &&
+      this.newestByPath.get(previousPath)?.fileId === fileId
+    ) {
+      this.newestByPath.delete(previousPath);
     }
   }
 }

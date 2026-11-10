@@ -256,4 +256,32 @@ describe("RemoteIndex", () => {
     expect(index.fileIdForHash("same")).toBeNull();
     expect(index.size).toBe(0);
   });
+
+  it("keeps the head the server stamped latest at a path two chains name", () => {
+    const index = new RemoteIndex();
+    const older = { ...head("v1", "h1"), createdAt: "2020-01-01T00:00:00.000Z" };
+    const newer = { ...head("v2", "h2"), createdAt: "2027-01-01T00:00:00.000Z" };
+    index.remember("older", older, "notes/a.md");
+    index.remember("newer", newer, "notes/a.md");
+
+    // `fileIdAt` answers the last one recorded; `newestAt` answers the authority the
+    // owner rule reads.
+    expect(index.fileIdAt("notes/a.md")).toBe("newer");
+    expect(index.newestAt("notes/a.md")).toEqual({ fileId: "newer", head: newer });
+
+    // Recording the older chain last must not hand it the path.
+    index.remember("older", older, "notes/a.md");
+    expect(index.newestAt("notes/a.md")?.fileId).toBe("newer");
+  });
+
+  it("breaks a same-millisecond tie by fileId, and forgets a chain that owned the path", () => {
+    const index = new RemoteIndex();
+    index.remember("b", head("v1", "h1"), "notes/a.md");
+    index.remember("a", head("v2", "h2"), "notes/a.md");
+
+    expect(index.newestAt("notes/a.md")?.fileId).toBe("a");
+
+    index.forget("a");
+    expect(index.newestAt("notes/a.md")).toBeNull();
+  });
 });

@@ -34,7 +34,7 @@ freezeConflictClock();
  * the server while this device's file is still at the old path, and another device can
  * have created a new chain at that path. The pass is concurrent now, so without a path
  * claim the remote-only chain reads the other chain's file as a divergence and parks a
- * conflict copy of content that never conflicted 鈥?the serial pass was what hid this.
+ * conflict copy of content that never conflicted —the serial pass was what hid this.
  */
 /**
  * Seed chain X at `old.md` on a source device, bind a target to it, then let a second
@@ -83,7 +83,7 @@ async function prepare(kind: "move" | "delete") {
 
   // A second device puts a new note at the path this device still holds. It is a
   // first bind on that device, so it keeps its own file instead of applying X's
-  // deletion 鈥?the chain it creates is the one that must land at `old.md`.
+  // deletion —the chain it creates is the one that must land at `old.md`.
   const peerAdapter = new FakeAdapter();
   peerAdapter.files.set("old.md", encoder.encode("new note"));
   const peer = new SyncEngine({
@@ -125,7 +125,7 @@ async function seedChainAt(
   ]);
 }
 
-describe("SyncEngine 鈥?two chains naming one path", () => {
+describe("SyncEngine —two chains naming one path", () => {
   it("applies a peer's move before a new chain at the old path decides", async () => {
     const { target, targetAdapter, conflicts } = await prepare("move");
 
@@ -303,8 +303,8 @@ describe("SyncEngine 鈥?two chains naming one path", () => {
  * The host-facing activity feed.
  *
  * It is not a sync rule: the engine decides exactly the same without a listener. What
- * these cases pin is that the decision is reported **when it is made** 鈥?direction,
- * outcome and, for a skip, the switch that fired 鈥?so the plugin's history can freeze a
+ * these cases pin is that the decision is reported **when it is made** —direction,
+ * outcome and, for a skip, the switch that fired —so the plugin's history can freeze a
  * row instead of reconstructing it from the server's chains and today's settings.
  */
 describe("sync activity", () => {
@@ -579,7 +579,7 @@ function seed(adapter: FakeAdapter, count: number, body = "v1"): string[] {
   return paths;
 }
 
-describe("SyncEngine 鈥?a batch of local events", () => {
+describe("SyncEngine —a batch of local events", () => {
   it("sends the batch's creates 100 files per request", async () => {
     const { engine, adapter, api } = await makeEngine();
     await engine.initialSync();
@@ -611,7 +611,7 @@ describe("SyncEngine 鈥?a batch of local events", () => {
     const edit = api.pushed.filter((file) => file.fileId === fileId).at(-1)!;
     expect(edit.action).toBe("modify");
     expect(edit.baseVersionId).toBe(base);
-    // 151 versions 鈫?two requests, the edit in the first with 99 creates.
+    // 151 versions →two requests, the edit in the first with 99 creates.
     expect(api.pushCalls.slice(before).reduce((total, count) => total + count, 0)).toBe(151);
     await expectConsistent(engine, adapter, api);
   });
@@ -773,7 +773,7 @@ describe("SyncEngine 鈥?a batch of local events", () => {
     api.onPush = null;
 
     // The peer pushed after the point the delete was decided from: the remote side wins
-    // and 鈥?the local file being gone 鈥?its version comes back.
+    // and —the local file being gone —its version comes back.
     expect(new TextDecoder().decode(adapter.files.get("raced.md"))).toBe("peer-v2");
     expect(api.chains.get(fileId)!.map((version) => version.action)).toEqual(["create", "modify"]);
     await expectConsistent(engine, adapter, api);
@@ -963,7 +963,7 @@ describe("SyncEngine 鈥?a batch of local events", () => {
 
     // The source was never tracked (a temp file, a file that appeared and replaced another):
     // the move is a create at the destination, and the destination's chain must be retired
-    // first 鈥?the stale index would otherwise pull the deleted bytes over it.
+    // first —the stale index would otherwise pull the deleted bytes over it.
     adapter.files.set("tmp.md", encoder.encode("moved bytes"));
     adapter.files.delete("dest.md");
     adapter.files.delete("tmp.md");
@@ -1029,7 +1029,7 @@ describe("SyncEngine 鈥?a batch of local events", () => {
     const fileId = engine.fileIdForPath("empty.md")!;
     // A peer deletes the empty note; the local device renames it (a live version whose
     // content hash is also the empty hash). The tombstone must not be adopted as that
-    // version's head 鈥?the peer's deletion is what the chain says.
+    // version's head —the peer's deletion is what the chain says.
     await api.remoteDelete(fileId);
     adapter.files.delete("empty.md");
     adapter.files.set("moved-empty.md", new Uint8Array(0));
@@ -1133,7 +1133,7 @@ describe("SyncEngine 鈥?a batch of local events", () => {
     await engine.initialSync();
     const destId = engine.fileIdForPath("dest.md")!;
     // A peer replaces the destination with an empty file: the tombstone's base is stale, and
-    // every tombstone's content hash is the empty one 鈥?it must not be read as "our delete
+    // every tombstone's content hash is the empty one —it must not be read as "our delete
     // landed".
     await api.remoteEdit(destId, "");
     const before = api.pushed.length;
@@ -1162,7 +1162,7 @@ describe("SyncEngine 鈥?a batch of local events", () => {
     const aId = engine.fileIdForPath("a.md")!;
 
     // A second, untracked copy of the same content, moved while the chain's own path still
-    // holds a file: the identity fallback must not merge the two by content 鈥?which it can
+    // holds a file: the identity fallback must not merge the two by content —which it can
     // only see if the job's listing includes the destination.
     adapter.files.set("b.md", encoder.encode("shared bytes"));
     adapter.files.delete("b.md");
@@ -1235,7 +1235,38 @@ describe("SyncEngine 鈥?a batch of local events", () => {
       "delete",
       "rename",
     ]);
+    // A rename sends no content (invariant 7): the bytes the chain already holds are named
+    // by hash and size, not re-uploaded. The tombstone is why this needs pinning — it
+    // overwrote the state's content hash with the empty one, so a push that reuses content
+    // by that hash would carry the whole file again.
+    const rename = api.pushed.filter((push) => push.action === "rename").at(-1)!;
+    expect(rename.content).toBeNull();
     expect(textOf(adapter, "new.md")).toBe("moved bytes");
+  });
+
+  it("does not let a chain apply its move over a newer chain's file", async () => {
+    const { engine, adapter, api, key } = await makeEngine();
+    adapter.files.set("old.md", encoder.encode("moved bytes"));
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("old.md")!;
+
+    // The peer edits and moves this chain to `new.md`; a chain created *later* owns
+    // `new.md` with other bytes. The move must not apply over the owner's file — the path
+    // a pull writes is the head's recorded one, not the state's.
+    const newPathCipher = await encryptString(key, "new.md");
+    await api.remoteEdit(fileId, "peer edit");
+    await api.remoteRename(fileId, newPathCipher);
+    adapter.files.set("new.md", encoder.encode("theirs"));
+    await seedChainAt(api, key, newPathCipher, {
+      fileId: "fileId-newer",
+      versionId: "version-newer",
+      text: "theirs",
+      createdAt: "2030-01-01T00:00:00.000Z",
+    });
+
+    await engine.initialSync();
+
+    expect(textOf(adapter, "new.md")).toBe("theirs");
   });
 
   it("turns a move the watcher reports as delete+create into one rename", async () => {
@@ -1247,7 +1278,7 @@ describe("SyncEngine 鈥?a batch of local events", () => {
 
     // The CLI's `fs.watch` (and an external tool) reports a move as its two halves: the
     // old path gone and a new path created. The chain never left the tree, so the batch
-    // must send one content-less rename 鈥?not a tombstone the rename then races.
+    // must send one content-less rename —not a tombstone the rename then races.
     adapter.files.delete("old.md");
     adapter.files.set("new.md", encoder.encode("moved bytes"));
     await engine.handleLocalEvents({ changed: ["new.md"], deleted: ["old.md"] });
@@ -1347,7 +1378,7 @@ describe("SyncEngine 鈥?a batch of local events", () => {
     expect(theirs).not.toBe(mine);
 
     // The recreate arrives in a batch: the restore must ask who owns the path, exactly as
-    // the single event does 鈥?the owner keeps it, and this device's tombstone is retired.
+    // the single event does —the owner keeps it, and this device's tombstone is retired.
     adapter.files.set("reborn.md", encoder.encode("second life"));
     await engine.handleLocalEvents({ changed: ["reborn.md"] });
 

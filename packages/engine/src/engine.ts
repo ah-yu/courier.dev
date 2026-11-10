@@ -56,7 +56,7 @@ import {
   type TombstoneHandling,
 } from "./decide";
 import { SelfEventLog } from "./self-events";
-import { RemoteIndex } from "./remote-index";
+import { RemoteIndex, isNewerHead } from "./remote-index";
 import {
   ContentPrefetcher,
   normalizePrefetchLimits,
@@ -64,7 +64,6 @@ import {
 } from "./content-prefetch";
 import {
   chainPaths,
-  isNewerHead,
   orderedFileIds,
   pathOwners,
   prefetchCandidatesForBurst,
@@ -2059,7 +2058,7 @@ export class SyncEngine {
     fileId: string,
     pass: ReconcilePass,
     pendingDeletes: PendingTombstone[],
-    owners: ReadonlyMap<string, string>,
+    owners: Map<string, string>,
   ): Promise<unknown> {
     const { localHashes, chainByFileId } = pass;
     const { skippedPaths, localStamps } = pass;
@@ -2180,14 +2179,15 @@ export class SyncEngine {
     //
     // A `delete` head applying its deletion is not such a write: the bytes it removes are
     // the ones the tombstone deleted (that is the only case `decideFile` pulls one), which
-    // is what frees the path for the chain that now owns it. A conflict is: it parks a
-    // file that belongs to somebody else.
+    // is what frees the path for the chain that now owns it. A conflict is: it resolves by
+    // applying the head — at the path the head records — and parks beside the local path.
     if ((decision.action === "pull" || decision.action === "conflict") && plainPath !== null) {
-      // A pull writes where the head records its path (a peer's move); a conflict parks
-      // beside the path this device holds.
-      const claimed = decision.action === "pull" ? (recordedPath ?? plainPath) : plainPath;
-      const owner = owners.get(claimed);
+      // Both actions apply the head through `pullRemote`, which follows the path the head
+      // **records** (a peer's move); `plainPath` is only read, to be parked beside. So the
+      // path another chain can lose is the recorded one.
       const removesTheDeletedBytes = decision.action === "pull" && head?.action === "delete";
+      const writtenPath = recordedPath ?? plainPath;
+      const owner = owners.get(writtenPath);
       if (owner !== undefined && owner !== fileId && !removesTheDeletedBytes) return null;
     }
 
@@ -2205,11 +2205,11 @@ export class SyncEngine {
         });
       case "none":
         break;
-      case "push":
+      case "push": {
         // Only a push that names a path can be sent; a decision without one has nothing
         // to write to.
         if (!plainPath) break;
-        return await this.settlePushed({
+        const failure = await this.settlePushed({
           fileId,
           plainPath,
           decision,
@@ -2217,6 +2217,13 @@ export class SyncEngine {
           localExists,
           pendingDeletes,
         });
+        // The chain this device just pushed — or whose edit it tried to push — is the
+        // newest at this path on the server from here on. The owner map is a start-of-pass
+        // snapshot; leaving it stale lets a later decision in the same pass read the other
+        // chain as the owner and overwrite the bytes that were just published.
+        owners.set(plainPath, fileId);
+        return failure;
+      }
       case "pull": {
         if (!head || !plainPath) break;
         await this.pullRemote(fileId, plainPath, head, localContentHash);
@@ -2554,8 +2561,16 @@ export class SyncEngine {
               fileId: deleted.fileId,
               plainPath: path,
               action: "rename",
-              bytes: read.bytes,
+              // A stamp-proved move: the chain's previous live version holds these bytes,
+              // so the push names the hash and the size and carries no payload (invariant
+              // 7). Passing `bytes` here re-uploaded every renamed note, because the
+              // tombstone had just overwritten the state's content hash with the empty
+              // one — `preparePush` reuses stored content only when that hash matches. A
+              // store that no longer holds the blob answers `content_missing`, and the
+              // retry reads and sends the file.
+              bytes: undefined,
               contentHash: movedHash,
+              sizeBytes: read.bytes.byteLength,
               baseVersionId: moved.lastKnownVersionId,
               stamp: read.stamp,
             });
@@ -4743,12 +4758,9 @@ export class SyncEngine {
       return;
     }
 
-    // Who owns this path before the notification claims it, and whether this chain is the
-    // older of two that name it: a notification is the same decision a pass makes, so the
-    // ownership rule has to hold here too, or the losing chain overwrites the file the
-    // moment its push is announced (see `pathOwners`).
-    const ownerBefore = this.remoteIndex.fileIdAt(plainPath);
-    const ownerHeadBefore = ownerBefore === null ? undefined : this.remoteIndex.headOf(ownerBefore);
+    // Who owns this path is answered by `newestAt` after the remember below: a
+    // notification is the same decision a pass makes, so the losing chain must not write
+    // here either (see `pathOwners`).
 
     // Keep the remote identity index fresh: the vault event for this path (should the
     // adapter fire one) must recognise it as this fileId, not as a new file. A
@@ -4798,12 +4810,18 @@ export class SyncEngine {
     // Two live chains can name one path, and only the one the server stamped latest may
     // write the file (see `pathOwners`). A `delete` head applying its own deletion is not
     // such a write: the bytes it removes are the ones the tombstone deleted.
+    //
+    // The path checked is the one the apply would write: a pull follows the head's own
+    // path (a peer's move), and a conflict applies that head and parks beside the local
+    // path, so both are candidates. `newestAt` answers with the newest recorded head, not
+    // the last one recorded, which is what makes every device agree.
+    const writtenPath = headPath ?? plainPath;
+    const rival = this.remoteIndex.newestAt(writtenPath) ?? this.remoteIndex.newestAt(plainPath);
     const losesThePath =
-      ownerBefore !== null &&
-      ownerHeadBefore !== undefined &&
-      ownerBefore !== fileId &&
+      rival !== null &&
+      rival.fileId !== fileId &&
       head.action !== "delete" &&
-      isNewerHead({ fileId: ownerBefore, head: ownerHeadBefore }, { fileId, head });
+      isNewerHead(rival, { fileId, head });
 
     if (decision.action === "pull") {
       if (losesThePath) return;

@@ -29,8 +29,10 @@ import type { FileStamp } from "./adapter";
  * therefore forked one chain per file on a bulk move — a tombstone under the old path and
  * a brand-new chain under the new one — which is exactly what this memory exists to
  * prevent ("one path, one chain"). It is sized to one **pass** interval instead
- * (`DEFAULT_RECONCILE_INTERVAL_MS`): a full reconcile lists every file and gives it an
- * identity anyway, so outliving one is as long as the record can matter.
+ * (`DEFAULT_RECONCILE_INTERVAL_MS` in `host.ts`, repeated here because the host imports the
+ * engine and not the other way round; a test pins the two together): a full reconcile lists
+ * every file and gives it an identity anyway, so outliving one is as long as the record can
+ * matter.
  */
 export const DEFAULT_RENAME_WINDOW_MS = 5 * 60_000;
 
