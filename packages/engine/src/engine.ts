@@ -2467,8 +2467,11 @@ export class SyncEngine {
       recordedPath !== plainPath &&
       !isConflictFile(recordedPath)
     ) {
-      const read = await this.readWithStamp(plainPath);
-      if (read) {
+      // A content-less rename: the decision is `synced`, so the bytes on disk are the head's
+      // and the push only has to name them (invariant 7). Reading them to carry a payload
+      // would hold every renamed attachment of a bulk move in memory until the batch drains.
+      const stamp = localStamps.get(plainPath) ?? (await this.opts.adapter.statFile(plainPath));
+      if (stamp) {
         // Decided from this pass's chain: that head is the base, so a peer that pushed
         // during the pass has its version refused rather than built over. Prepared here and
         // pushed with the pass's other renames, 100 per request: a bulk move no host
@@ -2478,9 +2481,11 @@ export class SyncEngine {
           fileId,
           plainPath,
           action: "rename",
-          bytes: read.bytes,
+          bytes: undefined,
+          contentHash: head.contentHash,
+          sizeBytes: head.sizeBytes,
           baseVersionId: head.versionId,
-          stamp: read.stamp,
+          stamp,
         });
         if (prepared) pendingRenames.push(prepared);
       }

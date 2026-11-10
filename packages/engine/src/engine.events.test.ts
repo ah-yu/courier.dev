@@ -1328,6 +1328,26 @@ describe("SyncEngine — a batch of local events", () => {
     expect(textOf(adapter, "note.md")).toBe("theirs");
   });
 
+  it("re-points a move no event reported without sending its bytes", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("old.md", encoder.encode("moved bytes"));
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("old.md")!;
+
+    // The vault was reorganised while nothing watched: no event at all, and the pass finds
+    // the chain's recorded path gone and one unclaimed file holding its bytes.
+    adapter.files.delete("old.md");
+    adapter.files.set("new.md", encoder.encode("moved bytes"));
+    await engine.initialSync();
+
+    expect(engine.fileIdForPath("new.md")).toBe(fileId);
+    expect(api.chains.get(fileId)!.map((version) => version.action)).toEqual(["create", "rename"]);
+    // A rename sends no content (invariant 7) — and a pass that re-points a bulk move must
+    // not hold every renamed file's plaintext until its batch drains.
+    const rename = api.pushed.filter((push) => push.action === "rename").at(-1)!;
+    expect(rename.content).toBeNull();
+  });
+
   it("turns a move the watcher reports as delete+create into one rename", async () => {
     const { engine, adapter, api } = await makeEngine();
     adapter.files.set("old.md", encoder.encode("moved bytes"));

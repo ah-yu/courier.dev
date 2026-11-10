@@ -92,7 +92,12 @@ describe("a bulk rename through a real server", () => {
     await server.close();
   });
 
-  async function startHost(vaultId: string, dir: string, label: string): Promise<TestHost> {
+  async function startHost(
+    vaultId: string,
+    dir: string,
+    label: string,
+    reconcileMs = 1_000,
+  ): Promise<TestHost> {
     const adapter = new EchoingAdapter(dir, normalizeScope({ configDir: ".obsidian" }));
     let state: string | null = null;
     let bindCompleted = false;
@@ -137,8 +142,10 @@ describe("a bulk rename through a real server", () => {
       stateStore,
       platform: realPlatform,
       // A pass as the safety net every real host has: a notification this busy test server
-      // drops must not leave a peer waiting for a reconcile that is five minutes away.
-      reconcileIntervalMs: 1_000,
+      // drops must not leave a peer waiting for a reconcile that is five minutes away. The
+      // delete+create case turns it off (`0`): it is about the event batch, and a pass that
+      // lists the vault between the two halves is the *other* shape (see the split case).
+      reconcileIntervalMs: reconcileMs,
       settingsPollIntervalMs: 0,
       log: () => {},
     });
@@ -211,8 +218,13 @@ describe("a bulk rename through a real server", () => {
 
   it("keeps one live chain per note when a watcher reports the move as delete+create", async () => {
     const vault = await createTestVault(server, "bulk-rename", material);
-    const mac = await startHost(vault.id, mkdtempSync(join(tmpdir(), "rename-mac-")), "mac");
-    const phone = await startHost(vault.id, mkdtempSync(join(tmpdir(), "rename-phone-")), "phone");
+    const mac = await startHost(vault.id, mkdtempSync(join(tmpdir(), "rename-mac-")), "mac", 0);
+    const phone = await startHost(
+      vault.id,
+      mkdtempSync(join(tmpdir(), "rename-phone-")),
+      "phone",
+      0,
+    );
 
     try {
       const events = mac.adapter.handlers!;
