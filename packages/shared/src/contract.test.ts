@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { CONTRACT_GENERATION, MIN_CLIENT_CONTRACT, contractVerdict } from "./contract";
+import {
+  CONTRACT_GENERATION,
+  MIN_CLIENT_CONTRACT,
+  contractVerdict,
+  isHealthResponse,
+} from "./contract";
 
 /**
  * The verdict is the one piece of judgement every host shares, so its outcomes are pinned
@@ -46,5 +51,33 @@ describe("contractVerdict", () => {
 
   it("treats an absent floor as 1, not as 'no client is served'", () => {
     expect(contractVerdict({ generation: CONTRACT_GENERATION })).toBe("ok");
+  });
+});
+
+/**
+ * The guard in front of the numbers.
+ *
+ * A 200 from a proxy, or a captive portal's page, is not the health document: reading
+ * `generation` out of it gives `undefined`, which reads as generation 1, which reports a
+ * version mismatch for what is really a broken connection.
+ */
+describe("isHealthResponse", () => {
+  it("accepts the document every build has sent", () => {
+    expect(isHealthResponse({ status: "ok", timestamp: "2026-11-10T00:00:00.000Z" })).toBe(true);
+    // The generation fields are optional by design: the first build with the mechanism still
+    // speaks the same two fields.
+    expect(isHealthResponse({ status: "ok", timestamp: "t", generation: 3, minClient: 1 })).toBe(
+      true,
+    );
+  });
+
+  it("rejects anything that is not that document", () => {
+    expect(isHealthResponse(null)).toBe(false);
+    expect(isHealthResponse(undefined)).toBe(false);
+    expect(isHealthResponse("ok")).toBe(false);
+    expect(isHealthResponse([])).toBe(false);
+    expect(isHealthResponse({})).toBe(false);
+    expect(isHealthResponse({ status: "ok" })).toBe(false);
+    expect(isHealthResponse({ error: "CONTRACT_MISMATCH", message: "…" })).toBe(false);
   });
 });
