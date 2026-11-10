@@ -360,11 +360,11 @@ file now lives at.
   when the pass's cached hash answered first, because parking is the only thing that keeps the note's
   own text. A `delete` head applying its own deletion is not such a write: the bytes it removes are the
   ones the tombstone deleted, which is what frees the path for the chain that now owns it. The loser is
-  not retired: it keeps its own bytes where they are and may still push an edit of its own, but it
-  cannot take the file's content from the owner, so the duplicate chain persists at the path until one
-  of the two is deleted — the cost of never deleting a chain a peer may still hold. Covered by
-  `pathOwners` in `pass-view.test.ts`, `newestAt` in `remote-index.test.ts`, and the two-chain cases in
-  `engine.events.test.ts`.
+  not retired: its own bytes are what the owner's resolution parks, and a later push on that chain
+  carries whatever the local file then holds (normally the owner's content), so the duplicate chain
+  persists at the path until one of the two is deleted — the cost of never deleting a chain a peer may
+  still hold. Covered by `pathOwners` in `pass-view.test.ts`, `newestAt` in `remote-index.test.ts`, and
+  the two-chain cases in `engine.events.test.ts`.
 
 ## Offline changes and reconciliation
 

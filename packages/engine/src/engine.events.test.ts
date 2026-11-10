@@ -1269,6 +1269,31 @@ describe("SyncEngine — a batch of local events", () => {
     expect(textOf(adapter, "new.md")).toBe("theirs");
   });
 
+  it("does not let a newer tombstone delete the path's owner", async () => {
+    const { engine, adapter, api, key } = await makeEngine();
+    adapter.files.set("note.md", encoder.encode("mine"));
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("note.md")!;
+    const pathCipher = await encryptString(key, "note.md");
+
+    // A newer chain owns the path, and *then* this device's chain is deleted — the
+    // tombstone carries the later stamp, but a tombstone owns nothing: its conflict must not
+    // delete the owner's file and park those bytes.
+    await seedChainAt(api, key, pathCipher, {
+      fileId: "fileId-owner",
+      versionId: "version-owner",
+      text: "theirs",
+      createdAt: "2030-01-01T00:00:00.000Z",
+    });
+    await engine.initialSync();
+    expect(textOf(adapter, "note.md")).toBe("theirs");
+
+    const deleteVersion = await api.remoteDelete(fileId);
+    await engine.handleFilePushedBatch([{ fileId, versionId: deleteVersion }]);
+
+    expect(textOf(adapter, "note.md")).toBe("theirs");
+  });
+
   it("turns a move the watcher reports as delete+create into one rename", async () => {
     const { engine, adapter, api } = await makeEngine();
     adapter.files.set("old.md", encoder.encode("moved bytes"));

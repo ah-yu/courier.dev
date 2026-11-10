@@ -286,4 +286,17 @@ describe("RemoteIndex", () => {
     index.forget("a");
     expect(index.newestAt("notes/a.md")?.fileId).toBe("b");
   });
+
+  it("falls back when the newest chain moves to another path", () => {
+    const index = new RemoteIndex();
+    index.remember("a", head("v2", "h2"), "notes/a.md");
+    index.remember("b", head("v1", "h1"), "notes/a.md");
+
+    index.remember("a", head("v2", "h2"), "notes/b.md");
+
+    // `a` left `notes/a.md` for `notes/b.md`; the chain still recorded at the old path is
+    // the owner there, not nobody.
+    expect(index.newestAt("notes/a.md")?.fileId).toBe("b");
+    expect(index.newestAt("notes/b.md")?.fileId).toBe("a");
+  });
 });
