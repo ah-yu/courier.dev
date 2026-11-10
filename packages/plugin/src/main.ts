@@ -12,7 +12,9 @@ import {
   normalizeDeviceName,
   normalizeHistoryLimit,
   sortedCopy,
+  contractVerdict,
   type CreateVaultResponse,
+  type HealthResponse,
   type HistoryLimits,
   type HttpTransport,
   type UserSummary,
@@ -485,6 +487,10 @@ export default class CourierPlugin extends Plugin {
         // because pausing exists to stop syncing without the credentials coming out. The
         // settings page offers 继续同步, which takes the normal unlock path.
         this.refreshSettings();
+        // A paused vault never starts a host, so the contract probe never runs and the
+        // connection row would read a bare "已暂停" after a reload. `/api/health` is
+        // unauthenticated: one best-effort ask is enough for the row to say *why*.
+        void this.probeServerForDisplay();
       } else {
         void this.autoUnlockOrPrompt();
       }
@@ -1039,6 +1045,9 @@ export default class CourierPlugin extends Plugin {
     await unbindVault(this.app, this);
     clearSyncLog();
     this.vaultHistoryLimits = null;
+    // The observation belonged to the vault that is now gone: a new binding must not be
+    // labelled with the previous server for the moment before its own probe lands.
+    this.serverContract = null;
     // The page returns to 选择远程库; that transition is the confirmation.
     this.refreshSettings();
   }
@@ -1054,6 +1063,8 @@ export default class CourierPlugin extends Plugin {
     await unbindVault(this.app, this, { forgetAccount: true });
     clearSyncLog();
     this.vaultHistoryLimits = null;
+    // The observation belonged to the account that just went away.
+    this.serverContract = null;
     this.forgetAccount();
     // The page returns to the sign-in step; that transition is the confirmation.
     this.refreshSettings();
@@ -1754,6 +1765,7 @@ export default class CourierPlugin extends Plugin {
       await unbindVault(this.app, this, { forgetAccount: true });
       clearSyncLog();
       this.vaultHistoryLimits = null;
+      this.serverContract = null;
       this.forgetAccount();
       this.refreshSettings();
       return;
@@ -1774,6 +1786,36 @@ export default class CourierPlugin extends Plugin {
     this.stopHost();
     showNotice(t(reason === "expired" ? "notice.keyExpired" : "notice.keyDisabled"));
     this.refreshSettings();
+  }
+
+  /**
+   * A paused vault never starts a host, so the probe of a normal start never runs.
+   *
+   * `/api/health` needs no key, so one ask is enough for the connection row to explain the
+   * pause after a reload — "服务端版本太旧，请升级" instead of a bare "已暂停". Best effort:
+   * an unreachable server leaves the row as it was, and nothing here starts a host, takes
+   * the lease or writes anything.
+   */
+  private async probeServerForDisplay(): Promise<void> {
+    let health: HealthResponse;
+    try {
+      const response = await requestUrl({
+        url: `${getServerUrl(this.settings)}/api/health`,
+        method: "GET",
+        throw: false,
+      });
+      health = response.json as HealthResponse;
+    } catch {
+      return;
+    }
+    if (this.unloaded) return;
+    this.serverContract = {
+      verdict: contractVerdict(health),
+      serverGeneration: health.generation ?? 1,
+      serverMinClient: health.minClient ?? 1,
+      serverVersion: health.version ?? null,
+    };
+    this.refreshLiveState();
   }
 
   /**

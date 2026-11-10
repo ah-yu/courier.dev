@@ -88,7 +88,7 @@ const GATES = [
     // (`packages/shared/contract/<n>.surface.json`). A changed field, route, error
     // code or shared constant fails here until `contract.ts` says what the change
     // means, which is what keeps an agent from shipping a wire change without a
-    // generation bump. The message it prints names the three numbers to write.
+    // generation bump. The message it prints names the numbers to write.
     name: "contract",
     command: process.execPath,
     args: ["scripts/contract/main.ts"],

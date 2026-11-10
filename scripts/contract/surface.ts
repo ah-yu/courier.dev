@@ -81,7 +81,6 @@ const TYPE_EXCLUSIONS = new Set([
 const CONSTANT_EXCLUSIONS = new Set([
   "CONTRACT_GENERATION",
   "MIN_CLIENT_CONTRACT",
-  "MIN_SERVER_CONTRACT",
   "DEFAULT_SERVER_URL",
   "DEFAULT_HISTORY_LIMITS",
   "DEFAULT_MAX_FILE_BYTES",
@@ -104,11 +103,10 @@ const PRIMITIVE_KEYWORDS = new Set([
   "object",
 ]);
 
-/** The three numbers, read from their declaration so nothing here imports the module. */
+/** The generations, read from their declaration so nothing here imports the module. */
 export interface Generations {
   contract: number;
   minClient: number;
-  minServer: number;
 }
 
 /** Read the generation constants out of `packages/shared/src/contract.ts`. */
@@ -132,7 +130,6 @@ export function readGenerations(repoRoot: string): Generations {
   return {
     contract: value("CONTRACT_GENERATION"),
     minClient: value("MIN_CLIENT_CONTRACT"),
-    minServer: value("MIN_SERVER_CONTRACT"),
   };
 }
 

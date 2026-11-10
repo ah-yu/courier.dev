@@ -554,12 +554,21 @@ export class SyncHost {
   /** Start (or restart) the engine, the event source and the vault WebSocket. */
   async start(): Promise<void> {
     this.stop();
+    // `stop()` bumps the generation, so this is the epoch this start owns. The probe below
+    // is the one await before the engine is built, and a `stop()` that lands inside it (a
+    // pause, an unload, a scope change, a restart) must win: without this check the
+    // continuation would clear `stopped`, build an engine and open a socket for a host the
+    // caller has already dropped — an orphan writer holding no lease.
+    const epoch = this.generation;
 
     // Before anything is built or written: can these two builds work together at all?
     // A mismatch is not a transient failure — retrying it every pass produces a client
     // that looks like it is syncing while nothing it sends can be read, the same shape as
     // a dead credential. Nothing is constructed on this path, so there is nothing to drain.
     const contract = await this.probeServerContract();
+    // Only the epoch: `stopped` is still true here on the ordinary path (the build below is
+    // what clears it), so a stop is detected by the generation it bumped.
+    if (this.generation !== epoch) return;
     if (contract !== null) {
       this.opts.onServerContract?.(contract);
       if (contract.verdict !== "ok") return;

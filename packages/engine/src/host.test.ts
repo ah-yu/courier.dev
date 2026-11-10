@@ -6,7 +6,7 @@ import {
   restoreGlobals,
   realPlatform,
 } from "@courier/testing";
-import { sortedCopy } from "@courier/shared";
+import { CONTRACT_GENERATION, sortedCopy } from "@courier/shared";
 import {
   LOCAL_EVENT_BURST_FLUSH_MS,
   LOCAL_EVENT_BURST_SIZE,
@@ -1263,5 +1263,136 @@ describe("SyncHost", () => {
       }
       expect((second as { changed?: string[] }).changed ?? []).toEqual([]);
     });
+  });
+});
+
+/**
+ * What a health endpoint answers, for the contract-probe cases.
+ *
+ * Module scope because it captures nothing: the lint rules treat a function that could live
+ * outside a block as a warning, and a warning fails `bun run verify`.
+ */
+function healthy(generation: number, minClient = 1): Record<string, unknown> {
+  return {
+    status: "ok",
+    timestamp: "2026-11-10T00:00:00.000Z",
+    generation,
+    minClient,
+    version: "0.6.0",
+  };
+}
+
+/**
+ * The contract probe: what a host does when the server answers `/api/health` with a window
+ * this build is outside.
+ *
+ * The guarantee is structural — the probe runs before anything is built — so the assertion
+ * that matters is an absence: no engine, no index read, no push.
+ */
+describe("the contract probe", () => {
+  const started: SyncHost[] = [];
+  afterEach(() => {
+    for (const host of started) host.stop();
+    started.length = 0;
+  });
+
+  /** A host over an API that records its calls, with a health endpoint answering `health`. */
+  async function probedHost(
+    health: Record<string, unknown>,
+    overrides: Partial<SyncHostOptions> = {},
+  ): Promise<{ host: SyncHost; api: Record<string, ReturnType<typeof vi.fn>> }> {
+    const api = { ...fakeApi(), getServerInfo: vi.fn(async () => health) };
+    const { host } = await newHost({ api: api as unknown as SyncApi, ...overrides });
+    started.push(host);
+    return { host, api };
+  }
+
+  it("reports the server and starts when the window matches", async () => {
+    const onServerContract = vi.fn();
+    const { host, api } = await probedHost(healthy(CONTRACT_GENERATION), { onServerContract });
+
+    await host.start();
+
+    expect(onServerContract).toHaveBeenCalledWith(
+      expect.objectContaining({ verdict: "ok", serverGeneration: CONTRACT_GENERATION }),
+    );
+    // The probe passed, so the bind pass ran.
+    expect(api.getVaultSyncIndex).toHaveBeenCalled();
+  });
+
+  it("stops before building an engine when the server is too old", async () => {
+    const onServerContract = vi.fn();
+    const { host, api } = await probedHost(healthy(CONTRACT_GENERATION - 1), { onServerContract });
+
+    await host.start();
+
+    expect(onServerContract).toHaveBeenCalledWith(
+      expect.objectContaining({ verdict: "server-too-old" }),
+    );
+    // Nothing was built and nothing was written.
+    expect(host.engine).toBeNull();
+    expect(api.getVaultSyncIndex).not.toHaveBeenCalled();
+    expect(api.push).not.toHaveBeenCalled();
+    expect(host.wsState).toBe("disconnected");
+  });
+
+  it("stops when the server's floor is above this build", async () => {
+    const onServerContract = vi.fn();
+    const { host, api } = await probedHost(
+      healthy(CONTRACT_GENERATION + 1, CONTRACT_GENERATION + 1),
+      { onServerContract },
+    );
+
+    await host.start();
+
+    expect(onServerContract).toHaveBeenCalledWith(
+      expect.objectContaining({ verdict: "client-too-old" }),
+    );
+    expect(host.engine).toBeNull();
+    expect(api.getVaultSyncIndex).not.toHaveBeenCalled();
+  });
+
+  it("does not mistake an unreachable server for a mismatch", async () => {
+    const onServerContract = vi.fn();
+    const api: Record<string, ReturnType<typeof vi.fn>> = {
+      ...fakeApi(),
+      getServerInfo: vi.fn(async () => {
+        throw new Error("ECONNREFUSED");
+      }),
+    };
+    const { host } = await newHost({ api: api as unknown as SyncApi, onServerContract });
+    started.push(host);
+
+    await host.start();
+
+    // No verdict is reported; the ordinary pass runs and fails on its own terms.
+    expect(onServerContract).not.toHaveBeenCalled();
+    expect(api.getVaultSyncIndex).toHaveBeenCalled();
+  });
+
+  it("does not resurrect a host that was stopped while the probe was in flight", async () => {
+    // The probe is the one await before the engine is built, so a pause that lands inside it
+    // must win: otherwise the continuation clears `stopped` and builds an engine for a host
+    // the caller has already dropped — an orphan writer holding no lease.
+    let release!: (health: unknown) => void;
+    const pending = new Promise((resolve) => {
+      release = resolve;
+    });
+    const api: Record<string, ReturnType<typeof vi.fn>> = {
+      ...fakeApi(),
+      getServerInfo: vi.fn(() => pending),
+    };
+    const { host } = await newHost({ api: api as unknown as SyncApi });
+    started.push(host);
+
+    const starting = host.start();
+    host.stop();
+    release(healthy(CONTRACT_GENERATION));
+    await starting;
+
+    expect(host.engine).toBeNull();
+    expect(api.getVaultSyncIndex).not.toHaveBeenCalled();
+    expect(api.push).not.toHaveBeenCalled();
+    expect(host.wsState).toBe("disconnected");
   });
 });

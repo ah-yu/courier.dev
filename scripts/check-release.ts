@@ -27,11 +27,7 @@
 import { readFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
-import {
-  CONTRACT_GENERATION,
-  MIN_CLIENT_CONTRACT,
-  MIN_SERVER_CONTRACT,
-} from "../packages/shared/src/contract.ts";
+import { CONTRACT_GENERATION, MIN_CLIENT_CONTRACT } from "../packages/shared/src/contract.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
@@ -197,7 +193,7 @@ if (failures.length > 0) {
 // generation moved, and the release log is where that is first visible.
 console.error(
   `[release] contract generation ${CONTRACT_GENERATION} ` +
-    `(serves clients >= ${MIN_CLIENT_CONTRACT}; clients need servers >= ${MIN_SERVER_CONTRACT})`,
+    `(serves clients >= ${MIN_CLIENT_CONTRACT}; clients need servers >= ${CONTRACT_GENERATION})`,
 );
 
 console.log(server.version);

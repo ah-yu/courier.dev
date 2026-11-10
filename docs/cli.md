@@ -187,7 +187,8 @@ times. Before `run`, `vault connect` and `vault create` touch anything, the CLI 
 ([api.md](api.md#contract-generation)):
 
 - **the server is older** than this CLI can use — including a server built before the check
-  existed — the command prints one line naming the server's version and exits with **`78`**;
+  existed — the command prints one line saying the server's version is too old and exits with
+  **`78`**;
 - **this CLI is older** than the server still serves, the line says to update `courier-cli`
   instead, and the exit code is the same;
 - anything else works: an older CLI keeps syncing against a newer server, because an

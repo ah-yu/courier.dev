@@ -18,7 +18,7 @@ import { httpToWsUrl } from "@courier/shared";
 import { plural, t } from "./i18n";
 import { FsAdapter } from "./fs-adapter";
 import { createCliClient, createCliSyncApi } from "./api";
-import { VERSION } from "./version";
+import { EXIT_CONTRACT_MISMATCH } from "./server-contract";
 import { LeaseStore, watchLeaseRelease } from "./lease";
 import {
   loadBindCompleted,
@@ -388,6 +388,8 @@ export async function runDaemon(
   let host: SyncHost | null = null;
   let stopped = false;
   let fatal = false;
+  /** A terminal mismatch: the exit code the process must leave with, once the lease is gone. */
+  let fatalExitCode = 0;
   let startupError: Error | null = null;
   let leaseHeld = false;
   let leaseWaiting = false;
@@ -675,17 +677,18 @@ export async function runDaemon(
         // The command already asked before taking the lease, so this is the narrow race
         // where the server changed in between (or a host built by another caller). It is
         // still fatal: the daemon cannot wait for a server upgrade it cannot perform.
-        // `lastError` is where `status` reads a reason it has no field for.
+        // `lastError` is where `status` reads a reason it has no field for, and the exit
+        // code is the same 78 the pre-flight uses — this path must not look like a healthy
+        // daemon that happened to stop.
         fatal = true;
-        const server = info.serverVersion ?? `contract ${info.serverGeneration}`;
         const message = t(
           info.verdict === "client-too-old"
             ? "cli.error.contractClientOutdated"
             : "cli.error.contractServerOutdated",
-          { server, cli: VERSION },
         );
         runtime.set({ phase: "stopped", reason: "failed", lastError: message });
         log(opts, message);
+        fatalExitCode = EXIT_CONTRACT_MISMATCH;
       },
     });
     try {
@@ -817,6 +820,10 @@ export async function runDaemon(
     await finalHost?.whenIdle();
     await releaseLease();
     if (stopped) runtime.clear();
+    // A mismatch is a configuration fact, not a crash: the line has already been printed,
+    // and the code is what a supervisor reads (`RestartPreventExitStatus=78`). It is set
+    // only by the callback above, so the ordinary stop path still exits 0.
+    if (fatalExitCode !== 0) process.exit(fatalExitCode);
   };
 
   void run();

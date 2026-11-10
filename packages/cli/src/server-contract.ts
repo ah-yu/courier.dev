@@ -16,6 +16,15 @@ import { t } from "./i18n";
  */
 export const EXIT_CONTRACT_MISMATCH = 78;
 
+/**
+ * How long the pre-flight waits for `/api/health`.
+ *
+ * A server that hangs instead of refusing would otherwise block `run`, `vault connect` and
+ * `vault create` before any retry loop exists. A timeout is not a mismatch: it is the
+ * ordinary "cannot reach" path, which already knows how to report and retry.
+ */
+const PROBE_TIMEOUT_MS = 5_000;
+
 /** This CLI and the server cannot work together. The message says which side to upgrade. */
 export class ServerContractError extends Error {}
 
@@ -30,7 +39,7 @@ export async function ensureCompatibleServer(config: {
   userKey: string;
 }): Promise<void> {
   const client = createCliClient({ serverUrl: config.serverUrl, userKey: config.userKey });
-  const health = await client.getServerInfo();
+  const health = await withTimeout(client.getServerInfo(), PROBE_TIMEOUT_MS);
   const verdict = contractVerdict(health);
   if (verdict === "ok") return;
 
@@ -41,4 +50,22 @@ export async function ensureCompatibleServer(config: {
         : "cli.error.contractServerOutdated",
     ),
   );
+}
+
+/** Settle with `work`, or reject once `ms` has passed. A timeout reads as "unreachable". */
+function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`no answer within ${ms}ms`)), ms);
+    timer.unref?.();
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error as Error);
+      },
+    );
+  });
 }

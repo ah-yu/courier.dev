@@ -1,5 +1,5 @@
 /**
- * The rule that turns a surface difference into the three numbers to write.
+ * The rule that turns a surface difference into the numbers to write.
  *
  * The whole design rests on one question — *would the old side misread this byte?* — and
  * this module answers it mechanically for everything the surface can see. Three outcomes:
@@ -8,7 +8,7 @@
  * - **additive**: a peer that predates the change still reads it correctly (a new optional
  *   field, a new route, a new type). Only `CONTRACT_GENERATION` moves.
  * - **breaking**: an older peer would misread what it receives, or send something the newer
- *   side reads differently. All three numbers move.
+ *   side reads differently. Every number moves.
  *
  * A new **required** property is treated as breaking on purpose: for a response an older
  * client would ignore it, but for a request the older client cannot send it, and the
@@ -334,14 +334,70 @@ function diffConstants(
       changes.push({ verdict: "additive", path: name, detail: "new constant", name });
       continue;
     }
-    if (before !== value) {
-      changes.push({
-        verdict: "breaking",
-        path: name,
-        detail: `changed from ${before} to ${value}; both sides must agree on this value`,
-      });
+    if (before === value) continue;
+
+    // An `as const` array of literals (the error codes, the sync actions, the history
+    // kinds) is a **set**, not a string: adding a member is additive — an older peer simply
+    // never produces it — and only removing one breaks a reader. Comparing the text instead
+    // made a new error code read as "breaking", which would have raised the client floor for
+    // a change no old client can notice.
+    const beforeMembers = arrayMembers(before);
+    const afterMembers = arrayMembers(value);
+    if (beforeMembers !== null && afterMembers !== null) {
+      const beforeSet = new Set(beforeMembers);
+      const afterSet = new Set(afterMembers);
+      for (const member of afterMembers) {
+        if (!beforeSet.has(member)) {
+          changes.push({ verdict: "additive", path: `${name}[]`, detail: `new member ${member}` });
+        }
+      }
+      for (const member of beforeMembers) {
+        if (!afterSet.has(member)) {
+          changes.push({
+            verdict: "breaking",
+            path: `${name}[]`,
+            detail: `member ${member} is gone`,
+          });
+        }
+      }
+      continue;
     }
+
+    changes.push({
+      verdict: "breaking",
+      path: name,
+      detail: `changed from ${before} to ${value}; both sides must agree on this value`,
+    });
   }
+}
+
+/**
+ * The members of an `as const` array of literals, or null when the value is anything else.
+ *
+ * The surface stores a constant as its printed source text, so this is where that text is
+ * read back as what it means: a set of strings and numbers.
+ */
+export function arrayMembers(value: string): string[] | null {
+  // A comment inside the array is not a member: the surface stores the printed source, and
+  // an error-code list is exactly where a "why this code exists" comment lands. Left in, it
+  // made the member list unreadable and the set fell back to a text compare — the bug this
+  // function exists to prevent.
+  const stripped = value
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/[^\n]*/g, "")
+    .trim();
+  const match = /^\[\s*([\s\S]*?)\s*\]\s*as const$/.exec(stripped);
+  if (match === null) return null;
+  const body = match[1] ?? "";
+  if (body.trim() === "") return [];
+  const members: string[] = [];
+  for (const raw of body.split(",")) {
+    const member = raw.trim();
+    if (member === "") continue;
+    if (!/^(["'])[^"']*\1$/.test(member) && !/^-?\d+$/.test(member)) return null;
+    members.push(member);
+  }
+  return members;
 }
 
 function shapeKind(shape: Shape): string {

@@ -64,33 +64,31 @@ once, and the server is whatever an administrator deployed. The version string c
 "can these two work together" — it moves on every release, including the ones that do not touch the
 API. A **contract generation** does.
 
-Three integers in [`packages/shared/src/contract.ts`](../packages/shared/src/contract.ts) are the
+Two integers in [`packages/shared/src/contract.ts`](../packages/shared/src/contract.ts) are the
 whole model:
 
-| Constant              | Read by | Means                                                  |
-| --------------------- | ------- | ------------------------------------------------------ |
-| `CONTRACT_GENERATION` | both    | the interface generation this build speaks             |
-| `MIN_CLIENT_CONTRACT` | server  | the oldest client generation this server still serves  |
-| `MIN_SERVER_CONTRACT` | client  | the oldest server generation this client can work with |
+| Constant              | Read by | Means                                                 |
+| --------------------- | ------- | ----------------------------------------------------- |
+| `CONTRACT_GENERATION` | both    | the interface generation this build speaks            |
+| `MIN_CLIENT_CONTRACT` | server  | the oldest client generation this server still serves |
 
-A peer is served when it falls inside the other side's window, and a peer outside it is refused with
-the side that has to move — not with a generic failure. One server therefore serves the several
-plugin versions its users are running: only a client below `MIN_CLIENT_CONTRACT` is turned away, and
-only a server below `MIN_SERVER_CONTRACT` is turned away by the client.
+A peer outside the other side's window is refused with the side that has to move — not with a
+generic failure. One server therefore serves the several plugin versions its users are running:
+only a client below `MIN_CLIENT_CONTRACT` is turned away, and a client needs a server at **its own
+generation or newer**, because the server refuses anything above its own.
 
 ### The rules
 
-| The release changes…                                                                            | `CONTRACT_GENERATION` | `MIN_CLIENT_CONTRACT` | `MIN_SERVER_CONTRACT` |
-| ----------------------------------------------------------------------------------------------- | --------------------- | --------------------- | --------------------- |
-| something an older peer would **misread** (removed field, changed meaning, field made required) | +1                    | new generation        | new generation        |
-| something **additive** only (new optional field, new route, new type)                           | +1                    | unchanged             | unchanged             |
-| a client now depends on a new server capability                                                 | +1                    | unchanged             | new generation        |
-| the server stops reading older clients (fields dropped, framing changed)                        | +1                    | new generation        | unchanged             |
+| The release changes…                                                                            | `CONTRACT_GENERATION` | `MIN_CLIENT_CONTRACT` |
+| ----------------------------------------------------------------------------------------------- | --------------------- | --------------------- |
+| something an older peer would **misread** (removed field, changed meaning, field made required) | +1                    | new generation        |
+| something **additive** only (new optional field, new route, new error code)                     | +1                    | unchanged             |
+| the server stops reading older clients (fields dropped, framing changed)                        | +1                    | new generation        |
 
 The judgement behind every row is one question: _would the old side misread this byte?_ Adding is
 safe — an older reader ignores what it does not know, and an older sender omits what it never had.
 Removing, retyping or re-meaning is not. Some changes cannot be windowed at all (the chunk size,
-the blob layout, the crypto envelope: both sides must agree exactly), so they move all three.
+the blob layout, the crypto envelope: both sides must agree exactly), so they move every number.
 
 ### How it is kept honest
 
@@ -113,10 +111,10 @@ Two things the tool cannot see, and both are answered by the same question above
 
 - a field whose **name and type stayed the same but whose meaning changed**;
 - whether a **client actually depends** on what was added (the tool greps the plugin and CLI for the
-  added names and moves `MIN_SERVER_CONTRACT` when it finds them — an extra prompt, never a silent
-  failure).
+  added names and prints them — a hint for the reviewer; it moves no number, because a client needs
+  a server at its own generation either way).
 
-Never edit a number by hand: `bump --write` writes all three together, and `write` only creates a
+Never edit a number by hand: `bump --write` writes both together, and `write` only creates a
 generation's file when there is none.
 
 ### On the wire
@@ -146,6 +144,11 @@ Two comparisons, and the asymmetry is the point:
 Anything else is served, including a client whose generation is older than the server's:
 that is the additive case, and it is what lets one server keep serving the several plugin
 versions its users are running. An absent header reads as generation `1`.
+
+The client asks the same question from its side, and its answer has to agree with this one:
+it refuses a server **below its own generation** (that server would answer `426` to
+everything it sent) and a server whose floor excludes it. So a client needs a server at its
+own generation or newer, while a server serves every client down to its floor.
 
 The refusal happens **before the key is read**: the credential may be perfectly good, and
 "upgrade the server" is a different answer from "your credential is wrong". The WebSocket

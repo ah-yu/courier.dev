@@ -57,8 +57,10 @@ export function withErrorMapping(handler: RouteHandler, log: Logger): RouteHandl
  *
  * The contract check runs first: it is the other thing that can make a request
  * impossible, and "upgrade the server" is a different answer from "your credential is
- * wrong". This wrapper and `withSyncAuth` are the whole `ck_` surface, so the two of them
- * are where the check belongs — a route that adds auth gets it without remembering.
+ * wrong". This wrapper and `withSyncAuth` are the whole **HTTP** `ck_` surface, so the two
+ * of them are where the check belongs — a route that adds auth gets it without remembering.
+ * The WebSocket `subscribe` is the third surface and is deliberately not gated: a real
+ * client asks `/api/health` before it connects, and a mismatch stops it there.
  */
 export function withUserAuth(
   findUserByKey: FindUserByKeyFn,

@@ -7083,6 +7083,50 @@ describe("plugin e2e — the real plugin against a real server", () => {
       expect(modal.scrollTop).toBe(0);
     });
 
+    /**
+     * The other reason a host stops: the server answered `/api/health` with a window this
+     * build is outside.
+     *
+     * The host has already stopped and built nothing (the engine covers that guarantee), so
+     * what is asserted here is the plugin's half: it pauses rather than unbinding, says the
+     * version is too old in the words a user can act on, and leaves the normal way back —
+     * 继续同步 — in place.
+     */
+    it("pauses and keeps the binding when the server's version is too old", async () => {
+      const { plugin, remote } = await startHostedPlugin("Contract Mismatch");
+      const tab = settingsTabOf(plugin);
+      tab.display();
+      notices.length = 0;
+
+      // The report the host's probe delivers, verbatim.
+      await (
+        plugin as unknown as { handleServerContract(info: unknown): Promise<void> }
+      ).handleServerContract({
+        verdict: "server-too-old",
+        serverGeneration: 1,
+        serverMinClient: 1,
+        serverVersion: "0.5.2",
+      });
+
+      expect(plugin.settings.syncPaused).toBe(true);
+      expect(plugin.host).toBeNull();
+      expect(plugin.engine).toBeNull();
+      // Paused, not unbound: the key, the vault and the credential all stay.
+      expect(plugin.settings.connectedVaultId).toBe(remote.id);
+      expect(plugin.settings.userKey).toBe(server.userKey);
+      expect(((await plugin.loadData()) as { syncPaused?: boolean }).syncPaused).toBe(true);
+      expect(notices.some((message) => message.includes("服务端版本比本插件需要的旧"))).toBe(true);
+
+      // The row names the problem without a build id, and offers the way back.
+      const connection = settingsIn(tab.containerEl).find(
+        (row) => row.name === `已连接「${remote.name}」`,
+      )!;
+      expect(connection.desc).toContain("服务端版本太旧");
+      expect(connection.desc).not.toContain("dev");
+      const pauseRow = settingsIn(tab.containerEl).find((row) => row.name === "同步")!;
+      expect(pauseRow.buttons.map((button) => button.text)).toEqual(["继续同步"]);
+    });
+
     it("pauses from its own row without unbinding, and resumes from the same row", async () => {
       const { plugin, vault, remote } = await startHostedPlugin("Pause Sync");
       const tab = settingsTabOf(plugin);

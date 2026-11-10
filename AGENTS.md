@@ -255,7 +255,7 @@ protocol or a security hole. Read the linked section before changing one.
     contract generation and the mismatched one is refused with the side that must upgrade. Change
     anything a peer can observe — a shared wire type, a route, an error code, a shared constant —
     and `bun run verify` fails on the `contract` gate until `packages/shared/src/contract.ts`
-    says what the change means; the gate prints the three numbers, and adding a generation's
+    says what the change means; the gate prints the numbers, and adding a generation's
     surface file is the bump. Never edit a number by hand, and never raise `MIN_CLIENT_CONTRACT`
     without a change that an older client would misread. See
     [api.md](docs/api.md#contract-generation).

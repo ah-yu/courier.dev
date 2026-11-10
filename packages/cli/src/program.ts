@@ -87,7 +87,7 @@ function fail(message: string, code = 1): never {
  * or a binding is written, so nothing is left half-done. A server that cannot be reached is
  * not this: that stays the caller's retry path.
  */
-async function requireCompatibleServer(config: CliConfig): Promise<void> {
+export async function requireCompatibleServer(config: CliConfig): Promise<void> {
   try {
     await ensureCompatibleServer(config);
   } catch (err) {

@@ -95,7 +95,7 @@ on any version.
 
 `bun run contract` (a `bun run verify` gate) keeps the two in step with the API: it compares the
 observable surface with `packages/shared/contract/<generation>.surface.json` and refuses a change
-that was not classified. The rules, and when each of the three numbers moves, are in
+that was not classified. The rules, and when each number moves, are in
 [api.md](api.md#contract-generation).
 
 A release whose generation moved must say so in its notes, and name the side that has to upgrade —

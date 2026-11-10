@@ -3,7 +3,6 @@ import {
   CONTRACT_GENERATION,
   CONTRACT_HEADER,
   MIN_CLIENT_CONTRACT,
-  MIN_SERVER_CONTRACT,
   contractVerdict,
 } from "@courier/shared";
 import { startTestServer, type TestServer } from "./harness/server";
@@ -120,13 +119,14 @@ describe("health e2e — the probe, and the contract gate behind it", () => {
       minClient?: number;
     };
     expect(contractVerdict(health)).toBe("ok");
-    // A peer left behind by a newer floor is told to upgrade the client, and one that
-    // needs more than this server has is told to upgrade the server.
+    // A peer left behind by a newer floor is told to upgrade the client, and one older than
+    // this build's own generation is told to upgrade the server — the second is the case
+    // that would otherwise be a 426 on every request with no message.
     expect(contractVerdict({ ...health, minClient: CONTRACT_GENERATION + 1 })).toBe(
       "client-too-old",
     );
-    expect(contractVerdict({ generation: MIN_SERVER_CONTRACT - 1, minClient: 1 })).toBe(
-      MIN_SERVER_CONTRACT > 1 ? "server-too-old" : "ok",
+    expect(contractVerdict({ generation: CONTRACT_GENERATION - 1, minClient: 1 })).toBe(
+      CONTRACT_GENERATION > 1 ? "server-too-old" : "ok",
     );
   });
 });

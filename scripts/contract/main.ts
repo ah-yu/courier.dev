@@ -4,7 +4,7 @@
  *
  * `check` (the default, and the mode `bun run verify` runs) compares the code's observable
  * surface with `packages/shared/contract/<CONTRACT_GENERATION>.surface.json`. Any change
- * fails and prints what changed, what it means, and the three numbers to write — so the
+ * fails and prints what changed, what it means, and the numbers to write — so the
  * decision is in front of whoever made the change, not in a document they did not read.
  *
  * `bump --write` applies that decision: it moves `CONTRACT_GENERATION` (and, for a breaking
@@ -140,17 +140,17 @@ function createFirstSurface(): void {
   console.log(`contract: wrote ${relative(generationFile)} for generation ${generations.contract}`);
 }
 
-/** A recommendation: the three numbers, plus the client references that moved a floor. */
+/** A recommendation: the numbers to write, plus the client references the diff mentions. */
 interface Plan {
   generations: Generations;
   usage: string[];
 }
 
-/** The three numbers the classification asks for. */
+/** The numbers the classification asks for. */
 function plan(classification: Classification): Plan {
   const next = generations.contract + 1;
   if (classification.verdict === "breaking") {
-    return { generations: { contract: next, minClient: next, minServer: next }, usage: [] };
+    return { generations: { contract: next, minClient: next }, usage: [] };
   }
 
   const usage = assumeClientUsage
@@ -159,14 +159,10 @@ function plan(classification: Classification): Plan {
       ? []
       : clientUsage(addedNames(classification.changes));
 
-  return {
-    generations: {
-      contract: next,
-      minClient: generations.minClient,
-      minServer: usage.length > 0 ? next : generations.minServer,
-    },
-    usage,
-  };
+  // Additive: the server's floor stays where it is, because it still reads what it read
+  // before. `usage` is reported, not applied — a client needs a server at its own
+  // generation either way, and the floor is about the server's side of the window.
+  return { generations: { contract: next, minClient: generations.minClient }, usage };
 }
 
 function printClassification(classification: Classification): void {
@@ -183,24 +179,23 @@ function printClassification(classification: Classification): void {
 
 function printRecommendation(classification: Classification, recommendation: Plan): void {
   const next = recommendation.generations;
-  console.log("\nThe three numbers in packages/shared/src/contract.ts:\n");
+  console.log("\nThe numbers in packages/shared/src/contract.ts:\n");
   console.log(`  CONTRACT_GENERATION = ${next.contract}`);
   console.log(`  MIN_CLIENT_CONTRACT = ${next.minClient}`);
-  console.log(`  MIN_SERVER_CONTRACT = ${next.minServer}`);
 
   if (classification.verdict !== "breaking") {
     console.log(
-      "\nBoth minimums stay put unless a peer depends on what was added:\n" +
-        "  MIN_CLIENT_CONTRACT moves when the server stops reading older clients.\n" +
-        "  MIN_SERVER_CONTRACT moves when a client needs something the server did not have.",
+      "\nThe server's floor stays put unless the server stops reading older clients.\n" +
+        "A client needs a server at its own generation either way, so an additive release\n" +
+        "moves only CONTRACT_GENERATION.",
     );
   }
 
   if (recommendation.usage.length > 0) {
-    console.log("\nThe clients already mention what was added, so MIN_SERVER_CONTRACT moves:\n");
+    console.log("\nThe clients already reference what was added:\n");
     for (const hit of recommendation.usage) console.log(`  ${hit}`);
     console.log(
-      "\n  If the client tolerates the field being absent, edit the number back and say why.\n",
+      "\n  That is a hint for the reviewer, not a number to write: nothing moves for it.\n",
     );
   }
 }
@@ -212,10 +207,9 @@ function marker(change: Change): string {
 /**
  * Names the clients already mention.
  *
- * A new field or route the plugin/CLI already references is one the client may depend on,
- * so the recommendation moves `MIN_SERVER_CONTRACT` (an extra prompt, never a silent
- * failure). A common word in a field name can produce a false positive here; the printed
- * files make that visible, and the numbers can be edited back with a reason.
+ * A new field or route the plugin/CLI already references is one the client may depend on, so
+ * printing it is a hint for the reviewer. It moves no number: a client needs a server at its
+ * own generation either way, and the floor is about the server's side of the window.
  */
 function clientUsage(names: readonly string[]): string[] {
   const identifiers = names.filter(
@@ -262,12 +256,11 @@ function replaceGeneration(text: string, name: string, value: number): string {
   return text.replace(pattern, `$1${value}$2`);
 }
 
-/** Rewrite the three numbers in place, leaving the prose around them untouched. */
+/** Rewrite the numbers in place, leaving the prose around them untouched. */
 function writeGenerations(next: Generations): void {
   const source = readFileSync(contractSource, "utf8");
   let updated = replaceGeneration(source, "CONTRACT_GENERATION", next.contract);
   updated = replaceGeneration(updated, "MIN_CLIENT_CONTRACT", next.minClient);
-  updated = replaceGeneration(updated, "MIN_SERVER_CONTRACT", next.minServer);
   writeFileSync(contractSource, updated, "utf8");
 }
 
