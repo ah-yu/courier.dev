@@ -1,10 +1,6 @@
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
-import { json, withAccessLog, type RouteTable } from "../http/router";
-import { withErrorMapping } from "../http/auth";
-import { withHostAuth } from "../http/guards";
-import { findByKey } from "../lib/api-keys";
 import { sqlite } from "../db";
 import { countDeviceNames, countUsers, countVaults } from "../db/repositories/admin";
 import { buildAdminStatus } from "../handlers/status-handlers";
@@ -16,8 +12,7 @@ import type { WsHub } from "../handlers/ws-handlers";
 import { config } from "../config";
 import { VERSION } from "../version";
 import { runtimeLabel } from "@courier/shared";
-import { logger as processLogger } from "../lib/log";
-import type { Logger } from "../lib/logger";
+import type { RouteHandlers } from "../http/contract-routes";
 
 /**
  * The host-facing admin API: everything an operator can learn **in-band**, over
@@ -39,68 +34,56 @@ import type { Logger } from "../lib/logger";
  * the bundle, so a Vite-processed consumer (the `packages/e2e` suite boots this
  * app) reads the same numbers the binary reports.
  */
-export function adminRoutes(hub: WsHub, logger: Logger = processLogger): RouteTable {
-  /** Both reads are `status`-scope host keys behind the same three wrappers. */
-  const get = (handler: () => Response | Promise<Response>) =>
-    withAccessLog(
-      logger,
-      withErrorMapping(withHostAuth(findByKey, "status", handler), logger),
-      config.LOG_SLOW_MS,
-    );
-
+export function adminHandlers(hub: WsHub): Pick<RouteHandlers, "admin.status" | "admin.runtime"> {
   return {
-    "/api/admin/status": {
-      GET: get(async () => {
-        const storage = await storageUsage({ measure: measureStorageUsage });
-        const disk = await diskSpace();
-        const binary = await binaryMarker();
+    "admin.status": async () => {
+      const storage = await storageUsage({ measure: measureStorageUsage });
+      const disk = await diskSpace();
+      const binary = await binaryMarker();
 
-        return json(
-          buildAdminStatus({
-            storageUsedBytes: storage.bytes,
-            storageLimitBytes: null, // server-wide limit not configured; enforced per-user
-            dbBytes: await dbFileBytes(),
-            diskTotalBytes: disk.totalBytes,
-            diskUsedBytes: disk.usedBytes,
-            diskFreeBytes: disk.freeBytes,
-            binarySha256: binary.sha256,
-            binarySize: binary.size,
-            blobCount: storage.blobs,
-            usersCount: await countUsers(),
-            devicesCount: await countDeviceNames(),
-            vaultsCount: await countVaults(),
-            migrationsApplied: appliedMigrationCount(sqlite),
-            migrationsKnown: knownMigrationCount(),
-            version: VERSION,
-          }),
-        );
-      }),
+      return {
+        body: buildAdminStatus({
+          storageUsedBytes: storage.bytes,
+          storageLimitBytes: null, // server-wide limit not configured; enforced per-user
+          dbBytes: await dbFileBytes(),
+          diskTotalBytes: disk.totalBytes,
+          diskUsedBytes: disk.usedBytes,
+          diskFreeBytes: disk.freeBytes,
+          binarySha256: binary.sha256,
+          binarySize: binary.size,
+          blobCount: storage.blobs,
+          usersCount: await countUsers(),
+          devicesCount: await countDeviceNames(),
+          vaultsCount: await countVaults(),
+          migrationsApplied: appliedMigrationCount(sqlite),
+          migrationsKnown: knownMigrationCount(),
+          version: VERSION,
+        }),
+      };
     },
-    "/api/admin/runtime": {
-      GET: get(() => {
-        const online = hub.onlineSummary();
-        const memory = process.memoryUsage();
-        const cpu = sampleCpu();
+    "admin.runtime": () => {
+      const online = hub.onlineSummary();
+      const memory = process.memoryUsage();
+      const cpu = sampleCpu();
 
-        return json(
-          buildRuntimeResponse({
-            version: VERSION,
-            runtime: runtimeLabel(process.versions),
-            pid: process.pid,
-            uptimeSeconds: process.uptime(),
-            cpuMicros: cpu.micros,
-            cpuPercent: cpu.percent,
-            memoryBytes: memory.rss,
-            cpuCount: os.cpus().length,
-            loadAverage: os.loadavg(),
-            freeMemoryBytes: os.freemem(),
-            totalMemoryBytes: os.totalmem(),
-            onlineUsers: online.users,
-            onlineVaults: online.vaults,
-            sampledAt: new Date(),
-          }),
-        );
-      }),
+      return {
+        body: buildRuntimeResponse({
+          version: VERSION,
+          runtime: runtimeLabel(process.versions),
+          pid: process.pid,
+          uptimeSeconds: process.uptime(),
+          cpuMicros: cpu.micros,
+          cpuPercent: cpu.percent,
+          memoryBytes: memory.rss,
+          cpuCount: os.cpus().length,
+          loadAverage: os.loadavg(),
+          freeMemoryBytes: os.freemem(),
+          totalMemoryBytes: os.totalmem(),
+          onlineUsers: online.users,
+          onlineVaults: online.vaults,
+          sampledAt: new Date(),
+        }),
+      };
     },
   };
 }

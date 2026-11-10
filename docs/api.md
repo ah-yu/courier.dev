@@ -79,11 +79,12 @@ generation or newer**, because the server refuses anything above its own.
 
 ### The rules
 
-| The release changes…                                                                            | `CONTRACT_GENERATION` | `MIN_CLIENT_CONTRACT` |
-| ----------------------------------------------------------------------------------------------- | --------------------- | --------------------- |
-| something an older peer would **misread** (removed field, changed meaning, field made required) | +1                    | new generation        |
-| something **additive** only (new optional field, new route, new error code)                     | +1                    | unchanged             |
-| the server stops reading older clients (fields dropped, framing changed)                        | +1                    | new generation        |
+| The release changes…                                                                                              | `CONTRACT_GENERATION` | `MIN_CLIENT_CONTRACT` |
+| ----------------------------------------------------------------------------------------------------------------- | --------------------- | --------------------- |
+| something an older peer would **misread** (removed field, changed meaning, field made required)                   | +1                    | new generation        |
+| a **degradation** an older peer ignores or misses (a renamed server frame, a new response value it does not know) | +1                    | unchanged             |
+| something **additive** only (new optional request field, new route, new error code)                               | +1                    | unchanged             |
+| the server stops reading older clients (fields dropped, framing changed)                                          | +1                    | new generation        |
 
 The judgement behind every row is one question: _would the old side misread this byte?_ Adding is
 safe — an older reader ignores what it does not know, and an older sender omits what it never had.
@@ -103,34 +104,52 @@ Two rows deserve the distinction spelled out, because they pull in opposite dire
 
 ### How it is kept honest
 
-`bun run contract` derives the observable surface from the code — every exported wire type with its
-fields, optionality and types, the server's route table, `API_ERROR_CODES` and the constants both
-sides share — and compares it with `packages/shared/contract/<CONTRACT_GENERATION>.surface.json`.
-`bun run verify` runs it, so a change to anything a peer can observe fails until the numbers say
-what the change means:
+The surface is not derived from declarations. It is serialized from `@courier/shared/wire` — the
+registry the server itself builds its route table from — so the gate reads the same objects that
+serve traffic:
+
+- every route with its method, path, auth (and host-key scope), contract-header rule, path
+  parameters, query, success statuses, declared error codes and request/response body;
+- every request and response as JSON Schema, including the constraints a declaration-only surface
+  could not see (`minLength`, `maxLength`, `pattern`, `minimum`, `maximum`, enum members,
+  required/optional);
+- both WebSocket directions, frame by frame;
+- the binary framing (push body, content batch, blob envelope) as explicit descriptors;
+- the shared constants as **values**, not printed source.
+
+`bun run verify` runs `bun run contract`, which compares that surface with
+`packages/shared/contract/<CONTRACT_GENERATION>.surface.json`. A change fails until the numbers say
+what it means:
 
 ```
-bun run contract                        # check the code against its generation's surface file
-bun run contract bump --write           # classify the diff, then write the numbers and the next surface
-bun run contract bump --write --keep-floor  # the generation moves, the floor stays (see below)
+bun run contract                              # check the code against its generation's surface file
+bun run contract bump --write --reason "..."  # classify, then write the numbers and the next surface
+bun run contract write --reason "..."         # only when a generation has no file yet
 ```
 
-The surface is a tree, not a text file: `Array<T>` and `T[]` are the same shape, formatting is
-invisible, and a changed field shows up as one changed line. A generation file is never edited —
-a change writes the next one.
+The classifier is direction-aware: a new required **request** field breaks an old sender, while a
+new required **response** field is ignored by an old reader. It has three moving verdicts —
+additive, degrading, breaking — and the floor moves only for breaking. A generation file is never
+edited; a change writes the next one, and `--reason` records the one judgement the tool cannot
+make.
 
-Two things the tool cannot see, and both are answered by the same question above:
+The gate is load-bearing, not a report. `packages/server/src/http/contract-routes.ts` builds the
+Bun table from the registry: a route that is not in the registry is not served, a handler that is
+missing or orphaned is a startup error, and auth, body parsing, status codes and (in tests/dev)
+response validation all come from the contract. The L1 suite drives every route and every frame;
+`packages/shared/src/wire/conformance.test.ts` pins each schema's inferred type to the interface it
+replaced.
 
-- a field whose **name and type stayed the same but whose meaning changed**;
-- whether a **client actually depends** on what was added (the tool greps the plugin and CLI for the
-  added names and prints them — a hint for the reviewer; it moves no number, because a client needs
-  a server at its own generation either way).
+What the tool still cannot see:
 
-`--keep-floor` exists for the one case the tool cannot decide: a change that makes an older peer
-**degrade without misreading** (a renamed notification type it ignores, an added field). The
-classification is "breaking" — a member of the surface is gone — but the floor is reserved for
-corruption, so the generation moves and the floor stays. Use it deliberately and say why in the
-commit; the printed message asks for that.
+- a field whose **name and type stayed the same but whose meaning changed** — that is a behaviour
+  change, pinned by the L1 tests and the owning document, not by the surface;
+- a **custom refinement** that JSON Schema cannot express (for example "at least one of these three
+  fields"). It is enforced by the runtime schema and pinned by a test, but the serialized tree
+  records the shape, not the rule.
+
+`--keep-floor` remains for the one case a classification reads as breaking but the team judges to
+be a degradation; the reason goes in the commit.
 
 Never edit a number by hand: `bump --write` writes both together, and `write` only creates a
 generation's file when there is none.
@@ -144,10 +163,10 @@ and the server's version:
 ```json
 {
   "error": "CONTRACT_MISMATCH",
-  "message": "This client speaks contract 3, but this server speaks 2. Update the server.",
-  "serverContract": 2,
+  "message": "This client speaks contract 4, but this server speaks 3. Update the server.",
+  "serverContract": 3,
   "minClient": 1,
-  "clientContract": 3,
+  "clientContract": 4,
   "serverVersion": "0.6.0"
 }
 ```

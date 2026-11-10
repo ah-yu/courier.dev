@@ -1,9 +1,6 @@
-import { json, withAccessLog, type RouteTable } from "../http/router";
-import { withErrorMapping, withUserAuth } from "../http/auth";
 import { toUserSummary } from "../handlers/users-handlers";
-import { findUserByKey, userStorageBytes, userVaultCount } from "../lib/users-db";
-import { config } from "../config";
-import type { Logger } from "../lib/logger";
+import { userStorageBytes, userVaultCount } from "../lib/users-db";
+import type { RouteHandlers } from "../http/contract-routes";
 
 /**
  * "Which account does this user key belong to?"
@@ -13,18 +10,20 @@ import type { Logger } from "../lib/logger";
  * every user. This answers for the presented key only, and never returns the key
  * itself, so it is also the cheapest way to prove the key still works.
  *
- * The second module on the Bun route table, and the first with auth: it proves
- * `withUserAuth` + `withErrorMapping` compose the way the Hono middleware chain
- * did (a bad key still answers the documented 401 body).
+ * The adapter's `withUserAuth` runs the contract check and the key check; the handler
+ * only builds the answer.
  */
-export function meRoutes(logger: Logger): RouteTable {
-  const get = withUserAuth(findUserByKey, async (_request, user) =>
-    json(toUserSummary(user, await userStorageBytes(user.id), await userVaultCount(user.id))),
-  );
-
+export function meHandlers(): Pick<RouteHandlers, "me.get"> {
   return {
-    "/api/me": {
-      GET: withAccessLog(logger, withErrorMapping(get, logger), config.LOG_SLOW_MS),
+    "me.get": async ({ user }) => {
+      const current = user!;
+      return {
+        body: toUserSummary(
+          current,
+          await userStorageBytes(current.id),
+          await userVaultCount(current.id),
+        ),
+      };
     },
   };
 }

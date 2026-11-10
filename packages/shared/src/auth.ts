@@ -116,6 +116,17 @@ export interface ListUsersResponse {
   users: UserSummary[];
 }
 
+/** `POST /api/users`: the host's account-creation body. */
+export interface CreateUserRequest {
+  name: string;
+  storageBytesLimit?: number | null;
+  retentionDays?: number | null;
+  maxFileBytes?: number;
+  maxVaults?: number;
+  expiresAt?: string | null;
+  disabled?: boolean;
+}
+
 export interface UpdateUserRequest {
   name?: string;
   storageBytesLimit?: number | null;

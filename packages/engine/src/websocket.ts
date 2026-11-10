@@ -1,4 +1,5 @@
-import type { ApiErrorCode, HistoryLimits, WsServerMessage } from "@courier/shared";
+import type { ApiErrorCode, HistoryLimits } from "@courier/shared";
+import { WsServerMessageSchema } from "@courier/shared/wire";
 import type { Platform, TimerHandle } from "./platform";
 
 export type WsConnectionState = "disconnected" | "connecting" | "connected" | "error";
@@ -110,12 +111,18 @@ export class SyncWebSocket {
 
     ws.addEventListener("message", (event: MessageEvent) => {
       this.resetLastMessageTimer();
-      let msg: WsServerMessage;
+      let raw: unknown;
       try {
-        msg = JSON.parse(event.data as string) as WsServerMessage;
+        raw = JSON.parse(event.data as string);
       } catch {
         return;
       }
+      // The frame is validated against the same schema the server sends from. A
+      // malformed frame is dropped whole: the periodic reconcile covers whatever it
+      // named, and one bad batch must not be read as a state change.
+      const parsed = WsServerMessageSchema.safeParse(raw);
+      if (!parsed.success) return;
+      const msg = parsed.data;
 
       switch (msg.type) {
         case "subscribe_success":
@@ -163,17 +170,11 @@ export class SyncWebSocket {
         case "ping":
           this.send({ type: "pong" });
           break;
-        case "files_pushed": {
-          // A malformed entry is dropped, not the frame: the rest of the batch still
-          // names versions the server committed, and the next pass covers what is lost.
-          const files = Array.isArray(msg.files)
-            ? msg.files.filter(
-                (file) => typeof file?.fileId === "string" && typeof file.versionId === "string",
-              )
-            : [];
-          if (files.length > 0) this.opts.onEvent({ type: "files_pushed", files });
+        case "files_pushed":
+          if (msg.files.length > 0) {
+            this.opts.onEvent({ type: "files_pushed", files: msg.files });
+          }
           break;
-        }
       }
     });
 

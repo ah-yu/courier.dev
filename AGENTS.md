@@ -41,7 +41,7 @@ Bun workspace for the sync solution.
 
 | Package            | Purpose                         | Stack                                                               |
 | ------------------ | ------------------------------- | ------------------------------------------------------------------- |
-| `@courier/shared`  | API and wire type definitions   | TypeScript interfaces exported from `src/`; no build                |
+| `@courier/shared`  | API and wire types + schemas    | TypeScript interfaces and `@courier/shared/wire`; no build          |
 | `@courier/engine`  | Shared sync engine              | TypeScript, Web Crypto; used by the plugin and the CLI              |
 | `@courier/server`  | Sync service (REST + WebSocket) | `Bun.serve`, Drizzle ORM, `bun:sqlite`                              |
 | `@courier/plugin`  | Obsidian plugin (unified)       | TypeScript, `Bun.build` (CJS)                                       |
@@ -254,14 +254,16 @@ protocol or a security hole. Read the linked section before changing one.
     [api.md](docs/api.md).
 14. **The API surface and its generation move together.** One tag ships the plugin, the CLI and
     the server, but a _deployment_ upgrades them at three different times, so a peer states a
-    contract generation and the mismatched one is refused with the side that must upgrade. Change
-    anything a peer can observe — a shared wire type, a route, an error code, a shared constant —
-    and `bun run verify` fails on the `contract` gate until `packages/shared/src/contract.ts`
-    says what the change means; the gate prints the numbers, and adding a generation's
-    surface file is the bump. Never edit a number by hand — `bump --write` writes them, and
-    `--keep-floor` is the one deliberate exception: a change that degrades an older peer without
-    misreading it still moves the generation, and the floor stays, with the reason in the commit.
-    Never raise `MIN_CLIENT_CONTRACT` for a change an older client reads correctly. See
+    contract generation and the mismatched one is refused with the side that must upgrade. The
+    surface is serialized from `@courier/shared/wire`, the same registry the server builds its
+    route table from (`packages/server/src/http/contract-routes.ts` is the only table), so change
+    anything a peer can observe — a schema, a route, an error code, a shared constant — and
+    `bun run verify` fails on the `contract` gate until `packages/shared/src/contract.ts` says
+    what the change means. Never edit a number by hand — `bump --write --reason "..."` writes
+    them, and the reason is part of the generation file. A degrading change keeps the floor
+    automatically; `--keep-floor` is only for a case the classifier reads as breaking but the team
+    judges to be a degradation, with the reason in the commit. Never raise
+    `MIN_CLIENT_CONTRACT` for a change an older client reads correctly. See
     [api.md](docs/api.md#contract-generation).
 
 ## Destructive operations (hard rules)
@@ -377,7 +379,8 @@ details and the full contract are in [testing.md](docs/testing.md#stub-fidelity)
   Dev plugin installs go into the gitignored development vaults; `bun run dev` creates them,
   registers them with Obsidian and signs both in to the local dev server (see
   [plugin.md](docs/plugin.md#dev-loop-and-test-vaults)).
-- **Build**: `@courier/shared` has no build step and zero dependencies; the plugin's `tsc` is
+- **Build**: `@courier/shared` has no build step; its main entry has no runtime dependencies
+  (`@courier/shared/wire` uses `zod/mini`); the plugin's `tsc` is
   `noEmit`, so **`Bun.build` is the only writer of `packages/plugin/dist/`** (exactly `main.js`);
   the server builds with `tsc` only.
 - **Versions**: the three release packages carry one version, stamped by

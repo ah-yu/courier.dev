@@ -180,6 +180,22 @@ export interface SyncPullRequest {
   files: Array<{ fileId: string }>;
 }
 
+/** `POST …/sync/contents`: the hashes whose ciphertext a download wants in one answer. */
+export interface SyncContentsRequest {
+  hashes: string[];
+}
+
+/** The query a chunk upload states: how many chunks the version has, and its plaintext size. */
+export interface ChunkUploadQuery {
+  chunkCount: number;
+  plaintextSize: number;
+}
+
+/** `GET …/sync/versions?fileId=…`: the chain whose history is being read. */
+export interface FileVersionQuery {
+  fileId: string;
+}
+
 /**
  * A single version entry in a file's remote version chain.
  *

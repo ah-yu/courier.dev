@@ -252,7 +252,11 @@ describe("SyncHost", () => {
 
   /** Answer the subscribe on the live socket — the only thing that reports `connected`. */
   function subscribed(sessionId = "session-1"): void {
-    MockWebSocket.instances.at(-1)!.deliver({ type: "subscribe_success", sessionId });
+    MockWebSocket.instances.at(-1)!.deliver({
+      type: "subscribe_success",
+      vaultId: "vault-1",
+      sessionId,
+    });
   }
 
   /** Drop the live socket and answer the next connect, on fake timers. */
@@ -970,7 +974,7 @@ describe("SyncHost", () => {
     track(host);
     await host.start();
 
-    MockWebSocket.instances.at(-1)!.deliver({ type: "api_key_revoked" });
+    MockWebSocket.instances.at(-1)!.deliver({ type: "api_key_revoked", vaultId: "vault-1" });
 
     expect(onAuthFailure).toHaveBeenCalledWith("revoked");
     expect(host.engine).toBeNull();
@@ -998,7 +1002,7 @@ describe("SyncHost", () => {
     track(host);
     await host.start();
     const socket = MockWebSocket.instances.at(-1)!;
-    socket.deliver({ type: "subscribe_success", sessionId: "session-1" });
+    socket.deliver({ type: "subscribe_success", vaultId: "vault-1", sessionId: "session-1" });
 
     socket.deliver({
       type: "vault_settings",
@@ -1027,6 +1031,7 @@ describe("SyncHost", () => {
 
     MockWebSocket.instances.at(-1)!.deliver({
       type: "subscribe_error",
+      vaultId: "vault-1",
       code: "KEY_DISABLED",
       message: "user key is disabled",
     });
@@ -1042,6 +1047,7 @@ describe("SyncHost", () => {
 
     MockWebSocket.instances.at(-1)!.deliver({
       type: "subscribe_error",
+      vaultId: "vault-1",
       code: "NOT_FOUND",
       message: "vault not found",
     });
@@ -1057,6 +1063,7 @@ describe("SyncHost", () => {
 
     MockWebSocket.instances.at(-1)!.deliver({
       type: "subscribe_error",
+      vaultId: "vault-1",
       code: "RATE_LIMITED",
       message: "too many requests",
     });

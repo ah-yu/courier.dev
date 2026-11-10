@@ -2,26 +2,26 @@
 /**
  * `bun run contract` — the API contract, as a gate an agent cannot skip.
  *
- * `check` (the default, and the mode `bun run verify` runs) compares the code's observable
+ * `check` (the default, and the mode `bun run verify` runs) compares the registry's
  * surface with `packages/shared/contract/<CONTRACT_GENERATION>.surface.json`. Any change
  * fails and prints what changed, what it means, and the numbers to write — so the
  * decision is in front of whoever made the change, not in a document they did not read.
  *
- * `bump --write` applies that decision: it moves `CONTRACT_GENERATION` (and, for a breaking
- * change, both floors) in `packages/shared/src/contract.ts`, and writes the next
- * generation's surface file. `write` exists only to create the first file for a generation.
+ * `bump --write --reason "..."` applies that decision: it moves `CONTRACT_GENERATION`
+ * (and, for a breaking change, the floor) in `packages/shared/src/contract.ts`, and
+ * writes the next generation's surface file. `write` exists only to create the first
+ * file for a generation.
  *
- * See `docs/api.md` → "Contract generation" for the rules, and
- * `packages/shared/src/contract.ts` for the same table next to the numbers.
+ * See `docs/api.md` → "Contract generation" for the rules.
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { addedNames, classify, type Classification, type Change } from "./classify";
 import {
-  formatSurface,
   readGenerations,
   readSurface,
+  readSurfaceFile,
   type Generations,
   type Surface,
 } from "./surface";
@@ -35,9 +35,10 @@ const apply = process.argv.includes("--write");
 const assumeClientUsage = process.argv.includes("--server");
 const denyClientUsage = process.argv.includes("--no-server");
 const keepFloor = process.argv.includes("--keep-floor");
+const reason = argument("--reason");
 
-const generations = readGenerations(repoRoot);
-const surface = readSurface(repoRoot);
+const generations = readGenerations();
+const surface = readSurface();
 const generationFile = join(contractDirectory, `${generations.contract}.surface.json`);
 
 switch (command) {
@@ -52,7 +53,9 @@ switch (command) {
     break;
   default:
     console.error(`Unknown command: ${command}`);
-    console.error("Usage: bun run contract [check | bump [--write] [--keep-floor] | write]");
+    console.error(
+      "Usage: bun run contract [check | bump [--write] [--reason <text>] [--keep-floor] | write --reason <text>]",
+    );
     process.exit(2);
 }
 
@@ -62,8 +65,7 @@ function check(): void {
     console.error(
       `contract: generation ${generations.contract} has no surface file.\n` +
         `  Expected: ${relative(generationFile)}\n` +
-        "  Create it with `bun run contract write` (first import), or restore the generation\n" +
-        "  constants and run `bun run contract bump --write` instead of editing them by hand.",
+        '  Create it with `bun run contract write --reason "..."` (first import).',
     );
     process.exit(1);
   }
@@ -79,7 +81,7 @@ function check(): void {
   printRecommendation(classification, recommendation);
   console.error(
     "\ncontract: the API surface changed without a generation bump.\n" +
-      "  Run `bun run contract bump --write` to apply the numbers above.\n" +
+      '  Run `bun run contract bump --write --reason "..."` to apply the numbers above.\n' +
       "  If the change is meant to be invisible to peers, put it back.\n",
   );
   process.exit(1);
@@ -90,7 +92,7 @@ function bump(): void {
   if (!existsSync(generationFile)) {
     console.error(
       `contract: generation ${generations.contract} has no surface file to compare against.\n` +
-        "  Run `bun run contract write` first, or restore the generation constants.",
+        '  Run `bun run contract write --reason "..."` first.',
     );
     process.exit(1);
   }
@@ -111,6 +113,12 @@ function bump(): void {
     );
     process.exit(1);
   }
+  if (reason === undefined) {
+    console.error(
+      '\ncontract: --write needs --reason "why this generation moves, and which side upgrades".\n',
+    );
+    process.exit(1);
+  }
 
   const target = join(contractDirectory, `${next.generations.contract}.surface.json`);
   if (existsSync(target)) {
@@ -120,7 +128,11 @@ function bump(): void {
 
   writeGenerations(next.generations);
   mkdirSync(contractDirectory, { recursive: true });
-  writeFileSync(target, formatSurface(surface), "utf8");
+  writeFileSync(
+    target,
+    generationFileText(next.generations.contract, classification.verdict, reason, surface),
+    "utf8",
+  );
   console.log(
     `\ncontract: generation ${generations.contract} → ${next.generations.contract}; wrote ${relative(target)} and ${relative(contractSource)}.`,
   );
@@ -132,12 +144,20 @@ function createFirstSurface(): void {
   if (existsSync(generationFile)) {
     console.error(
       `contract: ${relative(generationFile)} already exists.\n` +
-        "  A changed surface is a generation bump: `bun run contract bump --write`.",
+        '  A changed surface is a generation bump: `bun run contract bump --write --reason "..."`.',
     );
     process.exit(1);
   }
+  if (reason === undefined) {
+    console.error('contract: write needs --reason "why this generation exists".\n');
+    process.exit(1);
+  }
   mkdirSync(contractDirectory, { recursive: true });
-  writeFileSync(generationFile, formatSurface(surface), "utf8");
+  writeFileSync(
+    generationFile,
+    generationFileText(generations.contract, "initial", reason, surface),
+    "utf8",
+  );
   console.log(`contract: wrote ${relative(generationFile)} for generation ${generations.contract}`);
 }
 
@@ -151,10 +171,9 @@ interface Plan {
 function plan(classification: Classification): Plan {
   const next = generations.contract + 1;
   if (classification.verdict === "breaking") {
-    // `--keep-floor` is the documented escape hatch for a change that *degrades* an older
-    // peer without corrupting its reading (a renamed notification type it ignores): the
-    // generation moves because the wire changed, and the floor stays because those clients
-    // are still served. Say why in the commit; the tool cannot tell the two apart.
+    // `--keep-floor` is the documented escape hatch for a change that *degrades* an
+    // older peer without corrupting its reading. A degrading change is classified
+    // automatically now, so the flag is only for a case the tool read as breaking.
     return {
       generations: { contract: next, minClient: keepFloor ? generations.minClient : next },
       usage: [],
@@ -167,9 +186,8 @@ function plan(classification: Classification): Plan {
       ? []
       : clientUsage(addedNames(classification.changes));
 
-  // Additive: the server's floor stays where it is, because it still reads what it read
-  // before. `usage` is reported, not applied — a client needs a server at its own
-  // generation either way, and the floor is about the server's side of the window.
+  // Additive and degrading: the server's floor stays where it is, because it still reads
+  // what it read before. `usage` is reported, not applied.
   return { generations: { contract: next, minClient: generations.minClient }, usage };
 }
 
@@ -177,7 +195,9 @@ function printClassification(classification: Classification): void {
   const heading =
     classification.verdict === "breaking"
       ? "breaking: an older peer would misread this change"
-      : "additive: an older peer still reads this correctly";
+      : classification.verdict === "degrading"
+        ? "degrading: an older peer misses or ignores this, but reads the rest correctly"
+        : "additive: an older peer still reads this correctly";
   console.log(`contract generation ${generations.contract}: the surface changed — ${heading}\n`);
   for (const change of classification.changes) {
     console.log(`  ${marker(change)} ${change.path}`);
@@ -191,7 +211,12 @@ function printRecommendation(classification: Classification, recommendation: Pla
   console.log(`  CONTRACT_GENERATION = ${next.contract}`);
   console.log(`  MIN_CLIENT_CONTRACT = ${next.minClient}`);
 
-  if (classification.verdict !== "breaking") {
+  if (classification.verdict === "degrading") {
+    console.log(
+      "\nThe floor stays put: the change degrades an older peer without misreading it.\n" +
+        "The generation moves because the wire changed; the server still serves those clients.",
+    );
+  } else if (classification.verdict !== "breaking") {
     console.log(
       "\nThe server's floor stays put unless the server stops reading older clients.\n" +
         "A client needs a server at its own generation either way, so an additive release\n" +
@@ -214,15 +239,16 @@ function printRecommendation(classification: Classification, recommendation: Pla
 }
 
 function marker(change: Change): string {
-  return change.verdict === "breaking" ? "!" : "+";
+  if (change.verdict === "breaking") return "!";
+  if (change.verdict === "degrading") return "~";
+  return "+";
 }
 
 /**
  * Names the clients already mention.
  *
- * A new field or route the plugin/CLI already references is one the client may depend on, so
- * printing it is a hint for the reviewer. It moves no number: a client needs a server at its
- * own generation either way, and the floor is about the server's side of the window.
+ * A new field or route the plugin/CLI already references is one the client may depend on,
+ * so printing it is a hint for the reviewer. It moves no number.
  */
 function clientUsage(names: readonly string[]): string[] {
   const identifiers = names.filter(
@@ -258,8 +284,18 @@ function sourceFiles(directories: readonly string[]): string[] {
   return files;
 }
 
-function readSurfaceFile(file: string): Surface {
-  return JSON.parse(readFileSync(file, "utf8")) as Surface;
+/** The committed file: generation, the human decision, and the surface. */
+function generationFileText(
+  generation: number,
+  verdict: string,
+  decision: string,
+  committed: Surface,
+): string {
+  return `${JSON.stringify(
+    { generation, decision: { verdict, reason: decision }, surface: committed },
+    null,
+    2,
+  )}\n`;
 }
 
 /** Rewrite one `export const NAME = N;` declaration in place. */
@@ -275,6 +311,15 @@ function writeGenerations(next: Generations): void {
   let updated = replaceGeneration(source, "CONTRACT_GENERATION", next.contract);
   updated = replaceGeneration(updated, "MIN_CLIENT_CONTRACT", next.minClient);
   writeFileSync(contractSource, updated, "utf8");
+}
+
+/** The value of `--name value` or `--name=value`. */
+function argument(name: string): string | undefined {
+  const prefix = `${name}=`;
+  const inline = process.argv.find((value) => value.startsWith(prefix));
+  if (inline !== undefined) return inline.slice(prefix.length);
+  const index = process.argv.indexOf(name);
+  return index >= 0 ? process.argv[index + 1] : undefined;
 }
 
 function relative(file: string): string {
