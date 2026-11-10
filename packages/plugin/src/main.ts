@@ -1744,6 +1744,9 @@ export default class CourierPlugin extends Plugin {
     await unbindVault(this.app, this);
     clearSyncLog();
     this.vaultHistoryLimits = null;
+    // The observation belonged to the vault that is now gone: a rebind whose probe is
+    // unanswered must not be labelled with the deleted vault's server.
+    this.serverContract = null;
     this.refreshSettings();
   }
 

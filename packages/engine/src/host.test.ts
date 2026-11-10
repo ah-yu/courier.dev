@@ -911,6 +911,36 @@ describe("SyncHost", () => {
    * while its watcher and interval kept running against a credential that could
    * never work again. The host stops first, then reports.
    */
+  it("stops when the settings poll is refused for the contract", async () => {
+    // The poll is a pass like any other: a 426 there used to be one log line and a retry
+    // every 30 seconds — the host running, holding the lease, and saying nothing.
+    vi.useFakeTimers();
+    const scope = normalizeScope({
+      configDir: ".obsidian",
+      settingsGroups: { ...NO_SETTINGS_GROUPS, app: true },
+      fileTypes: NO_FILE_TYPES,
+    });
+    const onServerContract = vi.fn();
+    const { host } = await newHost({ syncScope: scope, onServerContract });
+    track(host);
+    await host.start();
+    const poll = vi.spyOn(host.engine!, "syncLocalSettings").mockRejectedValue(
+      Object.assign(new Error("426"), {
+        status: 426,
+        code: "CONTRACT_MISMATCH",
+        body: { serverContract: 1, minClient: 1, serverVersion: "0.5.2" },
+      }),
+    );
+
+    await advanceTimersByTimeAsync(30_000);
+
+    expect(onServerContract).toHaveBeenCalledWith(
+      expect.objectContaining({ verdict: "server-too-old" }),
+    );
+    expect(host.engine).toBeNull();
+    await advanceTimersByTimeAsync(60_000);
+    expect(poll).toHaveBeenCalledTimes(1);
+  });
   it("stops and reports when a pass is refused for the contract", async () => {
     // The probe only runs at start(), so a host that began while the server was down meets a
     // server of another generation on its first pass. Without this the refusal would be one

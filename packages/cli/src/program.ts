@@ -88,6 +88,25 @@ function fail(message: string, code = 1): never {
  * or a binding is written, so nothing is left half-done. A server that cannot be reached is
  * not this: that stays the caller's retry path.
  */
+/**
+ * Whether this CLI and the server disagree on the contract, for the status block.
+ *
+ * Never throws and never aborts the block: an unreachable server, or a 200 that is not the
+ * health document (a proxy's page, a captive portal), is not a verdict — it is "no answer",
+ * and the daemon row is the only signal left.
+ */
+export async function readContractIssue(client: {
+  getServerInfo(): Promise<unknown>;
+}): Promise<ContractIssue | null> {
+  try {
+    const health = await client.getServerInfo();
+    if (!isHealthResponse(health)) return null;
+    const verdict = contractVerdict(health);
+    return verdict === "ok" ? null : { verdict };
+  } catch {
+    return null;
+  }
+}
 export async function requireCompatibleServer(config: CliConfig): Promise<void> {
   try {
     await ensureCompatibleServer(config);
@@ -753,16 +772,7 @@ export function createProgram(): Command {
       // process has no runtime record), so this is where a headless user finds out why.
       // Every failure here falls through — an unreachable server, or a 200 that is not the
       // health document (a proxy's page) — because a status block must still render.
-      let contractIssue: ContractIssue | null = null;
-      try {
-        const health: unknown = await client.getServerInfo();
-        if (isHealthResponse(health)) {
-          const verdict = contractVerdict(health);
-          if (verdict !== "ok") contractIssue = { verdict };
-        }
-      } catch {
-        // Offline: the daemon row is the only signal, and that is honest.
-      }
+      const contractIssue = await readContractIssue(client);
       // Conflict files never sync, so they are the only place a resolved conflict is
       // visible on a headless machine; the same listing answers which files the size
       // cap keeps out. Each vault is read under its own scope and state file.

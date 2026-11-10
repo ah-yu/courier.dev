@@ -61,8 +61,9 @@ import {
  * Module scope because it captures nothing — a function that could live outside a block is a
  * lint warning, and a warning fails `bun run verify`.
  */
-function installHealthAnswer(body: unknown): () => void {
-  setRequestUrlHandler(async () => {
+function installHealthAnswer(body: unknown, requested: string[] = []): () => void {
+  setRequestUrlHandler(async (param) => {
+    requested.push(param.url);
     const text = JSON.stringify(body);
     return { status: 200, headers: {}, text, json: body, arrayBuffer: new ArrayBuffer(0) };
   });
@@ -7101,9 +7102,9 @@ describe("plugin e2e — the real plugin against a real server", () => {
      * The other reason a host stops: the server answered `/api/health` with a window this
      * build is outside.
      *
-     * Driven through the real path — the plugin loads, the host starts, the probe reads a
-     * health document from a stubbed `/api/health` — so the wiring that turns the report
-     * into a pause is what is under test, not a private method called by hand.
+     * The engine's own cases cover the stop ("stops before building an engine when the
+     * server is too old"); this covers what the plugin does with the report — the wiring is a
+     * single callback, and the paused-load probe below drives its own path end to end.
      *
      * The host has already stopped and built nothing (the engine covers that guarantee), so
      * what is asserted here is the plugin's half: it pauses rather than unbinding, says the
@@ -7147,33 +7148,52 @@ describe("plugin e2e — the real plugin against a real server", () => {
       expect(pauseRow.buttons.map((button) => button.text)).toEqual(["继续同步"]);
     });
 
-    it("explains a reloaded paused vault from one health ask, and ignores a body that is not health", async () => {
-      // A paused vault never starts a host, so the probe of a normal start never runs; the
-      // row would read a bare "已暂停" after a reload. `probeServerForDisplay` is the one
-      // unauthenticated ask that lets it say why — and it must not read a proxy's page as a
-      // health document.
-      const { plugin } = await startHostedPlugin("Paused Reload");
-      await plugin.pauseSync();
-      await waitFor(() => plugin.host === null, "the pause never stopped the host");
-      plugin.serverContract = null;
-
-      const previous = installHealthAnswer({
-        status: "ok",
-        timestamp: "2026-11-10T00:00:00.000Z",
-        generation: 1,
-        minClient: 1,
-        version: "0.5.2",
-      });
+    it("explains a paused vault from one health ask on load, and ignores a body that is not health", async () => {
+      // A paused vault never starts a host, so the probe of a normal start never runs and the
+      // row would read a bare "已暂停" after a reload. `onload` makes one unauthenticated ask.
+      const requested: string[] = [];
+      const restore = installHealthAnswer(
+        {
+          status: "ok",
+          timestamp: "2026-11-10T00:00:00.000Z",
+          generation: 1,
+          minClient: 1,
+          version: "0.5.2",
+        },
+        requested,
+      );
       try {
-        await (
-          plugin as unknown as { probeServerForDisplay(): Promise<void> }
-        ).probeServerForDisplay();
-      } finally {
-        previous();
-      }
-      expect(plugin.serverContract).toMatchObject({ verdict: "server-too-old" });
+        const { plugin } = await loadPlugin({
+          vault: new FakeVault(),
+          settings: {
+            serverUrl: server.serverUrl,
+            connectedVaultId: "vault-paused",
+            connectedVaultName: "Paused",
+            syncPaused: true,
+          },
+        });
+        await waitFor(
+          () => plugin.serverContract !== null,
+          "the paused load never asked for the server's contract",
+        );
+        expect(plugin.serverContract).toMatchObject({ verdict: "server-too-old" });
+        expect(requested.filter((url) => url.endsWith("/api/health"))).toHaveLength(1);
 
-      // A 200 that is not the health document leaves the observation alone.
+        const tab = settingsTabOf(plugin);
+        tab.display();
+        const connection = settingsIn(tab.containerEl).find((row) =>
+          row.name.startsWith("已连接"),
+        )!;
+        expect(connection.desc).toContain("服务端版本太旧");
+      } finally {
+        restore();
+      }
+    });
+
+    it("does not read a failure page as a health document", async () => {
+      // A 200 that is not the health document — a proxy's error object, a captive portal —
+      // must leave the observation alone rather than label the server as too old.
+      const { plugin } = await startHostedPlugin("Paused Display");
       plugin.serverContract = null;
       const restore = installHealthAnswer({ error: "UPSTREAM_ERROR" });
       try {

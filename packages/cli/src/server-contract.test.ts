@@ -114,3 +114,51 @@ describe("ensureCompatibleServer", () => {
     }
   });
 });
+
+describe("readContractIssue", () => {
+  it("reports a window this build is outside", async () => {
+    const { readContractIssue } = await import("./program");
+    expect(
+      await readContractIssue({
+        getServerInfo: async () => ({
+          status: "ok",
+          timestamp: "2026-11-10T00:00:00.000Z",
+          generation: 1,
+          minClient: 1,
+          version: "0.5.2",
+        }),
+      }),
+    ).toEqual({ verdict: "server-too-old" });
+  });
+
+  it("answers nothing for a server it can talk to", async () => {
+    const { readContractIssue } = await import("./program");
+    expect(
+      await readContractIssue({
+        getServerInfo: async () => ({
+          status: "ok",
+          timestamp: "2026-11-10T00:00:00.000Z",
+          generation: CONTRACT_GENERATION,
+          minClient: 1,
+        }),
+      }),
+    ).toBeNull();
+  });
+
+  it("answers nothing — and never throws — for a body that is not health, or an unreachable server", async () => {
+    // The regression this pins: `status` returned from the whole block on a 200 that was not
+    // the health document, so a supervisor got exit 0 and no body at all.
+    const { readContractIssue } = await import("./program");
+    expect(
+      await readContractIssue({ getServerInfo: async () => ({ error: "UPSTREAM_ERROR" }) }),
+    ).toBeNull();
+    expect(await readContractIssue({ getServerInfo: async () => null })).toBeNull();
+    expect(
+      await readContractIssue({
+        getServerInfo: async () => {
+          throw new Error("ECONNREFUSED");
+        },
+      }),
+    ).toBeNull();
+  });
+});
