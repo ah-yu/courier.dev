@@ -299,4 +299,18 @@ describe("RemoteIndex", () => {
     expect(index.newestAt("notes/a.md")?.fileId).toBe("b");
     expect(index.newestAt("notes/b.md")?.fileId).toBe("a");
   });
+
+  it("lists every chain recorded at a path, not only the newest", () => {
+    const index = new RemoteIndex();
+    index.remember("a", head("v2", "h2"), "notes/a.md");
+    index.remember("b", head("v1", "h1"), "notes/a.md");
+
+    expect(new Set(index.chainsAt("notes/a.md").map((ref) => ref.fileId))).toEqual(
+      new Set(["a", "b"]),
+    );
+
+    index.forget("b");
+    expect(index.chainsAt("notes/a.md").map((ref) => ref.fileId)).toEqual(["a"]);
+    expect(index.chainsAt("notes/nowhere.md")).toEqual([]);
+  });
 });

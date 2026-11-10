@@ -1275,21 +1275,26 @@ describe("SyncEngine — a batch of local events", () => {
     await engine.initialSync();
     const fileId = engine.fileIdForPath("p.md")!;
 
-    // A newer chain owns `p.md` and its bytes are the ones on disk; the peer then moves
-    // this chain to `q.md`. Following that move renames the local file at `p.md` — the
-    // owner's file — so the notification must not apply it.
+    // The rival is the *older* chain at the same path, and it enters the index through its
+    // own notification (no pass, so the index order is the notifications' — the case a
+    // pass-only owner map cannot answer). Its bytes are the ones on disk: it applied first
+    // on another device, and this one has them.
     const pCipher = await encryptString(key, "p.md");
     await seedChainAt(api, key, pCipher, {
-      fileId: "fileId-owner",
-      versionId: "version-owner",
+      fileId: "fileId-rival",
+      versionId: "version-rival",
       text: "theirs",
-      createdAt: "2030-01-01T00:00:00.000Z",
+      createdAt: "2020-01-01T00:00:00.000Z",
     });
+    await engine.handleFilePushedBatch([{ fileId: "fileId-rival", versionId: "version-rival" }]);
+    // The rival loses the path (this chain is the newer one at it) and writes nothing.
+    expect(textOf(adapter, "p.md")).toBe("mine");
     adapter.files.set("p.md", encoder.encode("theirs"));
-    // A pass learns the owner (the index a notification reads is the pass's, kept current
-    // by every push and notification).
-    await engine.initialSync();
-    expect(textOf(adapter, "p.md")).toBe("theirs");
+
+    // Now the peer moves *this* chain to `q.md`. Following that move would rename the file
+    // at `p.md` — the rival's bytes — and write this chain's head over it. The guard has to
+    // find the rival among every chain recorded at the path, not just the newest one (this
+    // chain is the newest at `p.md`, so a newest-only test would let it through).
     const renameVersion = await api.remoteRename(fileId, await encryptString(key, "q.md"));
 
     await engine.handleFilePushedBatch([{ fileId, versionId: renameVersion }]);
