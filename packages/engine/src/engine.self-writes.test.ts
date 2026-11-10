@@ -326,7 +326,7 @@ describe("SyncEngine — the vault event caused by its own write", () => {
     await engine.initialSync();
     adapter.files.set("note.md", encoder.encode("first revision"));
 
-    // The server broadcasts `file_pushed` while the push HTTP call is still in
+    // The server broadcasts `files_pushed` while the push HTTP call is still in
     // flight, so the echo arrives before `push` resolves. Registering the pushed
     // versionId only after the response left a window in which the engine read
     // its own change back and pushed it a second time.

@@ -89,14 +89,19 @@ export interface WsHub {
    */
   broadcastVaultSettings(vaultId: string, historyLimits: HistoryLimits): void;
   /**
-   * Announce a new version to every session subscribed to the vault except the
-   * sender (identified by sessionId). The origin device label is included so
-   * clients can display which client made the change.
+   * Announce the versions **one push request** committed to every session subscribed to
+   * the vault except the sender (identified by sessionId), as one frame.
+   *
+   * One frame per version used to be fine on a LAN and pathological on a phone: a
+   * mobile link hands hundreds of small frames to the client spread over seconds, and a
+   * client that pulls per notification then pays one round trip (and one local delete)
+   * per file. The batch is the unit the server just applied, so it is the unit the wire
+   * carries. The origin device label is included so clients can display which client
+   * made the change.
    */
-  broadcastFilePushed(
+  broadcastFilesPushed(
     vaultId: string,
-    fileId: string,
-    versionId: string,
+    files: ReadonlyArray<{ fileId: string; versionId: string }>,
     excludeSessionId?: string,
     deviceName?: string | null,
   ): void;
@@ -226,25 +231,31 @@ export function createWsHub(): WsHub {
     }
   }
 
-  function broadcastFilePushed(
+  function broadcastFilesPushed(
     vaultId: string,
-    fileId: string,
-    versionId: string,
+    files: ReadonlyArray<{ fileId: string; versionId: string }>,
     excludeSessionId?: string,
     deviceName?: string | null,
   ): void {
+    if (files.length === 0) return;
     const set = vaultConnections.get(vaultId);
     if (!set) return;
     // The sender's session id decides who is **left out**; it is not part of what the
     // peers receive. It used to travel in the message, which handed every subscriber
     // another client's session id for no reason — a session id is what a push uses to
     // suppress its own echo.
+    //
+    // One frame for the request, not one per file: a phone receives the batch as the
+    // server applied it instead of as hundreds of frames whose delivery the client has
+    // to re-batch, and one frame costs the peer one chain pull.
     const message = JSON.stringify({
-      type: "file_pushed",
+      type: "files_pushed",
       vaultId,
-      fileId,
-      versionId,
-      deviceName,
+      files: files.map((file) => ({
+        fileId: file.fileId,
+        versionId: file.versionId,
+        deviceName: deviceName ?? null,
+      })),
     });
     for (const sessionId of set) {
       if (sessionId === excludeSessionId) continue;
@@ -313,7 +324,7 @@ export function createWsHub(): WsHub {
     onlineSummary,
     broadcastVaultDeleted,
     broadcastVaultSettings,
-    broadcastFilePushed,
+    broadcastFilesPushed,
     subscribe,
   };
 }

@@ -140,7 +140,7 @@ export const BIND_RETRY_MAX_MS = DEFAULT_RECONCILE_INTERVAL_MS;
  */
 export const DEFAULT_SETTINGS_POLL_INTERVAL_MS = 30_000;
 /**
- * `file_pushed` notifications held before one batched chain pull.
+ * `files_pushed` versions held before one batched chain pull.
  *
  * A first bind of a large vault announces one version per file; applying each
  * notification on its own cost one `POST /sync/pull` per file, which is 5 000 requests
@@ -150,14 +150,27 @@ export const DEFAULT_SETTINGS_POLL_INTERVAL_MS = 30_000;
 export const PUSH_NOTIFICATION_BATCH = 200;
 
 /**
- * How long a lone notification waits for company.
+ * How long a notification waits for **no** further notification (ms).
  *
- * A single remote edit should not wait for a full batch, and a burst arrives within
- * milliseconds anyway (the pushing client sends 100 files per request), so a short
- * timer groups one bind into a handful of requests without adding latency a user
- * could notice.
+ * A single remote edit should not wait for a full batch, and the frames of one push
+ * arrive together on a fast link, so a short quiet period groups a bind into a handful
+ * of requests without adding latency a user could notice. The wait is a **debounce**:
+ * every arriving frame pushes the deadline back, unlike the fixed window this used to
+ * be. A fixed window cut a mobile link's delivery into one pull per 25 ms, and a
+ * thousand deleted files became a thousand round trips, one file each.
  */
 export const PUSH_NOTIFICATION_FLUSH_MS = 25;
+
+/**
+ * The longest a held notification may wait for quiet, however busy the stream is (ms).
+ *
+ * Without a cap, a device that keeps receiving frames would never let the debounce
+ * expire — a first bind of 50 000 files announces a frame every few milliseconds for
+ * minutes — and nothing would be applied until the stream ended. The cap turns a
+ * continuous stream into a pull per second, which is still two orders of magnitude
+ * fewer requests than one per notification.
+ */
+export const PUSH_NOTIFICATION_MAX_WAIT_MS = 1_000;
 
 /**
  * How many **local** vault events inside one window mean "a bulk write", not "an edit".
@@ -194,6 +207,38 @@ export const LOCAL_EVENT_BURST_WINDOW_MS = 500;
  * within one tick travels as one job.
  */
 export const LOCAL_EVENT_BURST_FLUSH_MS = 50;
+
+/**
+ * How long a **delete sequence** stays open (ms).
+ *
+ * Obsidian reports one `delete` per file and each trash costs a native operation, so a
+ * bulk deletion arrives at a few events a second — below the {@link LOCAL_EVENT_BURST_SIZE}
+ * rule, which is about eight a second. A delete that follows another delete within this
+ * window is a sequence: the first keeps its immediate push, and the rest join one batched
+ * job whose quiet period is this window. Measured without it: 1 000 deleted files were
+ * 1 000 `POST /sync/push` requests, and a peer applied them one at a time.
+ */
+export const LOCAL_DELETE_SEQUENCE_MS = 750;
+
+/**
+ * How long a held local burst may wait for quiet before it goes out anyway (ms).
+ *
+ * A delete sequence that never pauses (a folder being trashed file by file) would
+ * otherwise stay open for the whole run. The cap releases the batch every few seconds —
+ * still orders of magnitude fewer requests than one per file, without holding a batch
+ * for a burst that lasts minutes.
+ */
+export const LOCAL_EVENT_BURST_MAX_WAIT_MS = 5_000;
+
+/**
+ * How many held paths release a local burst immediately, without waiting for quiet.
+ *
+ * The wait exists so a slow stream still batches; it must not delay a **dense** burst,
+ * whose paths are already in hand. One hundred is the engine's push batch, so a burst of
+ * a thousand files goes out as ten full requests the moment the last of them is counted,
+ * instead of waiting out a quiet period the burst will never have.
+ */
+export const LOCAL_EVENT_BURST_MAX_FILES = 100;
 
 /**
  * Where a host's file events come from.
@@ -427,9 +472,16 @@ export class SyncHost {
    * bind completes.
    */
   private bindEverCompleted = false;
-  /** `file_pushed` notifications waiting for the next batched chain pull. */
+  /** `files_pushed` versions waiting for the next batched chain pull. */
   private pendingPushes: PushedFileEvent[] = [];
-  /** The short timer that flushes {@link pendingPushes}; `null` when none is scheduled. */
+  /** Whether a notification pull is in flight; the next one waits for it. */
+  private pushPullInFlight = false;
+  /**
+   * When the oldest held notification arrived (`Date.now()`), so the flush's debounce
+   * cannot hold the first one past {@link PUSH_NOTIFICATION_MAX_WAIT_MS}.
+   */
+  private pendingSince: number | null = null;
+  /** The debounce timer that flushes {@link pendingPushes}; `null` when none is armed. */
   private pushFlushTimer: TimerHandle | null = null;
   /** Local vault events counted in the current window (see {@link LOCAL_EVENT_BURST_SIZE}). */
   private localEventsInWindow = 0;
@@ -445,6 +497,12 @@ export class SyncHost {
    */
   private pendingBurstChanges = new Set<string>();
   private pendingBurstDeletes = new Set<string>();
+  /**
+   * When each held deletion happened (`Date.now()`), so the tombstone carries the moment
+   * the user removed the file rather than the moment the batch was flushed — a
+   * config-folder conflict is settled on exactly that value.
+   */
+  private pendingBurstDeleteTimes = new Map<string, number>();
   /** A burst's moves, keyed by their source (a later event for it wins). */
   private pendingBurstRenames = new Map<string, string>();
   /**
@@ -456,6 +514,10 @@ export class SyncHost {
   private localBurstOwed = false;
   /** The timer that hands the collected paths to the engine; `null` when none is armed. */
   private localBurstTimer: TimerHandle | null = null;
+  /** When the oldest held burst path arrived (`Date.now()`), for the flush's cap. */
+  private localBurstSince: number | null = null;
+  /** When the last local delete event arrived, for {@link LOCAL_DELETE_SEQUENCE_MS}. */
+  private lastDeleteAt = 0;
   /** True while a burst job is running, so a new hand-off waits for it (single-flight). */
   private localBurstRunning = false;
   /** True once the socket has been subscribed at least once — see `handleWsEvent`. */
@@ -636,17 +698,21 @@ export class SyncHost {
           engine.hasSelfWriteHint(path),
           () => engine.handleLocalChange(path),
         ),
-      removed: (path) =>
+      removed: (path) => {
+        // The moment the event arrived, not the moment its path job runs: a job can wait
+        // behind an exclusive operation, and the tombstone's moment is compared by peers.
+        const deletedAtMs = Date.now();
         // Deleting transfers no content, so it never needs to run alone.
-        this.dispatchLocalEvent(
+        return this.dispatchLocalEvent(
           "deleted",
           `delete ${path}`,
           path,
           null,
           0,
           engine.hasSelfDeleteHint(path),
-          () => engine.handleLocalDelete(path),
-        ),
+          () => engine.handleLocalDelete(path, deletedAtMs),
+        );
+      },
       renamed: (from, to, sizeBytes) =>
         this.dispatchLocalEvent(
           "renamed",
@@ -775,7 +841,10 @@ export class SyncHost {
     this.localBurstOwed = false;
     this.pendingBurstChanges.clear();
     this.pendingBurstDeletes.clear();
+    this.pendingBurstDeleteTimes.clear();
     this.pendingBurstRenames.clear();
+    this.localBurstSince = null;
+    this.lastDeleteAt = 0;
     this.localEventsInWindow = 0;
     this.localEventWindowStart = 0;
     if (this.pushFlushTimer !== null) {
@@ -785,6 +854,8 @@ export class SyncHost {
     // The socket is gone: notifications held for it are dropped, and the next pass
     // reads the index instead.
     this.pendingPushes = [];
+    this.pendingSince = null;
+    this.pushPullInFlight = false;
     if (this.reconcileTimer !== null) {
       this.reconcileTimer.cancel();
       this.reconcileTimer = null;
@@ -949,28 +1020,59 @@ export class SyncHost {
   }
 
   /**
-   * Hold one `file_pushed` for the next batched chain pull.
+   * Hold the versions one `files_pushed` frame announced for the next batched pull.
    *
-   * A full batch goes out immediately; a lone notification waits
-   * {@link PUSH_NOTIFICATION_FLUSH_MS}, which is far below what a user can notice and
-   * far above the gap between two notifications of the same bind.
+   * A full batch goes out immediately; otherwise the flush waits for
+   * {@link PUSH_NOTIFICATION_FLUSH_MS} of quiet, with the cap
+   * {@link PUSH_NOTIFICATION_MAX_WAIT_MS} on how long the oldest held version may wait.
+   * The debounce is what keeps a batch intact across a link that delivers it in pieces:
+   * a fixed window turned a mobile phone's delivery into one pull per 25 ms.
    */
-  private queuePushedFile(event: { fileId: string; versionId: string; deviceName?: string }): void {
-    // Consume the echo now, while its record is fresh: the batch may not be applied
-    // until seconds later, and the record has a deadline.
-    if (this.engineInstance?.consumeOwnPush(event.versionId) === true) return;
-    this.pendingPushes.push({
-      fileId: event.fileId,
-      versionId: event.versionId,
-      deviceName: event.deviceName ?? null,
-    });
+  private queuePushedFiles(events: readonly PushedFileEvent[]): void {
+    let added = 0;
+    for (const event of events) {
+      // Consume the echo now, while its record is fresh: the batch may not be applied
+      // until seconds later, and the record has a deadline.
+      if (this.engineInstance?.consumeOwnPush(event.versionId) === true) continue;
+      this.pendingPushes.push({
+        fileId: event.fileId,
+        versionId: event.versionId,
+        deviceName: event.deviceName ?? null,
+      });
+      added += 1;
+    }
+    if (added === 0) return;
+    this.pendingSince ??= Date.now();
     if (this.pendingPushes.length >= PUSH_NOTIFICATION_BATCH) {
       this.flushPushedFiles();
       return;
     }
-    this.pushFlushTimer ??= this.platform.after(PUSH_NOTIFICATION_FLUSH_MS, () =>
-      this.flushPushedFiles(),
+    this.schedulePushFlush();
+  }
+
+  /**
+   * (Re)arm the flush unless a pull is in flight.
+   *
+   * Always cancels and re-arms: **that is the debounce** — every arriving frame pushes the
+   * deadline back, so a push that reaches this device over more than the quiet period still
+   * travels as one pull. The cap keeps the oldest held version from waiting past
+   * {@link PUSH_NOTIFICATION_MAX_WAIT_MS} when the stream never stops. Leaving an already
+   * armed timer alone would turn this back into the fixed window the change removed.
+   */
+  private schedulePushFlush(): void {
+    // A pull in flight re-arms the flush when it settles; arming now would queue a
+    // second pull, which is what made the burst pay one round trip per window.
+    if (this.pushPullInFlight) return;
+    const waited = Date.now() - (this.pendingSince ?? Date.now());
+    const delay = Math.min(
+      PUSH_NOTIFICATION_FLUSH_MS,
+      Math.max(0, PUSH_NOTIFICATION_MAX_WAIT_MS - waited),
     );
+    this.pushFlushTimer?.cancel();
+    this.pushFlushTimer = this.platform.after(delay, () => {
+      this.pushFlushTimer = null;
+      this.flushPushedFiles();
+    });
   }
 
   /** Send the held notifications as one batch; a no-op when nothing is held. */
@@ -980,11 +1082,32 @@ export class SyncHost {
       this.pushFlushTimer = null;
     }
     if (this.pendingPushes.length === 0) return;
-    const batch = this.pendingPushes;
-    this.pendingPushes = [];
+    // One pull at a time: what arrives meanwhile is held for the next one instead of
+    // queueing a pull of its own behind this one.
+    if (this.pushPullInFlight) return;
+    const batch = this.pendingPushes.slice(0, PUSH_NOTIFICATION_BATCH);
+    this.pendingPushes = this.pendingPushes.slice(batch.length);
+    this.pendingSince = this.pendingPushes.length > 0 ? Date.now() : null;
     const engine = this.engineInstance;
-    if (!engine) return;
-    this.runQueued("pull", null, () => engine.handleFilePushedBatch(batch));
+    if (!engine) {
+      this.pendingPushes = [];
+      return;
+    }
+    this.pushPullInFlight = true;
+    // A restart while this pull runs resets the flag for the new host's own pull, so the
+    // stale tail must not clear it (`stop()` has already dropped every held notification).
+    const generation = this.generation;
+    this.runQueued("pull", null, async () => {
+      try {
+        await engine.handleFilePushedBatch(batch);
+      } finally {
+        if (this.generation === generation) {
+          this.pushPullInFlight = false;
+          if (this.pendingPushes.length >= PUSH_NOTIFICATION_BATCH) this.flushPushedFiles();
+          else if (this.pendingPushes.length > 0) this.schedulePushFlush();
+        }
+      }
+    });
   }
 
   /**
@@ -1035,19 +1158,42 @@ export class SyncHost {
       return;
     }
     const now = Date.now();
+    // A delete that follows a delete is a **sequence**, not a burst of unrelated events:
+    // Obsidian reports one `delete` per file and each trash costs a native operation, so
+    // a bulk deletion arrives at a few events a second — below the
+    // `LOCAL_EVENT_BURST_SIZE` rule, which is about eight a second. Handled one by one,
+    // every file is its own content-less push request and a peer applies it alone
+    // (measured: 1 000 deleted files were 1 000 pushes). The first delete of a sequence
+    // keeps its immediate push; the rest travel together, which is the same job a dense
+    // burst takes.
+    if (kind === "deleted") {
+      const sequence = now - this.lastDeleteAt <= LOCAL_DELETE_SEQUENCE_MS;
+      this.lastDeleteAt = now;
+      if (sequence) {
+        this.holdDelete(from, now);
+        this.scheduleLocalBurst();
+        return;
+      }
+    }
     if (now - this.localEventWindowStart > LOCAL_EVENT_BURST_WINDOW_MS) {
       this.localEventWindowStart = now;
       this.localEventsInWindow = 0;
     }
     this.localEventsInWindow += 1;
     if (this.localEventsInWindow > LOCAL_EVENT_BURST_SIZE) {
-      if (kind === "deleted") this.pendingBurstDeletes.add(from);
+      if (kind === "deleted") this.holdDelete(from, now);
       else if (kind === "renamed" && to !== null) this.pendingBurstRenames.set(from, to);
       else if (kind === "changed") this.pendingBurstChanges.add(from);
       this.scheduleLocalBurst();
       return;
     }
     this.runQueued(label, sizeBytes, run);
+  }
+
+  /** Hold a deletion with the moment it happened, for the tombstone's `mtimeMs`. */
+  private holdDelete(path: string, at: number): void {
+    this.pendingBurstDeletes.add(path);
+    this.pendingBurstDeleteTimes.set(path, at);
   }
 
   /**
@@ -1057,14 +1203,40 @@ export class SyncHost {
    * job runs set the flag again and the job's tail arms the next hand-off, so the vault
    * converges on the last file the burst wrote however long the burst lasts — without two
    * jobs deciding about the same paths concurrently.
+   *
+   * The wait is a **debounce with a cap**, and its quiet period depends on what is being
+   * batched: a delete sequence closes after {@link LOCAL_DELETE_SEQUENCE_MS} without a
+   * further delete (its own detection window), while a write burst closes after
+   * {@link LOCAL_EVENT_BURST_FLUSH_MS}. Either way {@link LOCAL_EVENT_BURST_MAX_WAIT_MS}
+   * releases the first held path, so a folder trashed file by file still travels in
+   * batches instead of one request per file.
    */
   private scheduleLocalBurst(): void {
     // A late event from a host that has been stopped owes nothing: nothing would run the
     // job, and `whenIdle` would wait for it forever.
     if (this.stopped) return;
     this.localBurstOwed = true;
-    if (this.localBurstTimer !== null || this.localBurstRunning) return;
-    const timer = this.platform.after(LOCAL_EVENT_BURST_FLUSH_MS, () => {
+    // A running job arms the next hand-off from its own tail.
+    if (this.localBurstRunning) return;
+    const now = Date.now();
+    this.localBurstSince ??= now;
+    const held =
+      this.pendingBurstChanges.size + this.pendingBurstDeletes.size + this.pendingBurstRenames.size;
+    const deleteOnly = this.pendingBurstChanges.size === 0 && this.pendingBurstRenames.size === 0;
+    // A full batch goes now: a dense burst has its paths in hand and would only wait for a
+    // quiet period it is never going to have.
+    const quiet =
+      held >= LOCAL_EVENT_BURST_MAX_FILES
+        ? 0
+        : deleteOnly
+          ? LOCAL_DELETE_SEQUENCE_MS
+          : LOCAL_EVENT_BURST_FLUSH_MS;
+    const delay = Math.max(
+      0,
+      Math.min(quiet, LOCAL_EVENT_BURST_MAX_WAIT_MS - (now - this.localBurstSince)),
+    );
+    this.localBurstTimer?.cancel();
+    const timer = this.platform.after(delay, () => {
       this.localBurstTimer = null;
       this.runLocalBurst();
     });
@@ -1081,10 +1253,17 @@ export class SyncHost {
     const changed = [...this.pendingBurstChanges];
     const deleted = [...this.pendingBurstDeletes];
     const renamed = [...this.pendingBurstRenames].map(([from, to]) => ({ from, to }));
+    const deletedAtMs: Record<string, number> = {};
+    for (const path of deleted) {
+      const at = this.pendingBurstDeleteTimes.get(path);
+      if (at !== undefined) deletedAtMs[path] = at;
+    }
     this.pendingBurstChanges.clear();
     this.pendingBurstDeletes.clear();
+    this.pendingBurstDeleteTimes.clear();
     this.pendingBurstRenames.clear();
     this.localBurstOwed = false;
+    this.localBurstSince = null;
     if (changed.length === 0 && deleted.length === 0 && renamed.length === 0) return;
     // Say how big the burst was: a host that logs this after one save is looking at a
     // watcher that reports one save as a burst (the threshold is 4 events in 500 ms; an
@@ -1099,7 +1278,7 @@ export class SyncHost {
     // bounds how much it holds.
     this.runQueued("local burst", null, async () => {
       try {
-        await engine.handleLocalEvents({ changed, deleted, renamed });
+        await engine.handleLocalEvents({ changed, deleted, renamed, deletedAtMs });
       } finally {
         this.localBurstRunning = false;
         // Paths that arrived while this job ran were not covered by it.
@@ -1226,18 +1405,18 @@ export class SyncHost {
 
   private handleWsEvent(event: WsEvent): void {
     switch (event.type) {
-      case "file_pushed":
+      case "files_pushed":
         // Coalesced, not applied one by one: a bind announces one version per file, and
         // one chain request per notification is what tripped the sync limiter on a live
         // peer (`handleFilePushedBatch`). The burst is queued as unknown-size work, which
         // is treated as exclusive — a peer's 50 MiB attachment arrives on this path.
-        this.queuePushedFile(event);
+        this.queuePushedFiles(event.files);
         break;
       case "state_change":
         this.opts.onStateChange?.(event.state);
         if (event.state === "connected") {
           // A reconnect is the one moment the vault can be arbitrarily stale: the
-          // server keeps no backlog, so every `file_pushed` sent while the socket was
+          // server keeps no backlog, so every `files_pushed` sent while the socket was
           // down is gone, and the periodic pass is minutes away.
           //
           // The *first* connect is not that moment — it is the socket `start()` just

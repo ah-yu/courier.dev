@@ -1,7 +1,7 @@
 {
   "id": "courier",
   "name": "Courier",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "minAppVersion": "1.13.0",
   "description": "Sync your vault across devices with end-to-end encryption on your own server.",
   "author": "Zheyu Zhang",

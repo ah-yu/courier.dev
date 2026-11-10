@@ -15,7 +15,18 @@ export type WsEvent =
       message: string;
     }
   | { type: "state_change"; state: WsConnectionState }
-  | { type: "file_pushed"; fileId: string; versionId: string; deviceName?: string };
+  /**
+   * The versions one push request committed.
+   *
+   * One frame for the whole request (up to the server's 100-file batch), never one per
+   * file: a peer on a mobile link receives hundreds of small frames spread over seconds,
+   * and a notification-shaped pull per frame is how a bulk deletion turned into a
+   * thousand round trips, one file each.
+   */
+  | {
+      type: "files_pushed";
+      files: Array<{ fileId: string; versionId: string; deviceName?: string | null }>;
+    };
 
 export type WsEventHandler = (event: WsEvent) => void;
 
@@ -26,7 +37,7 @@ export interface SyncWebSocketOptions {
   /** Single user key (`ck_...`) shared by all of the user's devices. */
   userKey: string;
   /**
-   * The label this client states for itself, so a peer's `file_pushed`
+   * The label this client states for itself, so a peer's `files_pushed`
    * notification can name the machine that made the change. It is not an identity:
    * nothing is registered or verified, and changing it affects only future events.
    */
@@ -152,14 +163,17 @@ export class SyncWebSocket {
         case "ping":
           this.send({ type: "pong" });
           break;
-        case "file_pushed":
-          this.opts.onEvent({
-            type: "file_pushed",
-            fileId: msg.fileId,
-            versionId: msg.versionId,
-            deviceName: msg.deviceName,
-          });
+        case "files_pushed": {
+          // A malformed entry is dropped, not the frame: the rest of the batch still
+          // names versions the server committed, and the next pass covers what is lost.
+          const files = Array.isArray(msg.files)
+            ? msg.files.filter(
+                (file) => typeof file?.fileId === "string" && typeof file.versionId === "string",
+              )
+            : [];
+          if (files.length > 0) this.opts.onEvent({ type: "files_pushed", files });
           break;
+        }
       }
     });
 

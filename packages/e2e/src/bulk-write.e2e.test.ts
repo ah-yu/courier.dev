@@ -118,6 +118,9 @@ function notePath(prefix: string, index: number): string {
   return `notes/${prefix}-${String(index).padStart(4, "0")}.md`;
 }
 
+/** A pause between throws rewritten in place: what Obsidian's trash loop looks like. */
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /** A note body that changes with `version`, so an applied edit is visible on the peer. */
 function noteBody(index: number, version: number): string {
   return `# note ${index}\nv${version}\n`;
@@ -407,6 +410,49 @@ describe("a bulk local write through a real server", () => {
       expect(mac.counts.pushes).toBeLessThanOrEqual(30);
       expect(mac.counts.rateLimited).toBe(0);
       expect(mac.counts.indexReads).toBe(0);
+      expect(phone.counts.rateLimited).toBe(0);
+    } finally {
+      phone.host.stop();
+      mac.host.stop();
+    }
+  }, 120_000);
+
+  it("batches a trash loop that reports one delete every 200 ms", async () => {
+    // The production shape of a bulk deletion: Obsidian's own trash loop reports one
+    // `delete` per file at a few a second — below the 4-in-500 ms burst rule — so only the
+    // delete-sequence rule batches it. Without it, this test measured one push per file.
+    const vault = await createTestVault(server, "bulk-trash-loop", material);
+    const phone = await startHost(vault.id, mkdtempSync(join(tmpdir(), "bulk-tl-phone-")), "phone");
+    const mac = await startHost(vault.id, mkdtempSync(join(tmpdir(), "bulk-tl-mac-")), "mac");
+    const notes = 20;
+
+    try {
+      const events = mac.adapter.handlers!;
+      for (let index = 0; index < notes; index += 1) {
+        const path = notePath("trashed", index);
+        const text = `# trashed ${index}\n`;
+        mkdirSync(join(mac.dir, dirname(path)), { recursive: true });
+        writeFileSync(join(mac.dir, path), text);
+        events.changed(path, Buffer.byteLength(text));
+      }
+      await waitFor(() => countNotes(phone.dir) === notes, `${notes} seeded notes`, 60_000);
+      await phone.host.whenIdle();
+      await mac.host.whenIdle();
+      for (const key of Object.keys(mac.counts) as Array<keyof WireCounts>) mac.counts[key] = 0;
+
+      for (let index = 0; index < notes; index += 1) {
+        const path = notePath("trashed", index);
+        unlinkSync(join(mac.dir, path));
+        events.removed(path);
+        await sleep(200);
+      }
+      await waitFor(() => countNotes(phone.dir) === 0, "every trashed note gone", 60_000);
+      await phone.host.whenIdle();
+      await mac.host.whenIdle();
+
+      // One push per file would be 20; the sequence turns it into a handful.
+      expect(mac.counts.pushes).toBeLessThanOrEqual(6);
+      expect(mac.counts.rateLimited).toBe(0);
       expect(phone.counts.rateLimited).toBe(0);
     } finally {
       phone.host.stop();

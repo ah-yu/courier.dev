@@ -225,11 +225,6 @@ export class LocalEventJob<T extends JobVersion> implements TombstoneLedger {
     this.changes.push(path);
   }
 
-  /** Whether a path is already being decided as a change in this job. */
-  hasPendingChange(path: string): boolean {
-    return this.pendingChanges.has(path);
-  }
-
   /** Queue one tracked file's already-read change for the job's bulk chain read. */
   track(fileId: string, path: string, read: JobFileRead): void {
     this.tracked.push({ fileId, path, read });

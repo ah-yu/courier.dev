@@ -84,7 +84,7 @@ export type WsClientMessage =
       vaultId: string;
       userKey: string;
       /**
-       * The client's self-declared label, passed on to peers in `file_pushed` so a
+       * The client's self-declared label, passed on to peers in `files_pushed` so a
        * notification can say which machine made the change. Display metadata only:
        * nothing is registered or verified against it.
        */
@@ -130,11 +130,22 @@ export type WsServerMessage =
    */
   | { type: "api_key_disabled"; vaultId: string }
   | { type: "ping" }
+  /**
+   * The versions **one push request** committed, announced as one frame.
+   *
+   * A push carries up to 100 files, and announcing them one frame per version was fine
+   * on a LAN and pathological on a phone: a mobile link hands hundreds of tiny frames
+   * to the client over seconds, and a client that pulls per notification then pays one
+   * round trip per file (and applies one file per pull). The batch is already the unit
+   * the server applied, so it is the unit the wire carries.
+   */
   | {
-      type: "file_pushed";
+      type: "files_pushed";
       vaultId: string;
-      fileId: string;
-      versionId: string;
-      /** Label the pushing client stated for itself (for display). */
-      deviceName?: string;
+      files: Array<{
+        fileId: string;
+        versionId: string;
+        /** Label the pushing client stated for itself (for display). */
+        deviceName?: string | null;
+      }>;
     };

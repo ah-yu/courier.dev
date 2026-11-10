@@ -232,7 +232,6 @@ describe("LocalEventJob — the change list", () => {
     job.noteChange("b.md");
     job.noteChange("b.md");
     expect(job.changes).toEqual(["a.md", "b.md"]);
-    expect(job.hasPendingChange("b.md")).toBe(true);
   });
 });
 
