@@ -240,9 +240,10 @@ line).
   a real device makes of the same numbers.
 - **A peer that is online during the bind.** Not covered by the numbers above, because the harness
   starts the second device after the first one finished: in the real two-window case the peer receives
-  one `file_pushed` per file and used to answer each with its own `POST /sync/pull`. That spent the
+  one `files_pushed` frame per push request and used to answer each version with its own `POST /sync/pull`.
+  That spent the
   600/minute window on 548 files of 5 000 and left the rest to the next pass. Notifications are now
-  coalesced into batched chain pulls (200 per request, 25 ms of holding); see
+  coalesced into batched chain pulls (200 per request, a 25 ms debounce with a 1 s cap); see
   [sync-engine.md](sync-engine.md#pass-order-and-concurrency).
 
 ## Files

@@ -359,7 +359,7 @@ describe("ObsidianVaultAdapter — notes", () => {
   });
 
   it("treats losing a create race as success when both sides wrote the same bytes", async () => {
-    // A reconcile and a `file_pushed` notification can pull one path at once. Both
+    // A reconcile and a `files_pushed` notification can pull one path at once. Both
     // read `null` from the index before either `createBinary` resolves, and the app
     // refuses the loser with `File already exists.` — harmless when both wrote the
     // same version, and the pull must not fail for it.

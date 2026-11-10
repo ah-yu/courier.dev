@@ -355,7 +355,7 @@ export class FakeApi implements SyncApi {
   offline = false;
   /**
    * Hook that runs *inside* `push`, before it resolves — how the server's
-   * `file_pushed` broadcast reaches a client while its own request is still in
+   * `files_pushed` broadcast reaches a client while its own request is still in
    * flight.
    */
   onPush: ((files: PushFile[]) => Promise<void>) | null = null;

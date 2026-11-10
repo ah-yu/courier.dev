@@ -709,9 +709,17 @@ describe("handleSyncPush", () => {
       expect.objectContaining({ fileId: "f-2", versionId: "v2" }),
     ]);
     // Every accepted version is announced to the vault's subscribers, with the label
-    // this push stated.
-    expect(broadcast).toHaveBeenCalledTimes(2);
-    expect(broadcast).toHaveBeenCalledWith("v1", "f-1", "v1", undefined, undefined);
+    // this push stated — **one** call carrying the batch, not one per file.
+    expect(broadcast).toHaveBeenCalledTimes(1);
+    expect(broadcast).toHaveBeenCalledWith(
+      "v1",
+      [
+        { fileId: "f-1", versionId: "v1" },
+        { fileId: "f-2", versionId: "v2" },
+      ],
+      undefined,
+      undefined,
+    );
   });
 
   it("flushes the batch's bytes before any row that names them commits", async () => {
@@ -816,10 +824,17 @@ describe("handleSyncPush", () => {
       { fileId: "f-2", status: "stale_base", currentVersionId: "v-peer" },
       { fileId: "f-3", status: "ok", versionId: "v-f-3", contentHash: "hash-f-3" },
     ]);
-    // The stale row is not announced; the two that committed are.
-    expect(broadcast).toHaveBeenCalledTimes(2);
-    expect(broadcast).toHaveBeenCalledWith("v1", "f-1", "v-f-1", undefined, undefined);
-    expect(broadcast).toHaveBeenCalledWith("v1", "f-3", "v-f-3", undefined, undefined);
+    // The stale row is not announced; the two that committed are, in one frame.
+    expect(broadcast).toHaveBeenCalledTimes(1);
+    expect(broadcast).toHaveBeenCalledWith(
+      "v1",
+      [
+        { fileId: "f-1", versionId: "v-f-1" },
+        { fileId: "f-3", versionId: "v-f-3" },
+      ],
+      undefined,
+      undefined,
+    );
   });
 
   it("keeps a retained row's verdict with its file when a phase-1 refusal precedes it", async () => {
@@ -877,9 +892,16 @@ describe("handleSyncPush", () => {
       { fileId: "f-2", status: "ok", versionId: "v-f-2", contentHash: "hash-f-2" },
       { fileId: "f-3", status: "ok", versionId: "v-f-3", contentHash: "hash-f-3" },
     ]);
-    expect(broadcast).toHaveBeenCalledTimes(2);
-    expect(broadcast).toHaveBeenCalledWith("v1", "f-2", "v-f-2", undefined, undefined);
-    expect(broadcast).toHaveBeenCalledWith("v1", "f-3", "v-f-3", undefined, undefined);
+    expect(broadcast).toHaveBeenCalledTimes(1);
+    expect(broadcast).toHaveBeenCalledWith(
+      "v1",
+      [
+        { fileId: "f-2", versionId: "v-f-2" },
+        { fileId: "f-3", versionId: "v-f-3" },
+      ],
+      undefined,
+      undefined,
+    );
   });
 
   it("fails every pending file when the batch insert itself throws", async () => {

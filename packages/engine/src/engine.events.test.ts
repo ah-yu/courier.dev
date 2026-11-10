@@ -281,7 +281,7 @@ describe("sync activity", () => {
   });
 
   it("does not re-report a version this device already applied", async () => {
-    // A `file_pushed` that names the head this device already holds is not an incoming
+    // A `files_pushed` that names the head this device already holds is not an incoming
     // change: it adds no row and writes nothing. (A size cap used to be the reason such
     // a notification was skipped; the cap now bounds uploads only, so the rule that
     // matters is "already applied".)
@@ -471,6 +471,46 @@ describe("SyncEngine — a batch of local events", () => {
     expect(api.chains.get(fileId)!.map((version) => version.action)).toEqual(["create", "modify"]);
     expect(new TextDecoder().decode(adapter.files.get("in-place.md"))).toBe("v2");
     await expectConsistent(engine, adapter, api);
+  });
+
+  it("does not tombstone a path that was recreated before the batch was decided", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("undo.md", encoder.encode("v1"));
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("undo.md")!;
+
+    // Trash and undo: the recreate is decided on its own event first, and the host holds
+    // the deletion for a sequence before the batch runs. A batch cannot see the two events
+    // in order, so the absence is checked on disk — a tombstone here would trash a live
+    // note on every peer and reset the chain.
+    adapter.files.set("undo.md", encoder.encode("v2"));
+    await engine.handleLocalChange("undo.md");
+    const before = api.pushCalls.length;
+
+    await engine.handleLocalEvents({ deleted: ["undo.md"] });
+
+    expect(api.pushCalls.slice(before)).toEqual([]);
+    expect(api.chains.get(fileId)!.map((version) => version.action)).toEqual(["create", "modify"]);
+    await expectConsistent(engine, adapter, api);
+  });
+
+  it("stamps a batch's tombstone with the moment the deletion happened", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    const paths = seed(adapter, 1);
+    await engine.initialSync();
+    for (const path of paths) adapter.files.delete(path);
+
+    // The host holds a deletion before the batch runs; the moment a peer compares is the
+    // deletion's, not the flush's (a config-folder conflict is settled on it).
+    const deletedAt = Date.now() - 5_000;
+    await engine.handleLocalEvents({
+      deleted: paths,
+      deletedAtMs: { [paths[0]!]: deletedAt },
+    });
+
+    const tombstone = api.pushed.at(-1)!;
+    expect(tombstone.action).toBe("delete");
+    expect(tombstone.mtimeMs).toBe(deletedAt);
   });
 
   it("settles a refused create through its own lost-response handling", async () => {

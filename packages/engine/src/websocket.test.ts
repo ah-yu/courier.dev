@@ -216,18 +216,37 @@ describe("SyncWebSocket — messages", () => {
     const ws = connected(socket);
 
     ws.deliver({
-      type: "file_pushed",
+      type: "files_pushed",
       vaultId: "v1",
-      fileId: "f1",
-      versionId: "ver-1",
-      deviceName: "Surface",
+      files: [
+        { fileId: "f1", versionId: "ver-1", deviceName: "Surface" },
+        { fileId: "f2", versionId: "ver-2", deviceName: "Surface" },
+      ],
+    });
+
+    // One frame, every version the push committed, and the label once per entry.
+    expect(events).toContainEqual({
+      type: "files_pushed",
+      files: [
+        { fileId: "f1", versionId: "ver-1", deviceName: "Surface" },
+        { fileId: "f2", versionId: "ver-2", deviceName: "Surface" },
+      ],
+    });
+  });
+
+  it("drops a malformed entry instead of the whole frame", () => {
+    const { socket, events } = makeSocket();
+    const ws = connected(socket);
+
+    ws.deliver({
+      type: "files_pushed",
+      vaultId: "v1",
+      files: [{ fileId: "f1", versionId: "ver-1" }, { fileId: 42, versionId: "ver-2" } as never],
     });
 
     expect(events).toContainEqual({
-      type: "file_pushed",
-      fileId: "f1",
-      versionId: "ver-1",
-      deviceName: "Surface",
+      type: "files_pushed",
+      files: [{ fileId: "f1", versionId: "ver-1" }],
     });
   });
 

@@ -925,7 +925,7 @@ describe("EngineHost", () => {
     /**
      * The device label is the only thing that identifies this client to a peer, and
      * there is no registry behind it: the subscriber states it in the `subscribe`
-     * message and the server passes it on in `file_pushed`.
+     * message and the server passes it on in `files_pushed`.
      */
     it("subscribes with the configured device name", async () => {
       const settings = baseSettings({ deviceName: "书房笔记本" });
@@ -1162,10 +1162,9 @@ describe("EngineHost", () => {
       const handle = vi.spyOn(host.engine!, "handleFilePushedBatch");
       const socket = MockWebSocket.instances.at(-1)!;
       socket.deliver({
-        type: "file_pushed",
-        fileId: "file-1",
-        versionId: "version-1",
-        deviceName: "Mobile",
+        type: "files_pushed",
+        vaultId: "vault-1",
+        files: [{ fileId: "file-1", versionId: "version-1", deviceName: "Mobile" }],
       });
       await waitFor(() =>
         expect(handle).toHaveBeenCalledWith([

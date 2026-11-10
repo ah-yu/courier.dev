@@ -13,7 +13,7 @@ let hub: WsHub;
 let addUserConnection: WsHub["addUserConnection"];
 let removeConnection: WsHub["removeConnection"];
 let broadcastVaultDeleted: WsHub["broadcastVaultDeleted"];
-let broadcastFilePushed: WsHub["broadcastFilePushed"];
+let broadcastFilesPushed: WsHub["broadcastFilesPushed"];
 let handleSubscribe: WsHub["subscribe"];
 
 beforeEach(() => {
@@ -21,7 +21,7 @@ beforeEach(() => {
   addUserConnection = hub.addUserConnection;
   removeConnection = hub.removeConnection;
   broadcastVaultDeleted = hub.broadcastVaultDeleted;
-  broadcastFilePushed = hub.broadcastFilePushed;
+  broadcastFilesPushed = hub.broadcastFilesPushed;
   handleSubscribe = hub.subscribe;
 });
 
@@ -215,27 +215,58 @@ describe("broadcastVaultSettings", () => {
   });
 });
 
-describe("broadcastFilePushed", () => {
-  it("sends file_pushed with vaultId to all subscribed sessions except the sender", () => {
+describe("broadcastFilesPushed", () => {
+  it("sends one files_pushed frame to all subscribed sessions except the sender", () => {
     const { ws: ws1 } = mockWs();
     const { ws: ws2 } = mockWs();
 
     addUserConnection("v1", ws1, "sid1", { userId: "u-1", deviceName: "A" });
     addUserConnection("v1", ws2, "sid2", { userId: "u-2", deviceName: "B" });
 
-    broadcastFilePushed("v1", "file-1", "ver-1", "sid1");
+    broadcastFilesPushed("v1", [{ fileId: "file-1", versionId: "ver-1" }], "sid1");
 
     // Sender (sid1) is excluded, and its session id is **not** part of what the peer
     // receives: the exclusion is the server's decision, not a field to pass on.
     expect(ws1.send).not.toHaveBeenCalled();
+    expect(ws2.send).toHaveBeenCalledTimes(1);
     expect(ws2.send).toHaveBeenCalledWith(
       JSON.stringify({
-        type: "file_pushed",
+        type: "files_pushed",
         vaultId: "v1",
-        fileId: "file-1",
-        versionId: "ver-1",
+        files: [{ fileId: "file-1", versionId: "ver-1", deviceName: null }],
       }),
     );
+  });
+
+  it("carries a whole push request in one frame", () => {
+    // The rule this exists for: a thousand deleted files must not reach a phone as a
+    // thousand frames. One request is one frame, however many versions it committed.
+    const { ws } = mockWs();
+    addUserConnection("v1", ws, "sid-peer", { userId: "u-1", deviceName: "phone" });
+
+    const files = Array.from({ length: 100 }, (_, index) => ({
+      fileId: `f-${index}`,
+      versionId: `v-${index}`,
+    }));
+    broadcastFilesPushed("v1", files, "sid-sender", "MacBook");
+
+    expect(ws.send).toHaveBeenCalledTimes(1);
+    const frame = JSON.parse((ws.send as any).mock.calls[0][0] as string);
+    expect(frame.type).toBe("files_pushed");
+    expect(frame.files).toHaveLength(100);
+    expect(frame.files[99]).toEqual({ fileId: "f-99", versionId: "v-99", deviceName: "MacBook" });
+
+    removeConnection("v1", "sid-peer");
+  });
+
+  it("sends nothing for an empty batch", () => {
+    const { ws } = mockWs();
+    addUserConnection("v1", ws, "sid-peer", { userId: "u-1", deviceName: "phone" });
+
+    broadcastFilesPushed("v1", [], "sid-sender");
+
+    expect(ws.send).not.toHaveBeenCalled();
+    removeConnection("v1", "sid-peer");
   });
 
   it("echo-suppresses per-sessionId, not per-ws (multiplexing safe)", () => {
@@ -246,20 +277,19 @@ describe("broadcastFilePushed", () => {
 
     // REST push for vault A excludes only sidA — the same ws still receives
     // vault B pushes (it has a different session there).
-    broadcastFilePushed("vB", "file-B", "ver-B", "sidA");
+    broadcastFilesPushed("vB", [{ fileId: "file-B", versionId: "ver-B" }], "sidA");
 
     expect(ws.send).toHaveBeenCalledWith(
       JSON.stringify({
-        type: "file_pushed",
+        type: "files_pushed",
         vaultId: "vB",
-        fileId: "file-B",
-        versionId: "ver-B",
+        files: [{ fileId: "file-B", versionId: "ver-B", deviceName: null }],
       }),
     );
 
     // Push for vault A with sidA excluded — same ws gets nothing back.
     (ws.send as any).mockClear();
-    broadcastFilePushed("vA", "file-A", "ver-A", "sidA");
+    broadcastFilesPushed("vA", [{ fileId: "file-A", versionId: "ver-A" }], "sidA");
     expect(ws.send).not.toHaveBeenCalled();
   });
 
@@ -268,15 +298,13 @@ describe("broadcastFilePushed", () => {
     addUserConnection("v1", ws, "sid1", { userId: "u-1", deviceName: "MacBook" });
     addUserConnection("v1", ws, "sid2", { userId: "u-1", deviceName: "Surface" });
 
-    broadcastFilePushed("v1", "f1", "v9", "sid2", "MacBook");
+    broadcastFilesPushed("v1", [{ fileId: "f1", versionId: "v9" }], "sid2", "MacBook");
 
     expect(ws.send).toHaveBeenCalledWith(
       JSON.stringify({
-        type: "file_pushed",
+        type: "files_pushed",
         vaultId: "v1",
-        fileId: "f1",
-        versionId: "v9",
-        deviceName: "MacBook",
+        files: [{ fileId: "f1", versionId: "v9", deviceName: "MacBook" }],
       }),
     );
 
@@ -300,14 +328,12 @@ describe("handleSubscribe", () => {
     const { ws: peer } = mockWs();
     addUserConnection("v1", peer, "sid-peer", { userId: "u-2", deviceName: "other" });
     (peer.send as any).mockClear();
-    broadcastFilePushed("v1", "f1", "v9", "sid-other", "书房笔记本");
+    broadcastFilesPushed("v1", [{ fileId: "f1", versionId: "v9" }], "sid-other", "书房笔记本");
     expect(peer.send).toHaveBeenCalledWith(
       JSON.stringify({
-        type: "file_pushed",
+        type: "files_pushed",
         vaultId: "v1",
-        fileId: "f1",
-        versionId: "v9",
-        deviceName: "书房笔记本",
+        files: [{ fileId: "f1", versionId: "v9", deviceName: "书房笔记本" }],
       }),
     );
 
@@ -405,7 +431,7 @@ describe("handleSubscribe", () => {
     const { ws: peer } = mockWs();
     addUserConnection("v1", peer, "sid-peer", { userId: "u-1", deviceName: "A" });
     (peer.send as any).mockClear();
-    broadcastFilePushed("v1", "f1", "v9", "sid-other");
+    broadcastFilesPushed("v1", [{ fileId: "f1", versionId: "v9" }], "sid-other");
     expect(peer.send).toHaveBeenCalledTimes(1);
     expect(ws.send).toHaveBeenCalledTimes(1);
     removeConnection("v1", "sid-peer");

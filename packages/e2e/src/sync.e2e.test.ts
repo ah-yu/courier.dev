@@ -571,8 +571,10 @@ describe("sync e2e — two clients through a real server", () => {
       deviceName: b.deviceName,
       onEvent: (event) => {
         if (event.type === "state_change") states.push(event.state);
-        if (event.type === "file_pushed") {
-          pushed.push({ fileId: event.fileId, versionId: event.versionId });
+        if (event.type === "files_pushed") {
+          for (const file of event.files) {
+            pushed.push({ fileId: file.fileId, versionId: file.versionId });
+          }
         }
       },
     });
@@ -584,7 +586,7 @@ describe("sync e2e — two clients through a real server", () => {
       a.write("live.md", "second revision, pushed live");
       await a.change("live.md");
 
-      await waitFor(() => pushed.length > 0, "no file_pushed notification arrived");
+      await waitFor(() => pushed.length > 0, "no files_pushed notification arrived");
       for (const event of pushed) {
         await b.remotePushed(event.fileId, event.versionId);
       }
@@ -615,11 +617,13 @@ describe("sync e2e — two clients through a real server", () => {
       deviceName: empty.deviceName,
       onEvent: (event) => {
         if (event.type === "state_change") states.push(event.state);
-        if (event.type === "file_pushed") {
+        if (event.type === "files_pushed") {
           // A host does not await the notification (see `EngineHost.handleWsEvent`):
           // every push is handled concurrently, which is what the server's blob
           // store has to survive.
-          pulls.push(empty.remotePushed(event.fileId, event.versionId));
+          for (const file of event.files) {
+            pulls.push(empty.remotePushed(file.fileId, file.versionId));
+          }
         }
       },
     });

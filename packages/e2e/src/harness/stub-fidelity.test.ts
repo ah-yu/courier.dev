@@ -130,7 +130,7 @@ describe("FakeVault — the file APIs the plugin writes through", () => {
   it("gives two concurrent createBinary calls the app's race: one wins, one throws", async () => {
     const vault = new FakeVault();
 
-    // A reconcile pull and a `file_pushed` pull can both reach the same absent path.
+    // A reconcile pull and a `files_pushed` pull can both reach the same absent path.
     // Obsidian registers the file only after its adapter write resolves, so the second
     // caller gets `File already exists.` — the plugin adapter's job to accept only when
     // the bytes match. A fake that silently overwrote could never show that.

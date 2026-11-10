@@ -270,7 +270,7 @@ export class FakeVault {
     this.assertParentFolder(path);
     // It also refuses a path that already exists, and registers the file only after its
     // adapter write resolves. The yield below gives two concurrent callers — a reconcile
-    // pull and a `file_pushed` pull of the same path — the app's window: both can see the
+    // pull and a `files_pushed` pull of the same path — the app's window: both can see the
     // index empty, and the loser then gets `File already exists.`.
     await new Promise((resolve) => setTimeout(resolve, 0));
     if (this.files.has(path)) throw new Error(`File already exists: ${path}`);

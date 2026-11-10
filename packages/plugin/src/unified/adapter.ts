@@ -390,7 +390,7 @@ export class ObsidianVaultAdapter implements SyncAdapter {
       this.streamedStats.delete(path);
     } catch (err) {
       // Another operation may have created this path between the lookup above and
-      // this call: a reconcile and a `file_pushed` notification can pull the same
+      // this call: a reconcile and a `files_pushed` notification can pull the same
       // path at once, and both can see it absent before either `createBinary`
       // resolves. `Vault.createBinary` refuses an existing path with
       // `File already exists.`; losing that race is harmless **only** when the file
@@ -518,7 +518,7 @@ export class ObsidianVaultAdapter implements SyncAdapter {
     } catch (err) {
       // `trashFile` resolves once the file has left its path (moved to the trash the user
       // configured, or unlinked). Another writer that got there first — the user's own
-      // delete, or a second pull of the same delete head (a reconcile and a `file_pushed`
+      // delete, or a second pull of the same delete head (a reconcile and a `files_pushed`
       // notification can apply one head at once) — makes the move fail instead. The
       // deletion was asked for and has happened; failing the pull for it would report a
       // succeeded delete as an error. A path still on disk after a failed move — a

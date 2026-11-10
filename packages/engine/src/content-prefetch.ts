@@ -128,7 +128,7 @@ export interface PrefetchCandidate {
 /**
  * Who asked for a hash.
  *
- * A reconcile pass and a `file_pushed` burst can be in flight at the same time, and a pass
+ * A reconcile pass and a `files_pushed` burst can be in flight at the same time, and a pass
  * drops its leftover guesses when its loop ends — it must not take the burst's read-ahead
  * with them, because the burst is the download this feature exists for. Each source has
  * its own drop epoch, and an answer that arrives after its source's drop is delivered but
@@ -187,7 +187,7 @@ export class ContentPrefetcher {
    * speculative ones, each in the order they were asked for.
    *
    * Two queues, not one, because the two are not equally urgent. A pass and a
-   * `file_pushed` burst can be in flight together (a reconnect while a peer pushes), and
+   * `files_pushed` burst can be in flight together (a reconnect while a peer pushes), and
    * the burst's apply loop runs as an exclusive job in the host — a hash it waits for that
    * sits behind several hundred speculative ones stalls files the user can see, and the
    * events queued behind that job with them. A demand therefore jumps the queue: `take`

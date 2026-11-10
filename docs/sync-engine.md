@@ -97,8 +97,9 @@ The rules below are the ones the e2e suites exist to protect.
     row, no `file-menu` entry and no `app.vault` handle — there is nothing the user could see or act on.
     `ConflictResolver` therefore branches on `settingsGroupOf` and compares the local file's stamp with the
     head version's `mtimeMs` (the file's own modification time on the pushing device, carried by every
-    push frame and stored in `file_versions.mtime_ms`; a `delete` records the moment that device decided
-    on it — held in the state's `deletedAtMs` until the tombstone is accepted, so a deletion made offline
+    push frame and stored in `file_versions.mtime_ms`; a `delete` records **when the file was removed** —
+    the host's event moment when it held the deletion for a sequence, otherwise the moment the decision
+    runs — held in the state's `deletedAtMs` until the tombstone is accepted, so a deletion made offline
     and retried later does not claim the retry time): the newer side wins. A newer local copy is pushed as
     a `modify` (or a `restore` over a tombstone) using the head as `baseVersionId` — **at the path the
     local file actually has**, because a version names the path its bytes live at, so a chain the peer
@@ -210,7 +211,7 @@ The rules below are the ones the e2e suites exist to protect.
     Covered by the `does not revive its deleted chain over a peer's new file at the same path`
     case in `engine.conflicts.test.ts`.
   - **A recreate event checks the server before it restores.** A vault event decides from the tracked
-    chain alone, and the in-memory remote index can be stale: a peer's `file_pushed` never arrived
+    chain alone, and the in-memory remote index can be stale: a peer's `files_pushed` never arrived
     (the socket was down) and no pass has run since, so the server may already hold a new chain at
     the path. A `restore` is the event push that resurrects a chain this device deleted, and that is
     the one this check covers: before pushing it the engine reads the vault index once and applies the
@@ -274,7 +275,7 @@ The layer-by-layer coverage matrix for these bind cases is in [testing.md](testi
     awaits only the adapter's unlink and leaves the vault index to the file watcher, so for one watcher
     pass the index still lists a file that is gone and the second unlink answers `ENOENT`. That happens
     when a peer's delete is applied while the user deletes the same note, and inside the engine itself
-    when a reconcile and a `file_pushed` notification apply one delete head at once (see
+    when a reconcile and a `files_pushed` notification apply one delete head at once (see
     [Pass order and concurrency](#pass-order-and-concurrency)). The adapter checks the path on disk
     after a failed delete and returns when it is gone, rethrowing only while the file is still there.
     The L3 harness's own cleanup follows the same rule: `ObsidianVault.remove` and `resetVault` list
@@ -282,7 +283,7 @@ The layer-by-layer coverage matrix for these bind cases is in [testing.md](testi
     used to make teardown log a false `ENOENT`.
   - **Losing a `createBinary` race is not a failure when the bytes match.** `writeFile`'s existence
     lookup, the folder chain and `createBinary` are not atomic: a reconcile pass and a WebSocket
-    `file_pushed` notification can pull one path at the same time (the notification runs through
+    `files_pushed` notification can pull one path at the same time (the notification runs through
     `OpQueue`, the reconcile does not), so both can read `null` before either `createBinary` resolves
     and the loser gets `File already exists.` — which used to escape `initialSync()` and fail the
     real-Obsidian `reconcile()` eval. The loser re-reads the path and accepts the race only when the
@@ -325,7 +326,7 @@ file now lives at.
     merely share content still get their own chains.
   - `handleFilePushed` and `pushFile` keep the index current, and the pushed version is recorded
     **before** the push request goes out (`SelfEventLog.rememberPushedVersion`), because the server's
-    `file_pushed` echo can beat the HTTP response back.
+    `files_pushed` echo can beat the HTTP response back.
 
   Covered by the engine suite, the rename cases in `plugin.e2e.test.ts`, and the root-level rename case
   in the real-Obsidian suite.
@@ -632,20 +633,31 @@ file now lives at.
 
 ## Pass order and concurrency
 
-- **A burst of `file_pushed` notifications is coalesced into batched chain pulls.** A bind announces one
+- **A burst of `files_pushed` frames is coalesced into batched chain pulls.** A bind announces one
   version per file, and applying each notification on its own cost one `POST /sync/pull` per file: 5 000
   requests against a 600/minute limiter left a peer that was online during the bind on 548 of 5 000 files
-  until its next pass. The host holds notifications for at most `PUSH_NOTIFICATION_FLUSH_MS` (25 ms) or a
-  full `PUSH_NOTIFICATION_BATCH` (200), and the engine then fetches those chains with one request per 200
-  files (`handleFilePushedBatch`), applying them from the head the server answered with. Applications run
-  through `WorkPool` four at a time **only when the chunk names no path twice** — two _different_ files
-  naming one path (a peer's move can leave two chains there for a moment) apply in order, while the two
-  names a single event contributes (the head's path and the path this device already holds, the same string
-  for a tracked file) are deduplicated first; the state is written **once per batch**, not once per file
-  (a per-file write rewrote a megabyte-scale state thousands of times and was most of a live pull's cost:
-  5 000 files, 59 s → 18 s, measured in a real Obsidian). The trade is crash granularity, not behaviour: a
-  crash mid-batch leaves up to one batch of files to re-decide on the next pass. A lone remote edit still
-  costs one request, 25 ms later.
+  until its next pass. Two layers keep that from happening now:
+  - **The server announces a whole push request in one frame** (`files_pushed` with up to 100 versions),
+    because one frame per version is what a mobile link hands to the client in pieces — 1 000 deleted
+    files arrived at a phone as ~1 000 frames over ~16 s, and the client pulled once per frame, which is
+    one round trip and one local delete per file.
+  - **The host's flush is a debounce with a cap**: every arriving frame pushes the deadline back, so a
+    batch that reaches the device over hundreds of milliseconds still travels as one pull
+    (`PUSH_NOTIFICATION_FLUSH_MS`, 25 ms of quiet), a full `PUSH_NOTIFICATION_BATCH` (200) goes out at
+    once, and `PUSH_NOTIFICATION_MAX_WAIT_MS` (1 s) releases a stream that never goes quiet. Only **one**
+    pull is in flight at a time: frames that arrive meanwhile are held for the next pull instead of
+    queueing a pull of their own. A fixed 25 ms window was the defect: it flushed between the frames of
+    one push, so a thousand-deletion burst cost a thousand pulls of one file each.
+  - The engine then fetches those chains with one request per 200 files (`handleFilePushedBatch`), applying
+    them from the head the server answered with. Applications run through `WorkPool` four at a time
+    **only when the chunk names no path twice** — two _different_ files naming one path (a peer's move can
+    leave two chains there for a moment) apply in order, while the two names a single event contributes
+    (the head's path and the path this device already holds, the same string for a tracked file) are
+    deduplicated first; the state is written **once per batch**, not once per file (a per-file write
+    rewrote a megabyte-scale state thousands of times and was most of a live pull's cost: 5 000 files,
+    59 s → 18 s, measured in a real Obsidian). The trade is crash granularity, not behaviour: a crash
+    mid-batch leaves up to one batch of files to re-decide on the next pass. A lone remote edit still
+    costs one request, 25 ms later.
 - **A burst of local vault events is carried out as one job, not one request per file.** An agent, a
   script or a folder operation writes hundreds of files in a few seconds and the watcher reports one
   event per file; handled one at a time that is one `POST /sync/push` per file — and, for a file this
@@ -656,7 +668,17 @@ file now lives at.
   push, so a steady stream below the threshold waits out a limiter window rather than being refused — `SyncHost` collects their paths and
   `LOCAL_EVENT_BURST_FLUSH_MS` (50 ms) later hands them to **one engine job**
   (`SyncEngine.handleLocalEvents`), which makes the same per-path decisions as a single event and sends
-  what they produce in batches:
+  what they produce in batches. The flush is a **debounce with a 5 s cap**
+  (`LOCAL_EVENT_BURST_MAX_WAIT_MS`), so a write burst that lasts seconds still travels in a few jobs
+  rather than one per 50 ms, and `LOCAL_EVENT_BURST_MAX_FILES` (100) releases a full batch at once —
+  a dense burst has its paths in hand and must not wait for a quiet period it will never have.
+  - **A delete sequence is a burst even when it is slow.** Obsidian reports one `delete` per file and
+    every trash costs a native operation, so trashing 1 000 files arrives at a few events a second —
+    below the 4-in-500 ms rule. A delete that follows another delete within `LOCAL_DELETE_SEQUENCE_MS`
+    (750 ms) is therefore a **sequence**: the first one keeps its immediate push, and the rest join one
+    batched job whose quiet period is that same 750 ms (capped like any burst). Without it, 1 000
+    deleted files were 1 000 `POST /sync/push` requests; with it, a peer receives them in batches and
+    applies them four at a time.
   - changes and edits to tracked files travel **100 versions per request** (the same
     `MAX_PUSH_BATCH_FILES` / `MAX_PUSH_BATCH_BYTES` bounds the pass's creates use), and tracked files'
     chains are fetched **200 per request** (`MAX_PULL_BATCH_FILES`) instead of one request each;
@@ -664,11 +686,12 @@ file now lives at.
     apart because a change is decided by reading the file and a deletion by its absence — one list for
     both would read nothing for a removed path and silently drop its tombstone. Deletions are _prepared_
     **first** (so the rename-by-hash record exists before a moved file's create is decided) but queued
-    after the changes, and a path that
-    is in both lists is decided as an **edit**, not a deletion while the file is still there (a tool
-    replacing a file in place reports both halves, and publishing the tombstone only to follow it with a
-    restore tells every peer to delete
-    a note that never went away);
+    after the changes. **A batched path that still holds a file is never tombstoned**: a recreate landed
+    after the event (trash and undo), a peer's pull wrote the path, or a move landed on it — the batch
+    cannot see those events in order, so the absence is checked on disk at decision time. That is also
+    what makes holding a deletion safe (see the delete-sequence bullet below); a tool replacing a file in
+    place reports both halves, and publishing the tombstone only to follow it with a restore tells every
+    peer to delete a note that never went away;
   - this is **not a pass**, so it costs the burst, not the vault: there is no vault walk and no
     per-file listing. One listing is read per job (only when it has changes), where the single-event
     path reads one listing per new file for its identity fallback; a restore in the job reads the chain
