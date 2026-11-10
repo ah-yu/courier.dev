@@ -10,7 +10,7 @@ import {
   type SyncProgress,
 } from "./engine";
 import type { HistoryLimits, HealthResponse, ContractVerdict } from "@courier/shared";
-import { contractVerdict } from "@courier/shared";
+import { contractVerdict, isHealthResponse } from "@courier/shared";
 import type { SyncAdapter } from "./adapter";
 import type { SyncApi } from "./api";
 import { DEFAULT_OP_QUEUE_LIMITS, OpQueue, weightForSize, type OpQueueLimits } from "./op-queue";
@@ -65,6 +65,15 @@ export const DEFAULT_RECONCILE_INTERVAL_MS = 5 * 60_000;
  * `0` makes the catch-up unconditional (tests); `Infinity` disables it.
  */
 export const DEFAULT_POST_BIND_RECONCILE_AFTER_MS = 5_000;
+
+/**
+ * How long the contract probe waits for `/api/health` before the pass takes over.
+ *
+ * The probe runs after the caller has taken the vault lease, so a server that accepts and
+ * never answers would otherwise hold `start()` — and the lease — with another writer
+ * waiting behind it. A timeout is "unreachable", which the pass reports the ordinary way.
+ */
+const PROBE_TIMEOUT_MS = 5_000;
 
 /**
  * Whether a persisted state holds no sync point at all.
@@ -586,20 +595,40 @@ export class SyncHost {
    * host — which is why the answer is read from `/api/health` rather than inferred from a
    * failed call.
    */
+  /** Settle with `work`, or reject once `ms` has passed — on the host's own timer. */
+  private withinTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = this.platform.after(ms, () => reject(new Error(`no answer within ${ms}ms`)));
+      work.then(
+        (value) => {
+          timer.cancel();
+          resolve(value);
+        },
+        (error: unknown) => {
+          timer.cancel();
+          reject(error instanceof Error ? error : new Error(String(error)));
+        },
+      );
+    });
+  }
+
   private async probeServerContract(): Promise<ServerContractInfo | null> {
     const api = this.opts.api;
     if (api.getServerInfo === undefined) return null;
 
     let health: HealthResponse;
     try {
-      health = await api.getServerInfo();
+      // Bounded: the caller already holds the vault lease, and a `/api/health` that accepts
+      // and never answers would wedge `start()` with another writer waiting behind it.
+      health = await this.withinTimeout(api.getServerInfo(), PROBE_TIMEOUT_MS);
     } catch {
       return null;
     }
-    // A transport can answer a 200 with something that is not this shape (a captive-portal
-    // page, a proxy's JSON error). That is not an answer about the contract: treat it like
-    // an unreachable server, or `contractVerdict` would throw out of `start()`.
-    if (typeof health !== "object" || health === null) return null;
+    // A transport can answer a 200 with something that is not this document (a captive-portal
+    // page, a proxy's JSON error). That is not an answer about the contract: treat it like an
+    // unreachable server, or it would read as "generation 1" and pause the vault with a
+    // version message for what is really a broken connection.
+    if (!isHealthResponse(health)) return null;
 
     const verdict = contractVerdict(health);
     const info: ServerContractInfo = {

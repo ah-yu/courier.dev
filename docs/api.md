@@ -90,6 +90,17 @@ safe — an older reader ignores what it does not know, and an older sender omit
 Removing, retyping or re-meaning is not. Some changes cannot be windowed at all (the chunk size,
 the blob layout, the crypto envelope: both sides must agree exactly), so they move every number.
 
+Two rows deserve the distinction spelled out, because they pull in opposite directions:
+
+- **A renamed or removed notification type** (a `file_pushed` frame that becomes `files_pushed`)
+  moves `CONTRACT_GENERATION` and **not** the floor. An older client's dispatcher has no case for
+  the new name, so it ignores the frame and its periodic reconcile covers the missed push: a
+  degradation, not a corruption. The same is true of an added error code or an added field.
+- **A change that makes an old client read the same bytes differently** — a changed field meaning,
+  a field made required, a framing change — is what the floor exists for, and it is the only thing
+  that moves it. Raising it refuses those clients outright, which is the honest answer to "their
+  reading is wrong".
+
 ### How it is kept honest
 
 `bun run contract` derives the observable surface from the code — every exported wire type with its

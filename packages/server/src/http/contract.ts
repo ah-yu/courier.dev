@@ -4,25 +4,6 @@ import { logger as processLogger } from "../lib/log";
 import type { Logger } from "../lib/logger";
 import { VERSION } from "../version";
 
-/**
- * The server's half of the contract check: refuse a client it cannot serve.
- *
- * The client's own `/api/health` check is the one that produces a readable message before
- * anything is written; this is the backstop for a caller that skipped it (a script, or a
- * build from another tree). Both halves compare the same window, so they agree on who is
- * refused.
- *
- * The comparison is one-sided in each direction, and that is the point:
- *
- * - a client **below** `MIN_CLIENT_CONTRACT` is not served — that floor is where the last
- *   breaking change put it, and serving such a client would be misreading its bytes;
- * - a client **above** this server's generation is not served either — this build cannot
- *   know what that client is saying. (A purely additive release leaves the floor alone, so
- *   older clients keep being served; only a break moves it.)
- *
- * An absent header reads as generation 1, which is what every build before the header
- * existed was. That is what lets the field arrive without a flag day.
- */
 /** The window a server serves, injectable so the refusal can be tested at any floor. */
 export interface ContractWindow {
   generation: number;
@@ -35,6 +16,25 @@ const BUILD_WINDOW: ContractWindow = {
   minClient: MIN_CLIENT_CONTRACT,
 };
 
+/**
+ * The server's half of the contract check: refuse a client it cannot serve.
+ *
+ * The client's own `/api/health` check is the one that produces a readable message before
+ * anything is written; this is the backstop for a caller that skipped it (a script, or a
+ * build from another tree). Both halves compare the same window, so they agree on who is
+ * refused.
+ *
+ * The comparison is one-sided in each direction, and that is the point:
+ *
+ * - a client **below** `MIN_CLIENT_CONTRACT` is not served — that floor is where the last
+ *   change that would corrupt an old client's reading put it;
+ * - a client **above** this server's generation is not served either — this build cannot
+ *   know what that client is saying. (A purely additive release leaves the floor alone, so
+ *   older clients keep being served; only a break moves it.)
+ *
+ * An absent header reads as generation 1, which is what every build before the header
+ * existed was. That is what lets the field arrive without a flag day.
+ */
 export function requireContract(
   request: Request,
   options: { window?: ContractWindow; log?: Logger } = {},

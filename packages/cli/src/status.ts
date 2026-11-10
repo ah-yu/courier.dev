@@ -65,7 +65,7 @@ export interface CliStatusReport {
   /**
    * Set when this CLI cannot work with the server it is configured for.
    *
-   * `status` already asks the server for the account's file cap and the vaults' retention
+   * `status` asks the server for the account's file cap and the vaults' retention
    * limits, so the generation arrives on the same trip; it is `null` when the server could
    * not be reached, because a status block must still render offline. This is the one place
    * a headless user sees *why* the daemon keeps exiting without reading the journal.

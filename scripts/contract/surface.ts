@@ -172,7 +172,7 @@ export function readSurface(repoRoot: string): Surface {
           ) {
             continue;
           }
-          constants[name] = normalize(initializer.getText(source));
+          constants[name] = normalize(stripComments(initializer.getText(source)));
         }
       }
     }
@@ -402,6 +402,17 @@ export function byCodeUnits(left: string, right: string): number {
 
 function normalize(text: string): string {
   return text.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Drop comments before the text is collapsed onto one line.
+ *
+ * A constant is stored as its printed source, and `normalize` folds newlines away — so a
+ * `// …` left in place would swallow every member after it, and `arrayMembers` would fall
+ * back to comparing text. Stripping first keeps the stored value the *value*.
+ */
+export function stripComments(text: string): string {
+  return text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 }
 
 function sortRecord<T>(record: Record<string, T>): Record<string, T> {

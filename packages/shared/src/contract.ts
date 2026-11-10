@@ -46,16 +46,17 @@
  * A client states it on every request (`X-Courier-Contract`), a server publishes it on
  * `/api/health`. Mismatched peers are refused, and the refusal names the side to upgrade.
  */
-export const CONTRACT_GENERATION = 2;
+export const CONTRACT_GENERATION = 3;
 
 /**
  * The oldest client generation this server still serves, published on `/api/health`.
  *
  * It follows the last change that made an **older client misread** something — not the
- * newest generation. Adding a field, a route or an error code leaves it alone, because a
- * client that predates them simply ignores what it does not know (and never sends the
- * header, which reads as generation 1). Only a change that would corrupt an old client's
- * reading moves this floor, and moving it is what refuses those clients.
+ * newest generation. A changed or renamed notification type is *not* that: a client that
+ * predates it ignores the frame (its dispatcher has no case for it) and its periodic
+ * reconcile covers the missed push, which is a degradation, not a corruption. Adding a
+ * field, a route or an error code is the same. Only a change that would corrupt an old
+ * client's reading moves this floor, and moving it is what refuses those clients.
  */
 export const MIN_CLIENT_CONTRACT = 1;
 
@@ -100,6 +101,20 @@ export interface HealthResponse {
 
 /** Which side has to move, from the client's point of view (`/api/health`). */
 export type ContractVerdict = "ok" | "client-too-old" | "server-too-old";
+
+/**
+ * Whether a response body is the health document, before any number is read from it.
+ *
+ * A transport can answer a 200 with something else — a captive portal, a proxy's JSON
+ * error, an empty object — and `contractVerdict` would then read "generation 1" out of it
+ * and report a version mismatch for what is really a broken connection. The two fields
+ * every build has ever sent are the test.
+ */
+export function isHealthResponse(value: unknown): value is HealthResponse {
+  if (typeof value !== "object" || value === null) return false;
+  const body = value as Partial<HealthResponse>;
+  return typeof body.status === "string" && typeof body.timestamp === "string";
+}
 
 /**
  * Whether *this* client build can work with the server that answered.

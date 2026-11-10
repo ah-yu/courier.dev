@@ -13,6 +13,7 @@ import {
   normalizeHistoryLimit,
   sortedCopy,
   contractVerdict,
+  isHealthResponse,
   type CreateVaultResponse,
   type HealthResponse,
   type HistoryLimits,
@@ -1810,8 +1811,10 @@ export default class CourierPlugin extends Plugin {
       // state" mistake the reload card exists to avoid.
       if (response.status !== 200) return;
       const body = response.json as unknown;
-      if (typeof body !== "object" || body === null) return;
-      health = body as HealthResponse;
+      // The same rule the host uses: only the health document counts, not any object a
+      // proxy or a captive portal put in its place.
+      if (!isHealthResponse(body)) return;
+      health = body;
     } catch {
       return;
     }

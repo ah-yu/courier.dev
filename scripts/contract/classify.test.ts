@@ -147,14 +147,26 @@ describe("classify", () => {
 
 describe("byCodeUnits", () => {
   it("orders by code unit, not by the machine's locale", () => {
-    // `localeCompare` puts "a" before "Z" (and orders punctuation differently per locale);
-    // the surface is committed and compared on three CI platforms, so the order has to be a
-    // property of the bytes — this exact difference turned a union into "a member was
-    // removed and another added" on a runner with a different ICU setting.
+    // The surface is committed and compared on three CI platforms, so its order has to be a
+    // property of the bytes. `localeCompare` is not: ICU puts "a" before "Z" (and orders
+    // punctuation differently per locale), which made the same union come out in two orders
+    // on two runners and read as "a member was removed and another added".
     expect(byCodeUnits("Z", "a")).toBeLessThan(0);
-    // The locale disagrees: collation puts "a" before "Z", which is what made the same\n    // union come out in two orders on two runners.\n    expect("a".localeCompare("Z")).toBeLessThan(0);
     expect(byCodeUnits("a", "a")).toBe(0);
     expect(byCodeUnits("b", "a")).toBeGreaterThan(0);
+  });
+
+  it("cannot be swapped back to localeCompare without failing", () => {
+    // The property the gate depends on, stated as one assertion: code-unit order differs
+    // from collation for these two, so a regression to `localeCompare` is visible here.
+    const shapes = [{ literal: "a" as const }, { literal: "Z" as const }];
+    const sorted = shapes.toSorted((left, right) =>
+      byCodeUnits(JSON.stringify(left), JSON.stringify(right)),
+    );
+    expect(sorted[0]!.literal).toBe("Z");
+    expect(
+      shapes.toSorted((left, right) => left.literal.localeCompare(right.literal))[0]!.literal,
+    ).toBe("a");
   });
 });
 

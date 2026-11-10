@@ -1,0 +1,477 @@
+{
+  "types": {
+    "AdminRuntimeResponse": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "cpuCount": {"optional":false,"shape":{"primitive":"number"}},
+        "cpuMicros": {"optional":false,"shape":{"primitive":"number"}},
+        "cpuPercent": {"optional":false,"shape":{"union":[{"primitive":"null"},{"primitive":"number"}]}},
+        "freeMemoryBytes": {"optional":false,"shape":{"primitive":"number"}},
+        "loadAverage": {"optional":false,"shape":{"tuple":[{"primitive":"number"},{"primitive":"number"},{"primitive":"number"}]}},
+        "memoryBytes": {"optional":false,"shape":{"primitive":"number"}},
+        "onlineUsers": {"optional":false,"shape":{"primitive":"number"}},
+        "onlineVaults": {"optional":false,"shape":{"primitive":"number"}},
+        "pid": {"optional":false,"shape":{"primitive":"number"}},
+        "runtime": {"optional":false,"shape":{"primitive":"string"}},
+        "sampledAt": {"optional":false,"shape":{"primitive":"string"}},
+        "totalMemoryBytes": {"optional":false,"shape":{"primitive":"number"}},
+        "uptimeSeconds": {"optional":false,"shape":{"primitive":"number"}},
+        "version": {"optional":false,"shape":{"primitive":"string"}}
+      }
+    },
+    "AdminStatusResponse": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "binarySha256": {"optional":false,"shape":{"primitive":"string"}},
+        "binarySize": {"optional":false,"shape":{"primitive":"number"}},
+        "blobCount": {"optional":false,"shape":{"primitive":"number"}},
+        "dbBytes": {"optional":false,"shape":{"primitive":"number"}},
+        "devicesCount": {"optional":false,"shape":{"primitive":"number"}},
+        "diskFreeBytes": {"optional":false,"shape":{"primitive":"number"}},
+        "diskTotalBytes": {"optional":false,"shape":{"primitive":"number"}},
+        "diskUsedBytes": {"optional":false,"shape":{"primitive":"number"}},
+        "migrationsApplied": {"optional":false,"shape":{"primitive":"number"}},
+        "migrationsKnown": {"optional":false,"shape":{"primitive":"number"}},
+        "storageLimitBytes": {"optional":false,"shape":{"union":[{"primitive":"null"},{"primitive":"number"}]}},
+        "storageUsedBytes": {"optional":false,"shape":{"primitive":"number"}},
+        "usersCount": {"optional":false,"shape":{"primitive":"number"}},
+        "vaultsCount": {"optional":false,"shape":{"primitive":"number"}},
+        "version": {"optional":false,"shape":{"primitive":"string"}}
+      }
+    },
+    "ApiError": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "details": {"optional":true,"shape":{"array":{"object":{"field":{"optional":false,"shape":{"primitive":"string"}},"message":{"optional":false,"shape":{"primitive":"string"}}}}}},
+        "error": {"optional":false,"shape":{"reference":"ApiErrorCode","args":[]}},
+        "message": {"optional":false,"shape":{"primitive":"string"}}
+      }
+    },
+    "ApiErrorCode": {
+      "kind": "alias",
+      "shape": {"union":[{"literal":"UNKNOWN_ERROR"},{"text":"(typeof API_ERROR_CODES)[number]"}]}
+    },
+    "ApiKeyScope": {
+      "kind": "alias",
+      "shape": {"text":"(typeof API_KEY_SCOPES)[number]"}
+    },
+    "ApiKeySummary": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "createdAt": {"optional":false,"shape":{"primitive":"string"}},
+        "expiresAt": {"optional":false,"shape":{"union":[{"primitive":"null"},{"primitive":"string"}]}},
+        "id": {"optional":false,"shape":{"primitive":"string"}},
+        "key": {"optional":false,"shape":{"primitive":"string"}},
+        "name": {"optional":false,"shape":{"primitive":"string"}},
+        "scopes": {"optional":false,"shape":{"array":{"reference":"ApiKeyScope","args":[]}}}
+      }
+    },
+    "BlobHeader": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "chunkCount": {"optional":false,"shape":{"primitive":"number"}},
+        "chunkSize": {"optional":false,"shape":{"primitive":"number"}},
+        "flags": {"optional":false,"shape":{"primitive":"number"}},
+        "plaintextSize": {"optional":false,"shape":{"primitive":"number"}}
+      }
+    },
+    "ChunkUploadAck": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "received": {"optional":false,"shape":{"primitive":"number"}}
+      }
+    },
+    "ChunkUploadStatus": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "complete": {"optional":false,"shape":{"primitive":"boolean"}},
+        "received": {"optional":false,"shape":{"primitive":"number"}}
+      }
+    },
+    "ClearDeletedResponse": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "deletedBlobs": {"optional":false,"shape":{"primitive":"number"}},
+        "deletedFiles": {"optional":false,"shape":{"primitive":"number"}}
+      }
+    },
+    "ContractVerdict": {
+      "kind": "alias",
+      "shape": {"union":[{"literal":"client-too-old"},{"literal":"ok"},{"literal":"server-too-old"}]}
+    },
+    "CreateApiKeyResponse": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "createdAt": {"optional":false,"shape":{"primitive":"string"}},
+        "expiresAt": {"optional":false,"shape":{"union":[{"primitive":"null"},{"primitive":"string"}]}},
+        "id": {"optional":false,"shape":{"primitive":"string"}},
+        "key": {"optional":false,"shape":{"primitive":"string"}},
+        "name": {"optional":false,"shape":{"primitive":"string"}},
+        "scopes": {"optional":false,"shape":{"array":{"reference":"ApiKeyScope","args":[]}}}
+      }
+    },
+    "CreateUserResponse": {
+      "kind": "interface",
+      "extends": ["UserSummary"],
+      "properties": {
+        "key": {"optional":false,"shape":{"primitive":"string"}}
+      }
+    },
+    "CreateVaultResponse": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "createdAt": {"optional":false,"shape":{"primitive":"string"}},
+        "historyLimitAttachments": {"optional":false,"shape":{"primitive":"number"}},
+        "historyLimitDocuments": {"optional":false,"shape":{"primitive":"number"}},
+        "id": {"optional":false,"shape":{"primitive":"string"}},
+        "name": {"optional":false,"shape":{"primitive":"string"}}
+      }
+    },
+    "DeletedFileInfo": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "deletedAt": {"optional":false,"shape":{"primitive":"string"}},
+        "deletedByDeviceName": {"optional":false,"shape":{"union":[{"primitive":"null"},{"primitive":"string"}]}},
+        "fileId": {"optional":false,"shape":{"primitive":"string"}},
+        "lastEncryptedPath": {"optional":false,"shape":{"union":[{"primitive":"null"},{"primitive":"string"}]}},
+        "previousContentHash": {"optional":false,"shape":{"union":[{"primitive":"null"},{"primitive":"string"}]}},
+        "previousSizeBytes": {"optional":false,"shape":{"union":[{"primitive":"null"},{"primitive":"number"}]}},
+        "previousVersionId": {"optional":false,"shape":{"union":[{"primitive":"null"},{"primitive":"string"}]}}
+      }
+    },
+    "FileVersionChain": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "encryptedPath": {"optional":false,"shape":{"primitive":"string"}},
+        "fileId": {"optional":false,"shape":{"primitive":"string"}},
+        "versions": {"optional":false,"shape":{"array":{"reference":"VersionChainEntry","args":[]}}}
+      }
+    },
+    "FileVersionHistoryResponse": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "versions": {"optional":false,"shape":{"array":{"reference":"FileVersionInfo","args":[]}}}
+      }
+    },
+    "FileVersionInfo": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "action": {"optional":false,"shape":{"reference":"SyncAction","args":[]}},
+        "contentHash": {"optional":false,"shape":{"primitive":"string"}},
+        "createdAt": {"optional":false,"shape":{"primitive":"string"}},
+        "deviceName": {"optional":false,"shape":{"union":[{"primitive":"null"},{"primitive":"string"}]}},
+        "encryptedPath": {"optional":false,"shape":{"primitive":"string"}},
+        "mtimeMs": {"optional":false,"shape":{"primitive":"number"}},
+        "sizeBytes": {"optional":false,"shape":{"primitive":"number"}},
+        "versionId": {"optional":false,"shape":{"primitive":"string"}}
+      }
+    },
+    "HealthResponse": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "generation": {"optional":true,"shape":{"primitive":"number"}},
+        "minClient": {"optional":true,"shape":{"primitive":"number"}},
+        "status": {"optional":false,"shape":{"primitive":"string"}},
+        "timestamp": {"optional":false,"shape":{"primitive":"string"}},
+        "version": {"optional":true,"shape":{"primitive":"string"}}
+      }
+    },
+    "HistoryKind": {
+      "kind": "alias",
+      "shape": {"text":"(typeof HISTORY_KINDS)[number]"}
+    },
+    "HistoryLimits": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "attachments": {"optional":false,"shape":{"primitive":"number"}},
+        "documents": {"optional":false,"shape":{"primitive":"number"}}
+      }
+    },
+    "ListApiKeysResponse": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "apiKeys": {"optional":false,"shape":{"array":{"reference":"ApiKeySummary","args":[]}}}
+      }
+    },
+    "ListDeletedFilesResponse": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "files": {"optional":false,"shape":{"array":{"reference":"DeletedFileInfo","args":[]}}}
+      }
+    },
+    "ListUsersResponse": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "users": {"optional":false,"shape":{"array":{"reference":"UserSummary","args":[]}}}
+      }
+    },
+    "ListVaultsResponse": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "vaults": {"optional":false,"shape":{"array":{"reference":"VaultSummary","args":[]}}}
+      }
+    },
+    "PushBody": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "deviceName": {"optional":false,"shape":{"union":[{"primitive":"null"},{"primitive":"string"}]}},
+        "files": {"optional":false,"shape":{"array":{"reference":"PushFileFrame","args":[]}}}
+      }
+    },
+    "PushBodyOptions": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "deviceName": {"optional":true,"shape":{"union":[{"primitive":"null"},{"primitive":"string"}]}}
+      }
+    },
+    "PushFileFrame": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "action": {"optional":false,"shape":{"reference":"SyncAction","args":[]}},
+        "baseVersionId": {"optional":false,"shape":{"union":[{"primitive":"null"},{"primitive":"string"}]}},
+        "content": {"optional":false,"shape":{"union":[{"primitive":"null"},{"reference":"Uint8Array","args":[]}]}},
+        "contentChunks": {"optional":true,"shape":{"primitive":"number"}},
+        "contentHash": {"optional":false,"shape":{"primitive":"string"}},
+        "encryptedPath": {"optional":false,"shape":{"primitive":"string"}},
+        "fileId": {"optional":false,"shape":{"primitive":"string"}},
+        "historyKind": {"optional":false,"shape":{"reference":"HistoryKind","args":[]}},
+        "mtimeMs": {"optional":false,"shape":{"primitive":"number"}},
+        "sizeBytes": {"optional":false,"shape":{"primitive":"number"}},
+        "versionId": {"optional":false,"shape":{"primitive":"string"}}
+      }
+    },
+    "RevealUserKeyResponse": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "key": {"optional":false,"shape":{"primitive":"string"}}
+      }
+    },
+    "SyncAction": {
+      "kind": "alias",
+      "shape": {"text":"(typeof SYNC_ACTIONS)[number]"}
+    },
+    "SyncPullRequest": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "files": {"optional":false,"shape":{"array":{"object":{"fileId":{"optional":false,"shape":{"primitive":"string"}}}}}}
+      }
+    },
+    "SyncPullResponse": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "files": {"optional":false,"shape":{"array":{"reference":"FileVersionChain","args":[]}}}
+      }
+    },
+    "SyncPushResponse": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "results": {"optional":false,"shape":{"array":{"reference":"SyncPushResult","args":[]}}}
+      }
+    },
+    "SyncPushResult": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "contentHash": {"optional":true,"shape":{"primitive":"string"}},
+        "currentVersionId": {"optional":true,"shape":{"primitive":"string"}},
+        "error": {"optional":true,"shape":{"primitive":"string"}},
+        "fileId": {"optional":false,"shape":{"primitive":"string"}},
+        "status": {"optional":false,"shape":{"union":[{"literal":"content_missing"},{"literal":"error"},{"literal":"ok"},{"literal":"stale_base"}]}},
+        "versionId": {"optional":true,"shape":{"primitive":"string"}}
+      }
+    },
+    "UpdateUserRequest": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "disabled": {"optional":true,"shape":{"primitive":"boolean"}},
+        "expiresAt": {"optional":true,"shape":{"union":[{"primitive":"null"},{"primitive":"string"}]}},
+        "maxFileBytes": {"optional":true,"shape":{"primitive":"number"}},
+        "maxVaults": {"optional":true,"shape":{"primitive":"number"}},
+        "name": {"optional":true,"shape":{"primitive":"string"}},
+        "retentionDays": {"optional":true,"shape":{"union":[{"primitive":"null"},{"primitive":"number"}]}},
+        "storageBytesLimit": {"optional":true,"shape":{"union":[{"primitive":"null"},{"primitive":"number"}]}}
+      }
+    },
+    "UpdateVaultRequest": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "historyLimitAttachments": {"optional":true,"shape":{"primitive":"number"}},
+        "historyLimitDocuments": {"optional":true,"shape":{"primitive":"number"}},
+        "name": {"optional":true,"shape":{"primitive":"string"}}
+      }
+    },
+    "UserSummary": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "createdAt": {"optional":false,"shape":{"primitive":"string"}},
+        "disabled": {"optional":false,"shape":{"primitive":"boolean"}},
+        "expiresAt": {"optional":false,"shape":{"union":[{"primitive":"null"},{"primitive":"string"}]}},
+        "id": {"optional":false,"shape":{"primitive":"string"}},
+        "maskedKey": {"optional":false,"shape":{"primitive":"string"}},
+        "maxFileBytes": {"optional":false,"shape":{"primitive":"number"}},
+        "maxVaults": {"optional":false,"shape":{"primitive":"number"}},
+        "name": {"optional":false,"shape":{"primitive":"string"}},
+        "retentionDays": {"optional":false,"shape":{"union":[{"primitive":"null"},{"primitive":"number"}]}},
+        "storageBytesLimit": {"optional":false,"shape":{"union":[{"primitive":"null"},{"primitive":"number"}]}},
+        "usedBytes": {"optional":true,"shape":{"primitive":"number"}},
+        "vaultsCount": {"optional":true,"shape":{"primitive":"number"}}
+      }
+    },
+    "VaultEncryptionSaltResponse": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "encryptionSalt": {"optional":false,"shape":{"primitive":"string"}}
+      }
+    },
+    "VaultHistorySettings": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "historyLimitAttachments": {"optional":false,"shape":{"primitive":"number"}},
+        "historyLimitDocuments": {"optional":false,"shape":{"primitive":"number"}}
+      }
+    },
+    "VaultKeyCheckResponse": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "keyCheck": {"optional":false,"shape":{"primitive":"string"}}
+      }
+    },
+    "VaultSettingsResponse": {
+      "kind": "alias",
+      "shape": {"intersection":[{"object":{"id":{"optional":false,"shape":{"primitive":"string"}},"name":{"optional":false,"shape":{"primitive":"string"}}}},{"reference":"VaultHistorySettings","args":[]}]}
+    },
+    "VaultSummary": {
+      "kind": "alias",
+      "shape": {"intersection":[{"object":{"createdAt":{"optional":false,"shape":{"primitive":"string"}},"id":{"optional":false,"shape":{"primitive":"string"}},"name":{"optional":false,"shape":{"primitive":"string"}}}},{"reference":"VaultHistorySettings","args":[]}]}
+    },
+    "VaultSyncHistoryResponse": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "files": {"optional":false,"shape":{"array":{"object":{"currentContentHash":{"optional":false,"shape":{"primitive":"string"}},"currentVersionId":{"optional":false,"shape":{"primitive":"string"}},"encryptedPath":{"optional":false,"shape":{"primitive":"string"}},"fileId":{"optional":false,"shape":{"primitive":"string"}},"versions":{"optional":false,"shape":{"array":{"reference":"FileVersionInfo","args":[]}}}}}}}
+      }
+    },
+    "VaultSyncIndexEntry": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "fileId": {"optional":false,"shape":{"primitive":"string"}},
+        "head": {"optional":false,"shape":{"reference":"VersionChainEntry","args":[]}},
+        "previousLive": {"optional":false,"shape":{"union":[{"primitive":"null"},{"reference":"VersionChainEntry","args":[]}]}}
+      }
+    },
+    "VaultSyncIndexResponse": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "files": {"optional":false,"shape":{"array":{"reference":"VaultSyncIndexEntry","args":[]}}}
+      }
+    },
+    "VersionChainEntry": {
+      "kind": "interface",
+      "extends": [],
+      "properties": {
+        "action": {"optional":false,"shape":{"reference":"SyncAction","args":[]}},
+        "contentHash": {"optional":false,"shape":{"primitive":"string"}},
+        "createdAt": {"optional":false,"shape":{"primitive":"string"}},
+        "encryptedPath": {"optional":false,"shape":{"primitive":"string"}},
+        "mtimeMs": {"optional":false,"shape":{"primitive":"number"}},
+        "sizeBytes": {"optional":false,"shape":{"primitive":"number"}},
+        "versionId": {"optional":false,"shape":{"primitive":"string"}}
+      }
+    },
+    "WsClientMessage": {
+      "kind": "alias",
+      "shape": {"union":[{"object":{"deviceName":{"optional":true,"shape":{"primitive":"string"}},"type":{"optional":false,"shape":{"literal":"subscribe"}},"userKey":{"optional":false,"shape":{"primitive":"string"}},"vaultId":{"optional":false,"shape":{"primitive":"string"}}}},{"object":{"type":{"optional":false,"shape":{"literal":"pong"}}}},{"object":{"type":{"optional":false,"shape":{"literal":"unsubscribe"}},"vaultId":{"optional":false,"shape":{"primitive":"string"}}}}]}
+    },
+    "WsServerMessage": {
+      "kind": "alias",
+      "shape": {"union":[{"object":{"code":{"optional":true,"shape":{"reference":"ApiErrorCode","args":[]}},"message":{"optional":false,"shape":{"primitive":"string"}},"type":{"optional":false,"shape":{"literal":"subscribe_error"}},"vaultId":{"optional":false,"shape":{"primitive":"string"}}}},{"object":{"files":{"optional":false,"shape":{"array":{"object":{"deviceName":{"optional":true,"shape":{"union":[{"primitive":"null"},{"primitive":"string"}]}},"fileId":{"optional":false,"shape":{"primitive":"string"}},"versionId":{"optional":false,"shape":{"primitive":"string"}}}}}},"type":{"optional":false,"shape":{"literal":"files_pushed"}},"vaultId":{"optional":false,"shape":{"primitive":"string"}}}},{"object":{"historyLimits":{"optional":false,"shape":{"reference":"HistoryLimits","args":[]}},"type":{"optional":false,"shape":{"literal":"vault_settings"}},"vaultId":{"optional":false,"shape":{"primitive":"string"}}}},{"object":{"sessionId":{"optional":false,"shape":{"primitive":"string"}},"type":{"optional":false,"shape":{"literal":"subscribe_success"}},"vaultId":{"optional":false,"shape":{"primitive":"string"}}}},{"object":{"type":{"optional":false,"shape":{"literal":"api_key_disabled"}},"vaultId":{"optional":false,"shape":{"primitive":"string"}}}},{"object":{"type":{"optional":false,"shape":{"literal":"api_key_revoked"}},"vaultId":{"optional":false,"shape":{"primitive":"string"}}}},{"object":{"type":{"optional":false,"shape":{"literal":"ping"}}}},{"object":{"type":{"optional":false,"shape":{"literal":"unsubscribed"}},"vaultId":{"optional":false,"shape":{"primitive":"string"}}}},{"object":{"type":{"optional":false,"shape":{"literal":"vault_deleted"}},"vaultId":{"optional":false,"shape":{"primitive":"string"}}}}]}
+    }
+  },
+  "routes": {
+    "/api/admin/runtime": ["GET"],
+    "/api/admin/status": ["GET"],
+    "/api/health": ["GET"],
+    "/api/me": ["GET"],
+    "/api/users": ["GET","POST"],
+    "/api/users/:id": ["DELETE","PATCH"],
+    "/api/users/:id/key": ["GET"],
+    "/api/vaults": ["GET","POST"],
+    "/api/vaults/:id": ["DELETE","PATCH"],
+    "/api/vaults/:id/encryption-salt": ["GET"],
+    "/api/vaults/:id/key-check": ["GET"],
+    "/api/vaults/:id/sync/blobs/:contentHash/chunks/:index": ["PUT"],
+    "/api/vaults/:id/sync/blobs/:contentHash/status": ["GET"],
+    "/api/vaults/:id/sync/contents": ["POST"],
+    "/api/vaults/:id/sync/deleted": ["GET"],
+    "/api/vaults/:id/sync/deleted/clear": ["POST"],
+    "/api/vaults/:id/sync/history": ["GET"],
+    "/api/vaults/:id/sync/index": ["GET"],
+    "/api/vaults/:id/sync/pull": ["POST"],
+    "/api/vaults/:id/sync/push": ["POST"],
+    "/api/vaults/:id/sync/versions": ["GET"],
+    "/api/vaults/:id/sync/versions/:contentHash/content": ["GET","HEAD"]
+  },
+  "constants": {
+    "API_ERROR_CODES": "[ \"VALIDATION_ERROR\", \"UNAUTHORIZED\", \"NOT_FOUND\", \"KEY_EXPIRED\", \"KEY_DISABLED\", \"INSUFFICIENT_SCOPE\", \"CONTRACT_MISMATCH\", \"RATE_LIMITED\", \"QUOTA_EXCEEDED\", \"VAULT_LIMIT_REACHED\", \"PAYLOAD_TOO_LARGE\", \"RANGE_NOT_SATISFIABLE\", \"INTERNAL_ERROR\", ] as const",
+    "API_KEY_SCOPES": "[\"admin\", \"status\", \"users\"] as const",
+    "BLOB_FLAG_CHUNK_AAD": "1",
+    "BLOB_HEADER_BYTES": "24",
+    "BLOB_MAGIC": "\"CBR2\"",
+    "CHUNKED_TRANSFER_THRESHOLD": "8 * 1024 * 1024",
+    "CHUNK_PLAINTEXT_BYTES": "4 * 1024 * 1024",
+    "CHUNK_STORED_BYTES": "CHUNK_PLAINTEXT_BYTES + 28",
+    "CONTENT_BATCH_HEADER_BYTES": "CONTENT_BATCH_MAGIC.length + 4",
+    "CONTENT_BATCH_MAGIC": "\"CBC1\"",
+    "CONTENT_HASH_PATTERN": "/^[a-f0-9]{64}$/",
+    "CONTRACT_HEADER": "\"X-Courier-Contract\"",
+    "HISTORY_KINDS": "[\"documents\", \"attachments\"] as const",
+    "KEY_CHECK_VALUE": "\"courier-key-check\"",
+    "MAX_CHUNKS": "1_048_576",
+    "MAX_CONTENT_BATCH_BYTES": "16 * 1024 * 1024",
+    "MAX_CONTENT_BATCH_FILES": "64",
+    "MAX_DEVICE_NAME_LENGTH": "100",
+    "MAX_ENCRYPTED_PATH_LENGTH": "512",
+    "MAX_HISTORY_LIMIT": "10_000",
+    "MAX_ID_LENGTH": "64",
+    "MAX_PULL_BATCH_FILES": "200",
+    "MAX_PUSH_BATCH_FILES": "100",
+    "MAX_PUSH_HEADER_BYTES": "1024 * 1024",
+    "PUSH_HEADER_LENGTH_BYTES": "4",
+    "SYNC_ACTIONS": "[\"create\", \"modify\", \"rename\", \"delete\", \"restore\"] as const"
+  }
+}
