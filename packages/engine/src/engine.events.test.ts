@@ -1269,6 +1269,35 @@ describe("SyncEngine — a batch of local events", () => {
     expect(textOf(adapter, "new.md")).toBe("theirs");
   });
 
+  it("does not let a notification's move take another chain's file", async () => {
+    const { engine, adapter, api, key } = await makeEngine();
+    adapter.files.set("p.md", encoder.encode("mine"));
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("p.md")!;
+
+    // A newer chain owns `p.md` and its bytes are the ones on disk; the peer then moves
+    // this chain to `q.md`. Following that move renames the local file at `p.md` — the
+    // owner's file — so the notification must not apply it.
+    const pCipher = await encryptString(key, "p.md");
+    await seedChainAt(api, key, pCipher, {
+      fileId: "fileId-owner",
+      versionId: "version-owner",
+      text: "theirs",
+      createdAt: "2030-01-01T00:00:00.000Z",
+    });
+    adapter.files.set("p.md", encoder.encode("theirs"));
+    // A pass learns the owner (the index a notification reads is the pass's, kept current
+    // by every push and notification).
+    await engine.initialSync();
+    expect(textOf(adapter, "p.md")).toBe("theirs");
+    const renameVersion = await api.remoteRename(fileId, await encryptString(key, "q.md"));
+
+    await engine.handleFilePushedBatch([{ fileId, versionId: renameVersion }]);
+
+    expect(textOf(adapter, "p.md")).toBe("theirs");
+    expect(adapter.files.has("q.md")).toBe(false);
+  });
+
   it("does not let a newer tombstone delete the path's owner", async () => {
     const { engine, adapter, api, key } = await makeEngine();
     adapter.files.set("note.md", encoder.encode("mine"));

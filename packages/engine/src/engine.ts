@@ -2078,8 +2078,9 @@ export class SyncEngine {
    */
   private holdsAnotherChainsBytes(fileId: string, path: string, hash: string | null): boolean {
     if (hash === null) return false;
-    const rival = this.remoteIndex.newestAt(path);
-    return rival !== null && rival.fileId !== fileId && rival.head.contentHash === hash;
+    return this.remoteIndex
+      .chainsAt(path)
+      .some((rival) => rival.fileId !== fileId && rival.head.contentHash === hash);
   }
 
   private async reconcileOne(
@@ -4913,7 +4914,12 @@ export class SyncEngine {
     const losesThePath =
       !removesTheDeletedBytes &&
       (this.pathOwnedByOther(fileId, head, writtenPath) ||
-        (plainPath !== writtenPath && this.pathOwnedByOther(fileId, head, plainPath)));
+        // The move also renames the local file at the state's path; when those bytes are
+        // another chain's, taking them would move the owner's file. Checked over *every*
+        // chain recorded there, because the `remember` above made this one a contender at
+        // `plainPath` and `newestAt` would answer with it.
+        (plainPath !== writtenPath &&
+          this.holdsAnotherChainsBytes(fileId, plainPath, localContentHash)));
 
     if (decision.action === "pull") {
       if (losesThePath) return;

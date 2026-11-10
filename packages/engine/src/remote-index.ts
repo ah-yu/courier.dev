@@ -119,6 +119,18 @@ export class RemoteIndex {
     return newest;
   }
 
+  /**
+   * Every live chain recorded at `path`.
+   *
+   * The whole-vault view a pass builds has this answer from its chain map; an
+   * incremental apply only has the index, and needs to know whether the bytes at a path
+   * belong to *any* other chain — not just the newest one, which may be the chain making
+   * the decision (`holdsAnotherChainsBytes`).
+   */
+  chainsAt(path: string): ChainRef[] {
+    return [...(this.newestByPath.get(path)?.values() ?? [])];
+  }
+
   /** The live path recorded for a chain, or null. */
   pathOf(fileId: string): string | null {
     return this.fileIdToPath.get(fileId) ?? null;
