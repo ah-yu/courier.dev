@@ -5,7 +5,8 @@
  * Runs the gates a change must pass before it counts as done, in a fixed order:
  * `docs` (the agent contract stays within its size cap and the docs index is
  * complete) -> `agent-safety` (the workspace-scoped delete helper's refusals) ->
- * `migrations` (the generated chain matches `drizzle/`) -> `lint` (oxlint) ->
+ * `migrations` (the generated chain matches `drizzle/`) -> `contract` (the API
+ * surface matches its committed generation) -> `lint` (oxlint) ->
  * `review` (the community directory's scanner, mirrored by `eslint.config.ts`) ->
  * `typecheck` (tsc --noEmit in every package) -> `test` (Vitest on Bun, every
  * project in `vitest.config.ts`).
@@ -17,15 +18,16 @@
  * non-zero exit code, which makes this command usable as a CI gate as well.
  *
  * Usage:
- *   bun run verify                 # default gates: docs, agent-safety, migrations, lint, review, typecheck, test
+ *   bun run verify                 # default gates: docs, agent-safety, migrations, contract, lint, review, typecheck, test
  *   bun run verify test            # only the named gates
  *   bun run verify format          # opt-in gates (formatting)
  *   bun run verify obsidian        # end-to-end against a real running Obsidian
  *   bun run verify obsidian-ci     # same suite, rendered-geometry cases skipped (CI)
  *
  * Gates: docs (AGENTS.md cap + docs index/links), agent-safety (the delete
- * helper's refusals and recursive removal), migrations (the generated chain), lint,
- * review (the community-directory scanner, mirrored), typecheck, test, format
+ * helper's refusals and recursive removal), migrations (the generated chain), contract
+ * (the API surface and its generation), lint, review (the community-directory scanner,
+ * mirrored), typecheck, test, format
  * (`oxfmt --check`), coverage (the per-package ratchet), obsidian (real Obsidian over
  * the official CLI), obsidian-ci (the same suite without the cases that read rendered
  * geometry).
@@ -79,6 +81,17 @@ const GATES = [
     name: "migrations",
     command: process.execPath,
     args: ["packages/server/scripts/generate-migrations.ts", "--check"],
+    default: true,
+  },
+  {
+    // The API contract, as a diff against the committed surface of its generation
+    // (`packages/shared/contract/<n>.surface.json`). A changed field, route, error
+    // code or shared constant fails here until `contract.ts` says what the change
+    // means, which is what keeps an agent from shipping a wire change without a
+    // generation bump. The message it prints names the three numbers to write.
+    name: "contract",
+    command: process.execPath,
+    args: ["scripts/contract/main.ts"],
     default: true,
   },
   { name: "lint", command: "bun", args: ["run", "lint"], default: true },

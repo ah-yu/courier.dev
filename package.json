@@ -19,6 +19,7 @@
     "bench": "bun scripts/bench.ts",
     "bench:report": "bun scripts/bench-report.ts",
     "verify": "bun scripts/verify.ts",
+    "contract": "bun scripts/contract/main.ts",
     "check:docs": "bun scripts/check-docs.ts",
     "version:snapshot": "bun scripts/version.ts",
     "safe-delete": "bun scripts/safe-delete.ts",

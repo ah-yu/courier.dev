@@ -12,6 +12,7 @@
     "vault_b*",
     "**/routeTree.gen.ts",
     "**/migrations.generated.ts",
+    "packages/shared/contract",
     "bun.lock",
     ".agents/skills"
   ]

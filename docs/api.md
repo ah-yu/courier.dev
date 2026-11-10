@@ -56,6 +56,76 @@ Authorization: Bearer ck_xxxxxxxxxxxx
 
 ---
 
+## Contract generation
+
+One tag ships the plugin, the CLI and the server, but a **deployment** upgrades them at three
+different times: the plugin follows the Obsidian directory, the CLI is a binary someone installed
+once, and the server is whatever an administrator deployed. The version string cannot answer
+"can these two work together" — it moves on every release, including the ones that do not touch the
+API. A **contract generation** does.
+
+Three integers in [`packages/shared/src/contract.ts`](../packages/shared/src/contract.ts) are the
+whole model:
+
+| Constant              | Read by | Means                                                  |
+| --------------------- | ------- | ------------------------------------------------------ |
+| `CONTRACT_GENERATION` | both    | the interface generation this build speaks             |
+| `MIN_CLIENT_CONTRACT` | server  | the oldest client generation this server still serves  |
+| `MIN_SERVER_CONTRACT` | client  | the oldest server generation this client can work with |
+
+A peer is served when it falls inside the other side's window, and a peer outside it is refused with
+the side that has to move — not with a generic failure. One server therefore serves the several
+plugin versions its users are running: only a client below `MIN_CLIENT_CONTRACT` is turned away, and
+only a server below `MIN_SERVER_CONTRACT` is turned away by the client. (What exists today is the
+numbers and the gate below; the endpoints that publish and compare them are specified with the
+endpoints.)
+
+### The rules
+
+| The release changes…                                                                            | `CONTRACT_GENERATION` | `MIN_CLIENT_CONTRACT` | `MIN_SERVER_CONTRACT` |
+| ----------------------------------------------------------------------------------------------- | --------------------- | --------------------- | --------------------- |
+| something an older peer would **misread** (removed field, changed meaning, field made required) | +1                    | new generation        | new generation        |
+| something **additive** only (new optional field, new route, new type)                           | +1                    | unchanged             | unchanged             |
+| a client now depends on a new server capability                                                 | +1                    | unchanged             | new generation        |
+| the server stops reading older clients (fields dropped, framing changed)                        | +1                    | new generation        | unchanged             |
+
+The judgement behind every row is one question: _would the old side misread this byte?_ Adding is
+safe — an older reader ignores what it does not know, and an older sender omits what it never had.
+Removing, retyping or re-meaning is not. Some changes cannot be windowed at all (the chunk size,
+the blob layout, the crypto envelope: both sides must agree exactly), so they move all three.
+
+### How it is kept honest
+
+`bun run contract` derives the observable surface from the code — every exported wire type with its
+fields, optionality and types, the server's route table, `API_ERROR_CODES` and the constants both
+sides share — and compares it with `packages/shared/contract/<CONTRACT_GENERATION>.surface.json`.
+`bun run verify` runs it, so a change to anything a peer can observe fails until the numbers say
+what the change means:
+
+```
+bun run contract             # check the code against its generation's surface file
+bun run contract bump --write  # classify the diff, then write the numbers and the next surface
+```
+
+The surface is a tree, not a text file: `Array<T>` and `T[]` are the same shape, formatting is
+invisible, and a changed field shows up as one changed line. A generation file is never edited —
+a change writes the next one.
+
+Two things the tool cannot see, and both are answered by the same question above:
+
+- a field whose **name and type stayed the same but whose meaning changed**;
+- whether a **client actually depends** on what was added (the tool greps the plugin and CLI for the
+  added names and moves `MIN_SERVER_CONTRACT` when it finds them — an extra prompt, never a silent
+  failure).
+
+Never edit a number by hand: `bump --write` writes all three together, and `write` only creates a
+generation's file when there is none.
+
+The wire form — the generation published on `/api/health`, stated on every request, and refused with
+`426 CONTRACT_MISMATCH` — belongs to the endpoints that read it, and is specified with them.
+
+---
+
 ## Endpoint list
 
 ### 1. Health check
