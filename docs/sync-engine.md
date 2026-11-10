@@ -327,6 +327,14 @@ file now lives at.
   - `handleFilePushed` and `pushFile` keep the index current, and the pushed version is recorded
     **before** the push request goes out (`SelfEventLog.rememberPushedVersion`), because the server's
     `files_pushed` echo can beat the HTTP response back.
+  - **A pass adopts a move whose two halves it sees separately.** `createUntrackedFiles` asks
+    `SelfEventLog.matchDeletedFile` for the bytes it is about to give a new chain to: when a tombstone
+    this device just published deleted exactly those bytes, the chain is re-pointed to the new path and
+    a content-less `rename` is pushed — the same rule the event path applies, and the pass also records
+    a tombstone it publishes (`prepareTombstone`) so that rule can fire. Without it, a scheduled pass
+    that listed the vault between the halves of a bulk rename gave every note a second chain: the
+    deletions landed, the creates found no chain to adopt, and the vault was left with one tombstone
+    and one duplicate per note (measured with 200 renamed notes and a one-second pass interval).
 
   Covered by the engine suite, the rename cases in `plugin.e2e.test.ts`, and the root-level rename case
   in the real-Obsidian suite.
@@ -337,13 +345,17 @@ file now lives at.
   head the **server** stamped latest (`createdAt`, with the fileId breaking a tie), so every device
   picks the same winner and converges on the same content. The other chain may still `push` — that is
   how its bytes catch up with the winner — but it never `pull`s or resolves a conflict over that path.
-  Without that tie-break each device resolved the conflict in the _other_ chain's favour, pushed the
-  bytes it had just been given onto its own chain, and two devices traded the note's content on every
-  pass (measured: both devices alternated between each other's text indefinitely, one conflict copy
-  each). The loser's bytes are parked once, on the device that held them. A `delete` head applying its
-  own deletion is not such a write: the bytes it removes are the ones the tombstone deleted, which is
-  what frees the path for the chain that now owns it. Covered by `pathOwners` in `pass-view.test.ts`
-  and the two-chain cases in `engine.events.test.ts`.
+  A `file_pushed` notification is the same decision a pass makes, so it applies the same rule
+  (`isNewerHead` against the chain the index holds for the path), or the losing chain would overwrite
+  the file the moment its push was announced. Without that tie-break each device resolved the conflict
+  in the _other_ chain's favour, pushed the bytes it had just been given onto its own chain, and two
+  devices traded the note's content on every pass (measured: both devices alternated between each
+  other's text indefinitely, one conflict copy each). The loser's bytes are parked once, on the device
+  that held them — a notification parks them too: it reads the file whenever it is still on disk, even
+  when the pass's cached hash answered first, because parking is the only thing that keeps the note's
+  own text. A `delete` head applying its own deletion is not such a write: the bytes it removes are the
+  ones the tombstone deleted, which is what frees the path for the chain that now owns it. Covered by
+  `pathOwners` in `pass-view.test.ts` and the two-chain cases in `engine.events.test.ts`.
 
 ## Offline changes and reconciliation
 

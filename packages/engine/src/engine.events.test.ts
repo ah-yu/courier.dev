@@ -34,7 +34,7 @@ freezeConflictClock();
  * the server while this device's file is still at the old path, and another device can
  * have created a new chain at that path. The pass is concurrent now, so without a path
  * claim the remote-only chain reads the other chain's file as a divergence and parks a
- * conflict copy of content that never conflicted — the serial pass was what hid this.
+ * conflict copy of content that never conflicted 鈥?the serial pass was what hid this.
  */
 /**
  * Seed chain X at `old.md` on a source device, bind a target to it, then let a second
@@ -83,7 +83,7 @@ async function prepare(kind: "move" | "delete") {
 
   // A second device puts a new note at the path this device still holds. It is a
   // first bind on that device, so it keeps its own file instead of applying X's
-  // deletion — the chain it creates is the one that must land at `old.md`.
+  // deletion 鈥?the chain it creates is the one that must land at `old.md`.
   const peerAdapter = new FakeAdapter();
   peerAdapter.files.set("old.md", encoder.encode("new note"));
   const peer = new SyncEngine({
@@ -98,7 +98,34 @@ async function prepare(kind: "move" | "delete") {
   return { target, targetAdapter, conflicts };
 }
 
-describe("SyncEngine — two chains naming one path", () => {
+/**
+ * A second chain that also records `pathCipher`, with its own head stamped `createdAt`.
+ * That is the state a forked rename, or a device that created the same note, leaves behind.
+ */
+async function seedChainAt(
+  api: FakeApi,
+  key: CryptoKey,
+  pathCipher: string,
+  chain: { fileId: string; versionId: string; text: string; createdAt: string },
+): Promise<void> {
+  const bytes = encoder.encode(chain.text);
+  const contentHash = await sha256Hex(bytes);
+  api.blobs.set(contentHash, await encryptCombinedBytes(key, bytes as Uint8Array<ArrayBuffer>));
+  api.paths.set(chain.fileId, pathCipher);
+  api.chains.set(chain.fileId, [
+    {
+      versionId: chain.versionId,
+      contentHash,
+      encryptedPath: pathCipher,
+      action: "create",
+      sizeBytes: bytes.byteLength,
+      mtimeMs: 1,
+      createdAt: chain.createdAt,
+    },
+  ]);
+}
+
+describe("SyncEngine 鈥?two chains naming one path", () => {
   it("applies a peer's move before a new chain at the old path decides", async () => {
     const { target, targetAdapter, conflicts } = await prepare("move");
 
@@ -141,24 +168,12 @@ describe("SyncEngine — two chains naming one path", () => {
 
     // A second chain that also records `note.md`, with older bytes and an older head: the
     // leftover of a rename that forked, or a device that arrived with the same path.
-    const olderBytes = encoder.encode("v1-old");
-    const olderHash = await sha256Hex(olderBytes);
-    api.blobs.set(
-      olderHash,
-      await encryptCombinedBytes(key, olderBytes as Uint8Array<ArrayBuffer>),
-    );
-    api.paths.set("fileId-older", pathCipher);
-    api.chains.set("fileId-older", [
-      {
-        versionId: "version-older",
-        contentHash: olderHash,
-        encryptedPath: pathCipher,
-        action: "create",
-        sizeBytes: olderBytes.byteLength,
-        mtimeMs: 1,
-        createdAt: "2020-01-01T00:00:00.000Z",
-      },
-    ]);
+    await seedChainAt(api, key, pathCipher, {
+      fileId: "fileId-older",
+      versionId: "version-older",
+      text: "v1-old",
+      createdAt: "2020-01-01T00:00:00.000Z",
+    });
 
     await engine.initialSync();
 
@@ -166,6 +181,71 @@ describe("SyncEngine — two chains naming one path", () => {
     // that were never in conflict with it.
     expect(textOf(adapter, "note.md")).toBe("v2-new");
     expect(conflictPaths(adapter)).toEqual([]);
+  });
+
+  it("does not let an older chain's notification overwrite the path", async () => {
+    const key = await deriveEncryptionKey(
+      "password",
+      btoa(String.fromCharCode(...new Uint8Array(32))),
+    );
+    const api = new FakeApi(key);
+    const adapter = new FakeAdapter();
+    adapter.files.set("note.md", encoder.encode("v2-new"));
+    const engine = new SyncEngine({
+      platform: realPlatform,
+      vaultId: "vault-1",
+      adapter,
+      api,
+      encryptionKey: key,
+    });
+    await engine.initialSync();
+    const pathCipher = api.chains.get(engine.fileIdForPath("note.md")!)![0]!.encryptedPath;
+    await seedChainAt(api, key, pathCipher, {
+      fileId: "fileId-older",
+      versionId: "version-older",
+      text: "v1-old",
+      createdAt: "2020-01-01T00:00:00.000Z",
+    });
+
+    // The push of the older chain is announced: the notification is the same decision the
+    // pass makes, so it must lose the path here too (the pass is five minutes away).
+    await engine.handleFilePushedBatch([{ fileId: "fileId-older", versionId: "version-older" }]);
+
+    expect(textOf(adapter, "note.md")).toBe("v2-new");
+    expect(conflictPaths(adapter)).toEqual([]);
+  });
+
+  it("applies a newer chain's notification over the path it takes", async () => {
+    const key = await deriveEncryptionKey(
+      "password",
+      btoa(String.fromCharCode(...new Uint8Array(32))),
+    );
+    const api = new FakeApi(key);
+    const adapter = new FakeAdapter();
+    adapter.files.set("note.md", encoder.encode("v1-mine"));
+    const engine = new SyncEngine({
+      platform: realPlatform,
+      vaultId: "vault-1",
+      adapter,
+      api,
+      encryptionKey: key,
+    });
+    await engine.initialSync();
+    const pathCipher = api.chains.get(engine.fileIdForPath("note.md")!)![0]!.encryptedPath;
+    await seedChainAt(api, key, pathCipher, {
+      fileId: "fileId-newer",
+      versionId: "version-newer",
+      text: "v2-theirs",
+      createdAt: "2030-01-01T00:00:00.000Z",
+    });
+
+    await engine.handleFilePushedBatch([{ fileId: "fileId-newer", versionId: "version-newer" }]);
+
+    // The newer chain owns the path: its bytes land and this device's copy is parked, so
+    // nothing is lost when the two genuinely diverged.
+    expect(textOf(adapter, "note.md")).toBe("v2-theirs");
+    expect(conflictPaths(adapter)).toHaveLength(1);
+    expect(plain(adapter.files.get(conflictPaths(adapter)[0]!))).toBe("v1-mine");
   });
 
   it("converges two devices that created the same path out of touch", async () => {
@@ -223,8 +303,8 @@ describe("SyncEngine — two chains naming one path", () => {
  * The host-facing activity feed.
  *
  * It is not a sync rule: the engine decides exactly the same without a listener. What
- * these cases pin is that the decision is reported **when it is made** — direction,
- * outcome and, for a skip, the switch that fired — so the plugin's history can freeze a
+ * these cases pin is that the decision is reported **when it is made** 鈥?direction,
+ * outcome and, for a skip, the switch that fired 鈥?so the plugin's history can freeze a
  * row instead of reconstructing it from the server's chains and today's settings.
  */
 describe("sync activity", () => {
@@ -499,7 +579,7 @@ function seed(adapter: FakeAdapter, count: number, body = "v1"): string[] {
   return paths;
 }
 
-describe("SyncEngine — a batch of local events", () => {
+describe("SyncEngine 鈥?a batch of local events", () => {
   it("sends the batch's creates 100 files per request", async () => {
     const { engine, adapter, api } = await makeEngine();
     await engine.initialSync();
@@ -531,7 +611,7 @@ describe("SyncEngine — a batch of local events", () => {
     const edit = api.pushed.filter((file) => file.fileId === fileId).at(-1)!;
     expect(edit.action).toBe("modify");
     expect(edit.baseVersionId).toBe(base);
-    // 151 versions → two requests, the edit in the first with 99 creates.
+    // 151 versions 鈫?two requests, the edit in the first with 99 creates.
     expect(api.pushCalls.slice(before).reduce((total, count) => total + count, 0)).toBe(151);
     await expectConsistent(engine, adapter, api);
   });
@@ -693,7 +773,7 @@ describe("SyncEngine — a batch of local events", () => {
     api.onPush = null;
 
     // The peer pushed after the point the delete was decided from: the remote side wins
-    // and — the local file being gone — its version comes back.
+    // and 鈥?the local file being gone 鈥?its version comes back.
     expect(new TextDecoder().decode(adapter.files.get("raced.md"))).toBe("peer-v2");
     expect(api.chains.get(fileId)!.map((version) => version.action)).toEqual(["create", "modify"]);
     await expectConsistent(engine, adapter, api);
@@ -883,7 +963,7 @@ describe("SyncEngine — a batch of local events", () => {
 
     // The source was never tracked (a temp file, a file that appeared and replaced another):
     // the move is a create at the destination, and the destination's chain must be retired
-    // first — the stale index would otherwise pull the deleted bytes over it.
+    // first 鈥?the stale index would otherwise pull the deleted bytes over it.
     adapter.files.set("tmp.md", encoder.encode("moved bytes"));
     adapter.files.delete("dest.md");
     adapter.files.delete("tmp.md");
@@ -949,7 +1029,7 @@ describe("SyncEngine — a batch of local events", () => {
     const fileId = engine.fileIdForPath("empty.md")!;
     // A peer deletes the empty note; the local device renames it (a live version whose
     // content hash is also the empty hash). The tombstone must not be adopted as that
-    // version's head — the peer's deletion is what the chain says.
+    // version's head 鈥?the peer's deletion is what the chain says.
     await api.remoteDelete(fileId);
     adapter.files.delete("empty.md");
     adapter.files.set("moved-empty.md", new Uint8Array(0));
@@ -1053,7 +1133,7 @@ describe("SyncEngine — a batch of local events", () => {
     await engine.initialSync();
     const destId = engine.fileIdForPath("dest.md")!;
     // A peer replaces the destination with an empty file: the tombstone's base is stale, and
-    // every tombstone's content hash is the empty one — it must not be read as "our delete
+    // every tombstone's content hash is the empty one 鈥?it must not be read as "our delete
     // landed".
     await api.remoteEdit(destId, "");
     const before = api.pushed.length;
@@ -1082,7 +1162,7 @@ describe("SyncEngine — a batch of local events", () => {
     const aId = engine.fileIdForPath("a.md")!;
 
     // A second, untracked copy of the same content, moved while the chain's own path still
-    // holds a file: the identity fallback must not merge the two by content — which it can
+    // holds a file: the identity fallback must not merge the two by content 鈥?which it can
     // only see if the job's listing includes the destination.
     adapter.files.set("b.md", encoder.encode("shared bytes"));
     adapter.files.delete("b.md");
@@ -1134,6 +1214,30 @@ describe("SyncEngine — a batch of local events", () => {
     expect(api.pushed.filter((push) => push.action === "restore")).toHaveLength(paths.length);
   });
 
+  it("adopts a move whose new path a pass saw before its event", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("old.md", encoder.encode("moved bytes"));
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("old.md")!;
+
+    // The delete half is published by a burst, then the file is renamed on disk and a pass
+    // lists the vault before the create's event arrives — a scheduled pass inside a bulk
+    // move. The pass must adopt the chain the delete left behind, not create a second one.
+    adapter.files.delete("old.md");
+    await engine.handleLocalEvents({ deleted: ["old.md"] });
+    adapter.files.set("new.md", encoder.encode("moved bytes"));
+    await engine.initialSync();
+
+    expect(engine.fileIdForPath("new.md")).toBe(fileId);
+    expect(engine.fileIdForPath("old.md")).toBeNull();
+    expect(api.chains.get(fileId)!.map((version) => version.action)).toEqual([
+      "create",
+      "delete",
+      "rename",
+    ]);
+    expect(textOf(adapter, "new.md")).toBe("moved bytes");
+  });
+
   it("turns a move the watcher reports as delete+create into one rename", async () => {
     const { engine, adapter, api } = await makeEngine();
     adapter.files.set("old.md", encoder.encode("moved bytes"));
@@ -1143,7 +1247,7 @@ describe("SyncEngine — a batch of local events", () => {
 
     // The CLI's `fs.watch` (and an external tool) reports a move as its two halves: the
     // old path gone and a new path created. The chain never left the tree, so the batch
-    // must send one content-less rename — not a tombstone the rename then races.
+    // must send one content-less rename 鈥?not a tombstone the rename then races.
     adapter.files.delete("old.md");
     adapter.files.set("new.md", encoder.encode("moved bytes"));
     await engine.handleLocalEvents({ changed: ["new.md"], deleted: ["old.md"] });
@@ -1243,7 +1347,7 @@ describe("SyncEngine — a batch of local events", () => {
     expect(theirs).not.toBe(mine);
 
     // The recreate arrives in a batch: the restore must ask who owns the path, exactly as
-    // the single event does — the owner keeps it, and this device's tombstone is retired.
+    // the single event does 鈥?the owner keeps it, and this device's tombstone is retired.
     adapter.files.set("reborn.md", encoder.encode("second life"));
     await engine.handleLocalEvents({ changed: ["reborn.md"] });
 

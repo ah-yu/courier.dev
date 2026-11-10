@@ -137,7 +137,9 @@ describe("a bulk rename through a real server", () => {
       eventSource,
       stateStore,
       platform: realPlatform,
-      reconcileIntervalMs: 0,
+      // A pass as the safety net every real host has: a notification this busy test server
+      // drops must not leave a peer waiting for a reconcile that is five minutes away.
+      reconcileIntervalMs: 1_000,
       settingsPollIntervalMs: 0,
       log: () => {},
     });

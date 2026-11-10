@@ -64,6 +64,7 @@ import {
 } from "./content-prefetch";
 import {
   chainPaths,
+  isNewerHead,
   orderedFileIds,
   pathOwners,
   prefetchCandidatesForBurst,
@@ -2529,6 +2530,40 @@ export class SyncEngine {
             ? localHashes.get(path)
             : undefined;
 
+        // The other half of a move this pass overtook: the file was deleted (a burst
+        // published the tombstone) and the same bytes appeared at this path before any
+        // event for them did — a pass that lists the vault between the two halves of a bulk
+        // rename would otherwise give every note a second chain, which is exactly what a
+        // rename that forked left behind. The event path adopts the chain the same way
+        // (`resolveNewLocalFile`); a rename carries no content, so it is pushed here rather
+        // than waiting for the next pass to read the tombstone as a recreate.
+        const movedHash = knownHash ?? (await sha256Hex(read.bytes));
+        const deleted = this.selfEvents.matchDeletedFile(movedHash);
+        if (deleted !== null) {
+          const moved = this.state[deleted.fileId];
+          if (moved !== undefined) {
+            if (this.pathToFileId.get(moved.plainPath) === deleted.fileId) {
+              this.pathToFileId.delete(moved.plainPath);
+            }
+            const entry = { ...moved, plainPath: path };
+            delete entry.deletedAtMs;
+            this.state[deleted.fileId] = entry;
+            this.pathToFileId.set(path, deleted.fileId);
+            this.selfEvents.forgetDelete(deleted.fileId);
+            const prepared = await this.preparePush({
+              fileId: deleted.fileId,
+              plainPath: path,
+              action: "rename",
+              bytes: read.bytes,
+              contentHash: movedHash,
+              baseVersionId: moved.lastKnownVersionId,
+              stamp: read.stamp,
+            });
+            if (prepared) await this.pushPrepared(prepared);
+            continue;
+          }
+        }
+
         const fileId = generateFileId();
         // A fileId this engine just generated cannot have a chain: base null. Prepared
         // **before** the state entry is written: a file the API cannot carry (its
@@ -2757,6 +2792,13 @@ export class SyncEngine {
     // Confirm with the adapter rather than trusting the pass's listing: a file written
     // back between the decision and the batch is not a deletion.
     if (await this.opts.adapter.statFile(path)) return null;
+    // Remember the delete so a file that appears with this content is read as its move
+    // rather than as a brand-new chain (`SelfEventLog.matchDeletedFile`). The event paths
+    // record this in `resolveLocalDelete`; a pass that publishes the tombstone has to do the
+    // same, or a bulk move whose two halves straddle a pass forks one chain per file — the
+    // deletion lands, and the create that is its other half finds no chain to adopt.
+    const deletedContentHash = stateEntry.lastKnownContentHash ?? "";
+    if (deletedContentHash !== "") this.selfEvents.rememberDelete(fileId, deletedContentHash);
     return await this.preparePush(
       this.tombstoneRequest(fileId, path, baseVersionId, this.deleteMoment(stateEntry)),
     );
@@ -4701,6 +4743,13 @@ export class SyncEngine {
       return;
     }
 
+    // Who owns this path before the notification claims it, and whether this chain is the
+    // older of two that name it: a notification is the same decision a pass makes, so the
+    // ownership rule has to hold here too, or the losing chain overwrites the file the
+    // moment its push is announced (see `pathOwners`).
+    const ownerBefore = this.remoteIndex.fileIdAt(plainPath);
+    const ownerHeadBefore = ownerBefore === null ? undefined : this.remoteIndex.headOf(ownerBefore);
+
     // Keep the remote identity index fresh: the vault event for this path (should the
     // adapter fire one) must recognise it as this fileId, not as a new file. A
     // **tombstone** records no live path, so it is deliberately left out — the index
@@ -4746,7 +4795,18 @@ export class SyncEngine {
       }),
     );
 
+    // Two live chains can name one path, and only the one the server stamped latest may
+    // write the file (see `pathOwners`). A `delete` head applying its own deletion is not
+    // such a write: the bytes it removes are the ones the tombstone deleted.
+    const losesThePath =
+      ownerBefore !== null &&
+      ownerHeadBefore !== undefined &&
+      ownerBefore !== fileId &&
+      head.action !== "delete" &&
+      isNewerHead({ fileId: ownerBefore, head: ownerHeadBefore }, { fileId, head });
+
     if (decision.action === "pull") {
+      if (losesThePath) return;
       // A notification whose content cannot be read is not a no-op: the file
       // never arrives and — unlike a pass, which retries in five minutes with
       // nothing else to do — this was the only thing that would have pulled it
@@ -4757,18 +4817,18 @@ export class SyncEngine {
         throw new Error(`Could not read the content of ${plainPath} (${head.contentHash})`);
       }
     } else if (decision.action === "conflict") {
+      if (losesThePath) return;
       // A notification is a reconcile in miniature: it resolves the conflict the same way
       // (remote wins, local content parked), not merely records it. And, exactly like the
       // pull above, a resolution that could not be carried out is not a no-op — this was the
       // only thing that would have applied it now, and the user must not be told a conflict
       // was resolved when the note still holds their text.
-      const applied = await this.conflicts.resolve(
-        fileId,
-        plainPath,
-        head,
-        localBytes !== null,
-        peerName,
-      );
+      // `localExists`, not "the bytes are in hand": the file being statable is what makes
+      // this a conflict, and a file whose stamp still matches its state is not read at all
+      // (its hash came from the cache). Passing the read result instead made this
+      // resolution overwrite an unchanged local note with the peer's version and park
+      // nothing — the note's own text was gone.
+      const applied = await this.conflicts.resolve(fileId, plainPath, head, localExists, peerName);
       if (!applied) {
         throw new Error(`Could not apply the conflict for ${plainPath} (${head.contentHash})`);
       }

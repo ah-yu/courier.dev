@@ -91,7 +91,7 @@ export function listedStampPath(
  * winner); it never writes the file.
  */
 export function pathOwners(view: PassView, state: LocalVersionState): Map<string, string> {
-  const newest = new Map<string, { fileId: string; createdAt: string }>();
+  const newest = new Map<string, ChainRef>();
   for (const [fileId, chain] of view.chainByFileId) {
     const head = remoteHead(chain);
     if (!head || head.action === "delete") continue;
@@ -99,17 +99,32 @@ export function pathOwners(view: PassView, state: LocalVersionState): Map<string
     const path = recordedPath ?? plainPath;
     if (path === null) continue;
     const current = newest.get(path);
-    if (
-      current === undefined ||
-      head.createdAt > current.createdAt ||
-      (head.createdAt === current.createdAt && fileId < current.fileId)
-    ) {
-      newest.set(path, { fileId, createdAt: head.createdAt });
+    if (current === undefined || isNewerHead({ fileId, head }, current)) {
+      newest.set(path, { fileId, head });
     }
   }
   const owners = new Map<string, string>();
   for (const [path, entry] of newest) owners.set(path, entry.fileId);
   return owners;
+}
+
+/** A chain and its live head: the two things the owner rule compares. */
+export interface ChainRef {
+  fileId: string;
+  head: VersionChainEntry;
+}
+
+/**
+ * Whether `left` is the newer of two chains that name one path (see {@link pathOwners}).
+ *
+ * The server's `createdAt` decides, and a tie falls back to the fileId so that two heads
+ * stamped in the same millisecond still produce the same answer on every device.
+ */
+export function isNewerHead(left: ChainRef, right: ChainRef): boolean {
+  if (left.head.createdAt !== right.head.createdAt) {
+    return left.head.createdAt > right.head.createdAt;
+  }
+  return left.fileId < right.fileId;
 }
 
 /**
