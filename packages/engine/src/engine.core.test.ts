@@ -237,9 +237,12 @@ describe("SyncEngine", () => {
 
     await peer.handleFilePushedBatch(events);
 
-    // The applies really moved/wrote (one of them into a conflict), and never two at once.
-    expect(peerAdapter.ops).toBeGreaterThan(1);
+    // Both applies take their turn, but only the chain the server stamped latest may write
+    // `r.md`: the older one leaves its own file where it is and the next pass re-points it
+    // (see `pathOwners`). The serialisation this case pins is `maxActive` — a second write
+    // while the first is in flight would take it above 1 — and the owner's bytes landing.
     expect(peerAdapter.maxActive).toBe(1);
+    expect(peerAdapter.files.has("r.md")).toBe(true);
   });
 
   it("reports a notification whose version content cannot be read", async () => {

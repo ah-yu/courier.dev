@@ -10,16 +10,40 @@
  *
  * The records are **time-bounded hints**, not a mute switch: a write is matched by
  * content hash (a genuine edit that lands in the window has different bytes), a rename
- * by its target, and a delete by path. The window only has to outlive the event it
- * exists for, and it is swept as records are added, so a host that stays up for weeks
- * does not accumulate them. The clock is injected so a test can move it instead of
- * freezing a global.
+ * by its target, and a delete by path. The window has to outlive the gap between the two
+ * halves of the event it exists for — which for a bulk move is a whole batch job, not one
+ * event (see {@link DEFAULT_RENAME_WINDOW_MS}) — and a record is swept once its window
+ * closes, so a host that stays up for weeks does not accumulate them. The clock is
+ * injected so a test can move it instead of freezing a global.
  */
 
 import type { FileStamp } from "./adapter";
 
-/** How long a deleted fileId is kept for rename-by-hash matching (ms). */
-export const DEFAULT_RENAME_WINDOW_MS = 5_000;
+/**
+ * How long a deleted fileId is kept for rename-by-hash matching (ms).
+ *
+ * A move reaches a host as "this path is gone" and "that path appeared". Those two halves
+ * are *not* always in the same batch: the host hands a burst over every
+ * `LOCAL_EVENT_BURST_FLUSH_MS`, and a batch that meets the sync allowance spends minutes
+ * in the engine before the next one is decided. A window sized for a single event
+ * therefore forked one chain per file on a bulk move — a tombstone under the old path and
+ * a brand-new chain under the new one — which is exactly what this memory exists to
+ * prevent ("one path, one chain"). It is sized to one **pass** interval instead
+ * (`DEFAULT_RECONCILE_INTERVAL_MS` in `host.ts`, repeated here because the host imports the
+ * engine and not the other way round; a test pins the two together): a full reconcile lists
+ * every file and gives it an identity anyway, so outliving one is as long as the record can
+ * matter.
+ */
+export const DEFAULT_RENAME_WINDOW_MS = 5 * 60_000;
+
+/**
+ * The most deletes kept for matching, whatever their age.
+ *
+ * {@link DEFAULT_RENAME_WINDOW_MS} bounds how long a record lives; this bounds how many a
+ * burst can leave behind ("cost is bounded"). A bulk move beyond it keeps its newest
+ * deletes, so its earliest files are the ones that fork.
+ */
+export const MAX_PENDING_DELETES = 20_000;
 
 /**
  * How long a path the engine wrote itself keeps suppressing the vault event that write
@@ -278,7 +302,21 @@ export class SelfEventLog {
 
   /** Remember a delete so a file appearing with the same content can adopt its chain. */
   rememberDelete(fileId: string, contentHash: string): void {
-    this.pendingDeletes.set(fileId, { fileId, contentHash, deletedAt: this.now() });
+    // Re-remembering a chain updates the record in place: the map's insertion order is the
+    // ceiling's eviction order, and moving an old chain to the end would keep it above
+    // deletes that are actually newer.
+    const entry = this.pendingDeletes.get(fileId);
+    if (entry === undefined) {
+      this.pendingDeletes.set(fileId, { fileId, contentHash, deletedAt: this.now() });
+    } else {
+      entry.contentHash = contentHash;
+      entry.deletedAt = this.now();
+    }
+    while (this.pendingDeletes.size > MAX_PENDING_DELETES) {
+      const oldest = this.pendingDeletes.keys().next();
+      if (oldest.done) break;
+      this.pendingDeletes.delete(oldest.value);
+    }
   }
 
   /**
@@ -304,9 +342,9 @@ export class SelfEventLog {
    * Drop the record of a delete **the caller matched itself**, so the same delete cannot
    * explain a second new file.
    *
-   * A batch keeps its own hash → fileId map for the deletes it prepares in one job (the
-   * time window is sized for one event, not for a 600-event burst's tail), and consumes
-   * the record here once its create has adopted the chain.
+   * A batch keeps its own hash → fileId map for the deletes it prepares in one job — a
+   * per-burst dedupe, not a second time window — and consumes the record here once its
+   * create has adopted the chain.
    */
   forgetDelete(fileId: string): void {
     this.pendingDeletes.delete(fileId);
