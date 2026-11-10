@@ -81,14 +81,6 @@ function fail(message: string, code = 1): never {
 }
 
 /**
- * Refuse to go on when this CLI and the server speak different contract generations.
- *
- * A mismatch is a configuration fact, not a transient fault: it exits with its own code so
- * a supervisor can be told not to restart it, and it is checked **before** a lease is taken
- * or a binding is written, so nothing is left half-done. A server that cannot be reached is
- * not this: that stays the caller's retry path.
- */
-/**
  * Whether this CLI and the server disagree on the contract, for the status block.
  *
  * Never throws and never aborts the block: an unreachable server, or a 200 that is not the
@@ -107,6 +99,14 @@ export async function readContractIssue(client: {
     return null;
   }
 }
+/**
+ * Refuse to go on when this CLI and the server speak different contract generations.
+ *
+ * A mismatch is a configuration fact, not a transient fault: it exits with its own code so
+ * a supervisor can be told not to restart it, and it is checked **before** a lease is taken
+ * or a binding is written, so nothing is left half-done. A server that cannot be reached is
+ * not this: that stays the caller's retry path.
+ */
 export async function requireCompatibleServer(config: CliConfig): Promise<void> {
   try {
     await ensureCompatibleServer(config);

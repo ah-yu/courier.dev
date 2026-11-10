@@ -1658,6 +1658,9 @@ describe("plugin e2e — the real plugin against a real server", () => {
       // The deletion reaches the client as a websocket event; wait for the subscription
       // the bind started before deleting, or the event has nobody to arrive at.
       await waitFor(() => plugin.wsState === "connected", "the host never subscribed");
+      // The start probe recorded what this server speaks; that observation dies with the
+      // binding, or a rebind with no answer shows the deleted vault's server.
+      expect(plugin.serverContract).not.toBeNull();
 
       await plugin.actions.deleteVault(remote.id);
       await waitFor(
@@ -1665,6 +1668,12 @@ describe("plugin e2e — the real plugin against a real server", () => {
         "the plugin never disconnected after the vault was deleted",
       );
       expect(plugin.settings.vaultConnections[remote.id]).toBeUndefined();
+      // The clear lands after `unbindVault`'s awaited write, so wait for it rather than
+      // reading it in the same tick.
+      await waitFor(
+        () => plugin.serverContract === null,
+        "the deleted vault's server observation survived the unbind",
+      );
     });
 
     it("forgets a disconnected vault's record when the vault is deleted from the picker", async () => {
@@ -7148,7 +7157,7 @@ describe("plugin e2e — the real plugin against a real server", () => {
       expect(pauseRow.buttons.map((button) => button.text)).toEqual(["继续同步"]);
     });
 
-    it("explains a paused vault from one health ask on load, and ignores a body that is not health", async () => {
+    it("explains a paused vault from one health ask on load", async () => {
       // A paused vault never starts a host, so the probe of a normal start never runs and the
       // row would read a bare "已暂停" after a reload. `onload` makes one unauthenticated ask.
       const requested: string[] = [];
@@ -7194,8 +7203,15 @@ describe("plugin e2e — the real plugin against a real server", () => {
       // A 200 that is not the health document — a proxy's error object, a captive portal —
       // must leave the observation alone rather than label the server as too old.
       const { plugin } = await startHostedPlugin("Paused Display");
-      plugin.serverContract = null;
-      const restore = installHealthAnswer({ error: "UPSTREAM_ERROR" });
+      const sentinel = {
+        verdict: "server-too-old" as const,
+        serverGeneration: 1,
+        serverMinClient: 1,
+        serverVersion: "0.5.2",
+      };
+      plugin.serverContract = sentinel;
+      const requested: string[] = [];
+      const restore = installHealthAnswer({ error: "UPSTREAM_ERROR" }, requested);
       try {
         await (
           plugin as unknown as { probeServerForDisplay(): Promise<void> }
@@ -7203,7 +7219,9 @@ describe("plugin e2e — the real plugin against a real server", () => {
       } finally {
         restore();
       }
-      expect(plugin.serverContract).toBeNull();
+      // The ask happened, and the answer left the observation exactly as it was.
+      expect(requested).toEqual([`${server.serverUrl}/api/health`]);
+      expect(plugin.serverContract).toEqual(sentinel);
     });
     it("pauses from its own row without unbinding, and resumes from the same row", async () => {
       const { plugin, vault, remote } = await startHostedPlugin("Pause Sync");
