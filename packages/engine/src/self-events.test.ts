@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SelfEventLog } from "./self-events";
+import { DEFAULT_RENAME_WINDOW_MS, MAX_PENDING_DELETES, SelfEventLog } from "./self-events";
 
 /**
  * The records that let the engine recognise its own events.
@@ -313,12 +313,25 @@ describe("SelfEventLog — a delete awaiting a rename", () => {
     expect(log.matchDeletedFile("same-content")).toBeNull();
   });
 
+  it("keeps a delete adoptable across the gap between a bulk move's two batches", () => {
+    // A burst's tail can outlive any window sized for one event: the delete half is pushed
+    // by a batch that then spends minutes in the engine, and the create half arrives after
+    // it. A shorter window forked a chain per file here (see `bulk-rename.e2e.test.ts`).
+    const clock = fakeClock();
+    const log = new SelfEventLog({ now: clock.now });
+    log.rememberDelete("f1", "same-content");
+
+    clock.advance(60_000);
+
+    expect(log.matchDeletedFile("same-content")).toMatchObject({ fileId: "f1" });
+  });
+
   it("does not match outside the window, and sweeps the expired record", () => {
     const clock = fakeClock();
     const log = new SelfEventLog({ now: clock.now });
     log.rememberDelete("f1", "same-content");
 
-    clock.advance(5_001);
+    clock.advance(DEFAULT_RENAME_WINDOW_MS + 1);
 
     expect(log.matchDeletedFile("same-content")).toBeNull();
   });
@@ -333,5 +346,18 @@ describe("SelfEventLog — a delete awaiting a rename", () => {
 
     expect(log.matchDeletedFile("shared")).toMatchObject({ fileId: "f1" });
     expect(log.matchDeletedFile("shared")).toBeNull();
+  });
+
+  it("drops the oldest deletes past its ceiling, keeping the newest adoptable", () => {
+    const log = new SelfEventLog({ now: fakeClock().now });
+    for (let index = 0; index < MAX_PENDING_DELETES; index += 1) {
+      log.rememberDelete(`f${index}`, `hash-${index}`);
+    }
+    log.rememberDelete("newest", "newest-hash");
+
+    // The window bounds age, this bounds the burst: a bulk move beyond the ceiling keeps
+    // the deletes it made last (its earliest files are the ones that fork).
+    expect(log.matchDeletedFile("hash-0")).toBeNull();
+    expect(log.matchDeletedFile("newest-hash")).toMatchObject({ fileId: "newest" });
   });
 });
