@@ -1468,10 +1468,15 @@ export class SyncHost {
           this.settingsPollFailed = false;
         },
         (err: unknown) => {
-          // A dead credential must not be retried every 30 seconds: the poll is a pass
-          // like any other, so it goes through the same terminal check. An ordinary
-          // outage is reported once per run of failures, as before.
-          if (authFailureReason(err) !== null || isVaultGone(err)) {
+          // A dead credential — or a server that refuses this build's contract — must not
+          // be retried every 30 seconds: the poll is a pass like any other, so it goes
+          // through the same terminal check. An ordinary outage is reported once per run of
+          // failures, as before.
+          if (
+            authFailureReason(err) !== null ||
+            isVaultGone(err) ||
+            contractMismatchInfo(err) !== null
+          ) {
             this.fail("the settings poll", err);
             return;
           }

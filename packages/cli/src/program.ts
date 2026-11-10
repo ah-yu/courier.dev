@@ -748,16 +748,18 @@ export function createProgram(): Command {
       } catch {
         // A status block still renders offline; the limit row says it could not be read.
       }
-      // The same trip answers whether this CLI can talk to this server at all. It is worth
-      // the one request: a daemon that keeps exiting on a mismatch leaves nothing behind
-      // (a stopped process has no runtime record), so this is where a headless user finds
-      // out why. An unreachable server renders no row, exactly like the limits above.
+      // One extra unauthenticated request answers whether this CLI can talk to this server
+      // at all: a daemon that keeps exiting on a mismatch leaves nothing behind (a stopped
+      // process has no runtime record), so this is where a headless user finds out why.
+      // Every failure here falls through — an unreachable server, or a 200 that is not the
+      // health document (a proxy's page) — because a status block must still render.
       let contractIssue: ContractIssue | null = null;
       try {
         const health: unknown = await client.getServerInfo();
-        if (!isHealthResponse(health)) return;
-        const verdict = contractVerdict(health);
-        if (verdict !== "ok") contractIssue = { verdict };
+        if (isHealthResponse(health)) {
+          const verdict = contractVerdict(health);
+          if (verdict !== "ok") contractIssue = { verdict };
+        }
       } catch {
         // Offline: the daemon row is the only signal, and that is honest.
       }

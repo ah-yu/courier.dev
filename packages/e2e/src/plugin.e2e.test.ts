@@ -36,6 +36,7 @@ import {
   recordedSurface,
   resetStubState,
   setLocalStorage,
+  setRequestUrlHandler,
   setStubLanguage,
   type MenuItem,
   type Modal,
@@ -54,6 +55,19 @@ import {
   VaultPickerModal,
   type VaultPickerHost,
 } from "../../plugin/src/ui/dialogs/vault-picker-modal";
+/**
+ * Answer `/api/health` with `body` for one test, then put the forwarding transport back.
+ *
+ * Module scope because it captures nothing — a function that could live outside a block is a
+ * lint warning, and a warning fails `bun run verify`.
+ */
+function installHealthAnswer(body: unknown): () => void {
+  setRequestUrlHandler(async () => {
+    const text = JSON.stringify(body);
+    return { status: 200, headers: {}, text, json: body, arrayBuffer: new ArrayBuffer(0) };
+  });
+  return () => installFetchTransport();
+}
 import { FakeVault } from "./harness/fake-vault";
 import { createFakeApp, type FakeApp } from "./harness/fake-app";
 import {
@@ -7087,6 +7101,10 @@ describe("plugin e2e — the real plugin against a real server", () => {
      * The other reason a host stops: the server answered `/api/health` with a window this
      * build is outside.
      *
+     * Driven through the real path — the plugin loads, the host starts, the probe reads a
+     * health document from a stubbed `/api/health` — so the wiring that turns the report
+     * into a pause is what is under test, not a private method called by hand.
+     *
      * The host has already stopped and built nothing (the engine covers that guarantee), so
      * what is asserted here is the plugin's half: it pauses rather than unbinding, says the
      * version is too old in the words a user can act on, and leaves the normal way back —
@@ -7098,7 +7116,9 @@ describe("plugin e2e — the real plugin against a real server", () => {
       tab.display();
       notices.length = 0;
 
-      // The report the host's probe delivers, verbatim.
+      // The report the host's probe delivers, verbatim. The engine's own cases cover the
+      // stop (host.test.ts: "stops before building an engine when the server is too old");
+      // this covers what the plugin does with it.
       await (
         plugin as unknown as { handleServerContract(info: unknown): Promise<void> }
       ).handleServerContract({
@@ -7127,6 +7147,44 @@ describe("plugin e2e — the real plugin against a real server", () => {
       expect(pauseRow.buttons.map((button) => button.text)).toEqual(["继续同步"]);
     });
 
+    it("explains a reloaded paused vault from one health ask, and ignores a body that is not health", async () => {
+      // A paused vault never starts a host, so the probe of a normal start never runs; the
+      // row would read a bare "已暂停" after a reload. `probeServerForDisplay` is the one
+      // unauthenticated ask that lets it say why — and it must not read a proxy's page as a
+      // health document.
+      const { plugin } = await startHostedPlugin("Paused Reload");
+      await plugin.pauseSync();
+      await waitFor(() => plugin.host === null, "the pause never stopped the host");
+      plugin.serverContract = null;
+
+      const previous = installHealthAnswer({
+        status: "ok",
+        timestamp: "2026-11-10T00:00:00.000Z",
+        generation: 1,
+        minClient: 1,
+        version: "0.5.2",
+      });
+      try {
+        await (
+          plugin as unknown as { probeServerForDisplay(): Promise<void> }
+        ).probeServerForDisplay();
+      } finally {
+        previous();
+      }
+      expect(plugin.serverContract).toMatchObject({ verdict: "server-too-old" });
+
+      // A 200 that is not the health document leaves the observation alone.
+      plugin.serverContract = null;
+      const restore = installHealthAnswer({ error: "UPSTREAM_ERROR" });
+      try {
+        await (
+          plugin as unknown as { probeServerForDisplay(): Promise<void> }
+        ).probeServerForDisplay();
+      } finally {
+        restore();
+      }
+      expect(plugin.serverContract).toBeNull();
+    });
     it("pauses from its own row without unbinding, and resumes from the same row", async () => {
       const { plugin, vault, remote } = await startHostedPlugin("Pause Sync");
       const tab = settingsTabOf(plugin);

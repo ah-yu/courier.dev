@@ -169,9 +169,15 @@ everything it sent) and a server whose floor excludes it. So a client needs a se
 own generation or newer, while a server serves every client down to its floor.
 
 The refusal happens **before the key is read**: the credential may be perfectly good, and
-"upgrade the server" is a different answer from "your credential is wrong". The WebSocket
-handshake is not gated here — a real client asks `/api/health` before it connects, so a
-mismatched client never reaches the socket.
+"upgrade the server" is a different answer from "your credential is wrong".
+
+The WebSocket `subscribe` is **not** gated, and that is a deliberate residual risk rather than
+an oversight: the gate above protects every write and every read that returns vault data,
+which is what a client of another generation could corrupt. A client that skips the probe — a
+build from before the mechanism does, because it has no probe — can still open the socket and
+receive `files_pushed` frames. Its dispatcher ignores a type it does not know, so the failure
+is missed notifications, not a wrong reading; gating the socket is the change to make if a
+later frame ever carries something an old client would misread.
 
 ---
 

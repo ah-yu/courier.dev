@@ -643,9 +643,9 @@ Vaults:         1
 Compatibility:  the server's version is too old — upgrade it
 ```
 
-It is read on the same trip that fetches the account's file cap, so it costs nothing extra, and an
-unreachable server simply leaves the row out. This is where a supervisor or a person finds out why
-the daemon keeps exiting: a process that stopped for this reason leaves no runtime record behind.
+It is one extra unauthenticated request, and an unreachable server simply leaves the row out. This
+is where a supervisor or a person finds out why the daemon keeps exiting: a process that stopped for
+this reason leaves no runtime record behind.
 
 `status --json` is a **list** built from one read per binding, because each vault has its own
 process. It is stable machine data, and a supervisor reads it verbatim:

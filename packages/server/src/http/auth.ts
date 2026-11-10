@@ -59,8 +59,10 @@ export function withErrorMapping(handler: RouteHandler, log: Logger): RouteHandl
  * impossible, and "upgrade the server" is a different answer from "your credential is
  * wrong". This wrapper and `withSyncAuth` are the whole **HTTP** `ck_` surface, so the two
  * of them are where the check belongs — a route that adds auth gets it without remembering.
- * The WebSocket `subscribe` is the third surface and is deliberately not gated: a real
- * client asks `/api/health` before it connects, and a mismatch stops it there.
+ * The WebSocket `subscribe` is the third surface and is deliberately not gated: the gate
+ * protects writes, and a build from before the mechanism never probes at all. Such a client
+ * can still open the socket, but it ignores a notification type it does not know — missed
+ * pushes, not a wrong reading. See `docs/api.md` for the trade-off.
  */
 export function withUserAuth(
   findUserByKey: FindUserByKeyFn,
