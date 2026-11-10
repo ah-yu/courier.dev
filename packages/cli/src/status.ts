@@ -13,7 +13,6 @@ import {
 import type { Coexistence } from "./coexistence";
 import { plural, t } from "./i18n";
 import type { DaemonStatus } from "./runtime";
-import { VERSION } from "./version";
 
 /**
  * What `courier-cli status` reports, and how it is rendered.
@@ -75,10 +74,9 @@ export interface CliStatusReport {
   vaults: CliVaultStatus[];
 }
 
-/** Which side is too old, and what the server calls itself. */
+/** Which side is too old, as the status block names it. */
 export interface ContractIssue {
   verdict: "client-too-old" | "server-too-old";
-  server: string;
 }
 
 /** What the command already read for one vault. */
@@ -188,14 +186,13 @@ export function formatStatusLines(report: CliStatusReport): string[] {
     [t("cli.status.label.vaults"), t("cli.status.vaults.count", { count: report.vaults.length })],
   ];
   if (report.contractIssue) {
-    const { verdict, server } = report.contractIssue;
+    const { verdict } = report.contractIssue;
     headerRows.push([
       t("cli.status.label.contract"),
       t(
         verdict === "client-too-old"
           ? "cli.status.contract.clientTooOld"
           : "cli.status.contract.serverTooOld",
-        { server, cli: VERSION },
       ),
     ]);
   }

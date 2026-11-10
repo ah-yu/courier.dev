@@ -18,6 +18,7 @@ import {
 import {
   MAX_DEVICE_NAME_LENGTH,
   MAX_HISTORY_LIMIT,
+  isReleaseVersion,
   type HistoryLimits,
   type UserSummary,
 } from "@courier/shared";
@@ -957,22 +958,24 @@ export class CourierSettingTab extends PluginSettingTab {
    * side has to move.
    */
   private syncStateLabel(): string {
-    const state = this.syncPausedLabel();
+    const state = this.syncStateWord();
     const server = this.plugin.serverContract;
     if (server === null) return state;
-    const name = server.serverVersion ?? `contract ${server.serverGeneration}`;
-    return `${state} · ${t(
-      server.verdict === "client-too-old"
-        ? "settings.contract.clientTooOld"
-        : server.verdict === "server-too-old"
-          ? "settings.contract.serverTooOld"
-          : "settings.contract.matched",
-      { server: name, plugin: this.plugin.manifest.version },
-    )}`;
+    if (server.verdict === "client-too-old") {
+      return `${state} · ${t("settings.contract.clientTooOld")}`;
+    }
+    if (server.verdict === "server-too-old") {
+      return `${state} · ${t("settings.contract.serverTooOld")}`;
+    }
+    // A build from source reports `dev` — a build id, not a version — and a word the user
+    // cannot match to a release is worse than no word at all.
+    return isReleaseVersion(server.serverVersion)
+      ? `${state} · ${t("settings.contract.matched", { server: server.serverVersion })}`
+      : state;
   }
 
   /** The state word itself, without the server it is talking to. */
-  private syncPausedLabel(): string {
+  private syncStateWord(): string {
     if (this.plugin.settings.syncPaused) return t("settings.state.paused");
     const wsState = this.plugin.wsState;
     return wsState === "connected"

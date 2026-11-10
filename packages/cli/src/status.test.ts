@@ -231,21 +231,17 @@ describe("formatStatusLines", () => {
   it("adds one row when this CLI cannot talk to the server, and names the side to move", () => {
     const rows = (verdict: "client-too-old" | "server-too-old"): string[] =>
       formatStatusLines(
-        buildStatusReport(config([vault()]), [input(vault())], {
-          verdict,
-          server: "0.6.0",
-        } as never),
+        buildStatusReport(config([vault()]), [input(vault())], { verdict } as never),
       );
 
-    const older = rows("server-too-old").find((line) => line.startsWith("Contract:"));
-    expect(older).toContain("0.6.0");
-    expect(older).toContain("upgrade the server");
-    const tooOld = rows("client-too-old").find((line) => line.startsWith("Contract:"));
-    expect(tooOld).toContain("update courier-cli");
+    const older = rows("server-too-old").find((line) => line.startsWith("Compatibility:"));
+    expect(older).toContain("upgrade");
+    const tooOld = rows("client-too-old").find((line) => line.startsWith("Compatibility:"));
+    expect(tooOld).toContain("courier-cli");
     // A matched pair says nothing: the row exists only to explain a refusal.
     expect(
       formatStatusLines(buildStatusReport(config([vault()]), [input(vault())])).some((line) =>
-        line.startsWith("Contract:"),
+        line.startsWith("Compatibility:"),
       ),
     ).toBe(false);
   });

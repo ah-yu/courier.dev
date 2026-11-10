@@ -70,9 +70,9 @@ export const zh = {
   "notice.keyExpired": "用户密钥已过期，同步已暂停。续期后在设置中继续同步。",
   "notice.keyDisabled": "用户密钥已被停用，同步已暂停。重新启用后在设置中继续同步。",
   "notice.contractServerOutdated":
-    "服务端（{server}）比本插件能用的版本旧，同步已暂停。请升级服务端，然后在设置中继续同步；如果服务端不是你管的，请联系管理员。",
+    "服务端版本比本插件需要的旧，同步已暂停。请升级服务端，然后在设置中继续同步；如果服务端不是你管的，请联系管理员。",
   "notice.contractClientOutdated":
-    "本插件（{plugin}）比这台服务端还支持的版本旧，同步已暂停。请更新 Courier 插件，然后在设置中继续同步。",
+    "本插件版本太旧，这台服务端已不再支持它。同步已暂停——请更新 Courier 插件，然后在设置中继续同步。",
   "notice.manualReload": "请手动退出并重新打开 Obsidian。",
 
   // ── Settings page: login / choose / locked ──
@@ -116,8 +116,8 @@ export const zh = {
   "settings.state.error": "✕ 连接错误",
   "settings.state.disconnected": "○ 已断开",
   "settings.contract.matched": "服务端 {server}",
-  "settings.contract.serverTooOld": "服务端 {server} 太旧，请升级",
-  "settings.contract.clientTooOld": "服务端 {server} 已不支持本插件，请更新插件",
+  "settings.contract.serverTooOld": "服务端版本太旧，请升级",
+  "settings.contract.clientTooOld": "本插件版本太旧，请更新插件",
   "settings.section.vault": "远程库",
   "settings.section.vault.tooltip":
     "本机与远程库的连接。暂停只停止同步，连接和本机凭据都会保留；断开连接会解除绑定并清除本机保存的库密码。两者都不会改动本地库文件或服务器上的内容。",

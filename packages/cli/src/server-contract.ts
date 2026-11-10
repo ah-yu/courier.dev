@@ -1,7 +1,6 @@
 import { contractVerdict } from "@courier/shared";
 import { createCliClient } from "./api";
 import { t } from "./i18n";
-import { VERSION } from "./version";
 
 /**
  * The CLI's own contract check, made **before** the vault lease is taken.
@@ -35,13 +34,11 @@ export async function ensureCompatibleServer(config: {
   const verdict = contractVerdict(health);
   if (verdict === "ok") return;
 
-  const server = health.version ?? `contract ${health.generation ?? 1}`;
   throw new ServerContractError(
     t(
       verdict === "client-too-old"
         ? "cli.error.contractClientOutdated"
         : "cli.error.contractServerOutdated",
-      { server, cli: VERSION },
     ),
   );
 }

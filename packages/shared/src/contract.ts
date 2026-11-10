@@ -75,6 +75,17 @@ export const MIN_SERVER_CONTRACT = 2;
 export const CONTRACT_HEADER = "X-Courier-Contract";
 
 /**
+ * Whether a reported version is a real release version (`0.6.0`), not a build's placeholder.
+ *
+ * A server built without the release job's `--define` reports `dev`, and a message that
+ * says "server dev is too old" tells a user nothing. The generation is always meaningful,
+ * so it is what a message names; the version is added only when it is this.
+ */
+export function isReleaseVersion(version: string | null | undefined): version is string {
+  return typeof version === "string" && /^\d+\.\d+\.\d+/.test(version);
+}
+
+/**
  * What a server publishes about itself on its health endpoint.
  *
  * Every field past `timestamp` is optional on purpose: a server built before the fields

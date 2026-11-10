@@ -88,9 +88,9 @@ export const en: Record<MessageKey, string> = {
   "cli.error.leaseFailed":
     "Cannot access the sync lease: {error}. This is a filesystem error (permissions, space, or a damaged path), not another syncer.",
   "cli.error.contractServerOutdated":
-    "This server ({server}) is older than this CLI ({cli}) can use. Upgrade the server, then start this command again.",
+    "The server this CLI is configured for is too old. Upgrade the server, then run this command again.",
   "cli.error.contractClientOutdated":
-    "This CLI ({cli}) is older than this server ({server}) still supports. Update courier-cli, then start this command again.",
+    "This CLI is too old for this server. Update courier-cli, then run this command again.",
 
   "cli.register.saved": 'Saved device name "{deviceName}".',
   "cli.register.vaultCount": "{count} vault(s) currently bound on this machine.",
@@ -115,11 +115,9 @@ export const en: Record<MessageKey, string> = {
   "cli.device.renamed": 'Device name set to "{deviceName}".',
 
   "cli.status.label.server": "Server",
-  "cli.status.label.contract": "Contract",
-  "cli.status.contract.serverTooOld":
-    "this server ({server}) is older than this CLI ({cli}) can use — upgrade the server",
-  "cli.status.contract.clientTooOld":
-    "this CLI ({cli}) is older than this server ({server}) serves — update courier-cli",
+  "cli.status.label.contract": "Compatibility",
+  "cli.status.contract.serverTooOld": "the server's version is too old — upgrade it",
+  "cli.status.contract.clientTooOld": "this CLI is too old — update courier-cli",
   "cli.status.label.defaultDevice": "Default device",
   "cli.status.label.device": "Device",
   "cli.status.label.vaults": "Vaults",

@@ -1802,7 +1802,6 @@ export default class CourierPlugin extends Plugin {
       return;
     }
 
-    const server = info.serverVersion ?? `contract ${info.serverGeneration}`;
     if (!this.settings.syncPaused) {
       this.settings.syncPaused = true;
       try {
@@ -1815,9 +1814,11 @@ export default class CourierPlugin extends Plugin {
     }
     this.stopHost();
     showNotice(
-      info.verdict === "client-too-old"
-        ? t("notice.contractClientOutdated", { server, plugin: this.manifest.version })
-        : t("notice.contractServerOutdated", { server }),
+      t(
+        info.verdict === "client-too-old"
+          ? "notice.contractClientOutdated"
+          : "notice.contractServerOutdated",
+      ),
     );
     this.refreshSettings();
   }

@@ -755,12 +755,7 @@ export function createProgram(): Command {
       try {
         const health = await client.getServerInfo();
         const verdict = contractVerdict(health);
-        if (verdict !== "ok") {
-          contractIssue = {
-            verdict,
-            server: health.version ?? `contract ${health.generation ?? 1}`,
-          };
-        }
+        if (verdict !== "ok") contractIssue = { verdict };
       } catch {
         // Offline: the daemon row is the only signal, and that is honest.
       }

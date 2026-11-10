@@ -7138,9 +7138,11 @@ describe("plugin e2e — the real plugin against a real server", () => {
       const connection = settingsIn(tab.containerEl).find(
         (row) => row.name === `已连接「${remote.name}」`,
       )!;
-      // Paused wins over the socket; the server it last talked to rides on the same line.
+      // Paused wins over the socket. The server it last talked to rides on the same line —
+      // but only when it reported a real version: this harness's server reports `dev`, and
+      // a build id is not something to put in front of a user.
       expect(connection.desc.startsWith("⏸ 同步已暂停")).toBe(true);
-      expect(connection.desc).toContain("服务端");
+      expect(connection.desc).not.toContain("dev");
       expect(connection.buttons.map((button) => button.text)).toEqual(["断开连接"]);
 
       // Nothing leaves while paused: the host that pushed is gone.

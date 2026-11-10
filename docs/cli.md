@@ -636,10 +636,10 @@ When this CLI and the server speak different contract generations
 `contractIssue` is set in `--json`:
 
 ```
-Server:    https://vps.example.com:8443
-Device:    NAS
-Vaults:    1
-Contract:  this server (0.6.0) is older than this CLI (0.7.0) can use — upgrade the server
+Server:         https://vps.example.com:8443
+Device:         NAS
+Vaults:         1
+Compatibility:  the server's version is too old — upgrade it
 ```
 
 It is read on the same trip that fetches the account's file cap, so it costs nothing extra, and an
