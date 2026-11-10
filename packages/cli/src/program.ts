@@ -46,10 +46,16 @@ import {
 } from "./server-contract";
 import { clearActivityLog } from "./history";
 import { daemonStatus } from "./runtime";
-import { buildStatusReport, formatStatusLines, type VaultStatusInput } from "./status";
+import {
+  buildStatusReport,
+  formatStatusLines,
+  type ContractIssue,
+  type VaultStatusInput,
+} from "./status";
 import { BUILD_TIME, GIT_SHA, VERSION } from "./version";
 import {
   ApiClientError,
+  contractVerdict,
   historyLimitsOf,
   normalizeDeviceName,
   runtimeLabel,
@@ -741,6 +747,23 @@ export function createProgram(): Command {
       } catch {
         // A status block still renders offline; the limit row says it could not be read.
       }
+      // The same trip answers whether this CLI can talk to this server at all. It is worth
+      // the one request: a daemon that keeps exiting on a mismatch leaves nothing behind
+      // (a stopped process has no runtime record), so this is where a headless user finds
+      // out why. An unreachable server renders no row, exactly like the limits above.
+      let contractIssue: ContractIssue | null = null;
+      try {
+        const health = await client.getServerInfo();
+        const verdict = contractVerdict(health);
+        if (verdict !== "ok") {
+          contractIssue = {
+            verdict,
+            server: health.version ?? `contract ${health.generation ?? 1}`,
+          };
+        }
+      } catch {
+        // Offline: the daemon row is the only signal, and that is honest.
+      }
       // Conflict files never sync, so they are the only place a resolved conflict is
       // visible on a headless machine; the same listing answers which files the size
       // cap keeps out. Each vault is read under its own scope and state file.
@@ -769,7 +792,7 @@ export function createProgram(): Command {
           coexistence: detectCoexistence(current),
         });
       }
-      const report = buildStatusReport(effective, inputs);
+      const report = buildStatusReport(effective, inputs, contractIssue);
       if (options.json) {
         console.log(JSON.stringify(report));
         return;

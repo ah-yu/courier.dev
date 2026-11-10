@@ -172,7 +172,7 @@ describe("buildStatusReport", () => {
     });
     // The JSON a supervisor parses is this object verbatim.
     expect(new Set(Object.keys(JSON.parse(JSON.stringify(report))))).toEqual(
-      new Set(["serverUrl", "deviceName", "vaults"]),
+      new Set(["serverUrl", "deviceName", "contractIssue", "vaults"]),
     );
     expect(new Set(Object.keys(report.vaults[0]!))).toEqual(
       new Set([
@@ -226,6 +226,28 @@ describe("formatStatusLines", () => {
     const block = lines.slice(4, 14);
     const widths = block.map((line) => displayWidth(/^\S+[^:]*: +/.exec(line)![0]));
     expect([...new Set(widths)]).toEqual([13]);
+  });
+
+  it("adds one row when this CLI cannot talk to the server, and names the side to move", () => {
+    const rows = (verdict: "client-too-old" | "server-too-old"): string[] =>
+      formatStatusLines(
+        buildStatusReport(config([vault()]), [input(vault())], {
+          verdict,
+          server: "0.6.0",
+        } as never),
+      );
+
+    const older = rows("server-too-old").find((line) => line.startsWith("Contract:"));
+    expect(older).toContain("0.6.0");
+    expect(older).toContain("upgrade the server");
+    const tooOld = rows("client-too-old").find((line) => line.startsWith("Contract:"));
+    expect(tooOld).toContain("update courier-cli");
+    // A matched pair says nothing: the row exists only to explain a refusal.
+    expect(
+      formatStatusLines(buildStatusReport(config([vault()]), [input(vault())])).some((line) =>
+        line.startsWith("Contract:"),
+      ),
+    ).toBe(false);
   });
 
   it("reads the history row from the server's answer, or says it could not", () => {

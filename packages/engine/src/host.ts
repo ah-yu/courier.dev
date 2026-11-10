@@ -340,21 +340,26 @@ export interface SyncHostOptions {
    */
   onAuthFailure?: (reason: AuthFailureReason) => void;
   /**
-   * This build and the server do not speak the same contract generation.
+   * What the server said about itself when this host asked, before it built anything.
    *
-   * The host has already stopped and built nothing — no engine, no bind, no write — so a
-   * caller that holds a resource (the vault lease) has to release it, and one with a user
-   * in front of it has to say which side must move. Nothing retries on its own: a
-   * mismatch does not resolve itself, and a pass cannot fix it.
+   * Reported on **every** successful probe, including a matched one: a host with a user in
+   * front of it shows which server it is talking to, and that line has to exist on the days
+   * nothing is wrong. `verdict !== "ok"` means the host has already stopped and built
+   * nothing — no engine, no bind, no write — so a caller that holds a resource (the vault
+   * lease) has to release it, and one with a user in front of it has to say which side must
+   * move. Nothing retries on its own: a mismatch does not resolve itself.
+   *
+   * A probe that cannot reach the server is not reported at all: the pass that follows
+   * reports the outage the ordinary way.
    */
-  onContractMismatch?: (info: ContractMismatchInfo) => void;
+  onServerContract?: (info: ServerContractInfo) => void;
   /** The bind pass could not be completed. A report, not a terminal state. */
   onBindFailed?: (error: unknown) => void;
 }
 
-/** Which side is too old, and what the server said about itself. */
-export interface ContractMismatchInfo {
-  verdict: Exclude<ContractVerdict, "ok">;
+/** Which side is too old (or `ok`), and what the server said about itself. */
+export interface ServerContractInfo {
+  verdict: ContractVerdict;
   serverGeneration: number;
   serverMinClient: number;
   /** The server's release version; null on a build old enough not to report one. */
@@ -511,14 +516,15 @@ export class SyncHost {
   }
 
   /**
-   * Whether the server this host talks to can serve this build.
+   * Ask the server what it speaks, and answer what that means for this build.
    *
-   * A probe that cannot reach the server is **not** a mismatch: the pass that follows
-   * reports the outage the ordinary way and the host keeps its retry loop. Only a server
-   * that answers, and answers with a window this build is outside, stops the host — which
-   * is why the answer is read from `/api/health` rather than inferred from a failed call.
+   * A probe that cannot reach the server answers `null` and is **not** a mismatch: the pass
+   * that follows reports the outage the ordinary way and the host keeps its retry loop.
+   * Only a server that answers, and answers with a window this build is outside, stops the
+   * host — which is why the answer is read from `/api/health` rather than inferred from a
+   * failed call.
    */
-  private async serverContractMismatch(): Promise<ContractMismatchInfo | null> {
+  private async probeServerContract(): Promise<ServerContractInfo | null> {
     const api = this.opts.api;
     if (api.getServerInfo === undefined) return null;
 
@@ -530,16 +536,19 @@ export class SyncHost {
     }
 
     const verdict = contractVerdict(health);
-    if (verdict === "ok") return null;
-
-    const serverGeneration = health.generation ?? 1;
-    const serverMinClient = health.minClient ?? 1;
-    const serverVersion = health.version ?? null;
-    this.log(
-      `the server speaks contract ${serverGeneration} (serves clients >= ${serverMinClient}); ` +
-        `this build cannot use it (${verdict})`,
-    );
-    return { verdict, serverGeneration, serverMinClient, serverVersion };
+    const info: ServerContractInfo = {
+      verdict,
+      serverGeneration: health.generation ?? 1,
+      serverMinClient: health.minClient ?? 1,
+      serverVersion: health.version ?? null,
+    };
+    if (verdict !== "ok") {
+      this.log(
+        `the server speaks contract ${info.serverGeneration} ` +
+          `(serves clients >= ${info.serverMinClient}); this build cannot use it (${verdict})`,
+      );
+    }
+    return info;
   }
 
   /** Start (or restart) the engine, the event source and the vault WebSocket. */
@@ -550,10 +559,10 @@ export class SyncHost {
     // A mismatch is not a transient failure — retrying it every pass produces a client
     // that looks like it is syncing while nothing it sends can be read, the same shape as
     // a dead credential. Nothing is constructed on this path, so there is nothing to drain.
-    const mismatch = await this.serverContractMismatch();
-    if (mismatch !== null) {
-      this.opts.onContractMismatch?.(mismatch);
-      return;
+    const contract = await this.probeServerContract();
+    if (contract !== null) {
+      this.opts.onServerContract?.(contract);
+      if (contract.verdict !== "ok") return;
     }
 
     const generation = ++this.generation;

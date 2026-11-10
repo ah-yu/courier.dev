@@ -949,8 +949,30 @@ export class CourierSettingTab extends PluginSettingTab {
   /**
    * The connection row's state line: paused wins over the socket, because a paused host is
    * stopped on purpose rather than disconnected.
+   *
+   * The server it is talking to rides on the same line, when a start has told us: "which
+   * server is this vault on" is the first question of every support conversation, and this
+   * page is where the user already is. It is the last observation, not a promise — it is
+   * replaced on the next start, and a mismatch replaces it with the sentence that says which
+   * side has to move.
    */
   private syncStateLabel(): string {
+    const state = this.syncPausedLabel();
+    const server = this.plugin.serverContract;
+    if (server === null) return state;
+    const name = server.serverVersion ?? `contract ${server.serverGeneration}`;
+    return `${state} · ${t(
+      server.verdict === "client-too-old"
+        ? "settings.contract.clientTooOld"
+        : server.verdict === "server-too-old"
+          ? "settings.contract.serverTooOld"
+          : "settings.contract.matched",
+      { server: name, plugin: this.plugin.manifest.version },
+    )}`;
+  }
+
+  /** The state word itself, without the server it is talking to. */
+  private syncPausedLabel(): string {
     if (this.plugin.settings.syncPaused) return t("settings.state.paused");
     const wsState = this.plugin.wsState;
     return wsState === "connected"

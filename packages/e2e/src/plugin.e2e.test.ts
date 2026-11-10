@@ -6474,7 +6474,7 @@ describe("plugin e2e — the real plugin against a real server", () => {
         "the switch never restarted the host",
       );
       await waitFor(
-        () => connectionRow.desc === t("settings.state.connected"),
+        () => connectionRow.desc.startsWith(t("settings.state.connected")),
         "the connection row's state line never followed the restarted host",
       );
 
@@ -7138,7 +7138,9 @@ describe("plugin e2e — the real plugin against a real server", () => {
       const connection = settingsIn(tab.containerEl).find(
         (row) => row.name === `已连接「${remote.name}」`,
       )!;
-      expect(connection.desc).toBe("⏸ 同步已暂停");
+      // Paused wins over the socket; the server it last talked to rides on the same line.
+      expect(connection.desc.startsWith("⏸ 同步已暂停")).toBe(true);
+      expect(connection.desc).toContain("服务端");
       expect(connection.buttons.map((button) => button.text)).toEqual(["断开连接"]);
 
       // Nothing leaves while paused: the host that pushed is gone.

@@ -104,6 +104,11 @@ export const zh = {
   "cli.device.renamed": "设备名称已改为「{deviceName}」。",
 
   "cli.status.label.server": "服务器",
+  "cli.status.label.contract": "契约",
+  "cli.status.contract.serverTooOld":
+    "服务端（{server}）比本 CLI（{cli}）能用的版本旧 —— 请升级服务端",
+  "cli.status.contract.clientTooOld":
+    "本 CLI（{cli}）比这台服务端还支持的版本旧（服务端 {server}）—— 请更新 courier-cli",
   "cli.status.label.defaultDevice": "默认设备",
   "cli.status.label.device": "设备",
   "cli.status.label.vaults": "Vault 数量",

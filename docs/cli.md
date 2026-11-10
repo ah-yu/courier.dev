@@ -631,6 +631,21 @@ When no folders are excluded it displays `(none)`; the `Too large` line appears 
 actually exceed the cap — a headless machine has no UI, so this is the only place the user can tell
 why "that video didn't sync over".
 
+When this CLI and the server speak different contract generations
+([above](#when-the-cli-and-the-server-are-different-versions)), the header gains one row and
+`contractIssue` is set in `--json`:
+
+```
+Server:    https://vps.example.com:8443
+Device:    NAS
+Vaults:    1
+Contract:  this server (0.6.0) is older than this CLI (0.7.0) can use — upgrade the server
+```
+
+It is read on the same trip that fetches the account's file cap, so it costs nothing extra, and an
+unreachable server simply leaves the row out. This is where a supervisor or a person finds out why
+the daemon keeps exiting: a process that stopped for this reason leaves no runtime record behind.
+
 `status --json` is a **list** built from one read per binding, because each vault has its own
 process. It is stable machine data, and a supervisor reads it verbatim:
 
@@ -638,6 +653,7 @@ process. It is stable machine data, and a supervisor reads it verbatim:
 {
   "serverUrl": "https://vps.example.com:8443",
   "deviceName": "NAS",
+  "contractIssue": null,
   "vaults": [
     {
       "vaultId": "vault-a",

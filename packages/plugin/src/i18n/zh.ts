@@ -115,6 +115,9 @@ export const zh = {
   "settings.state.connecting": "○ 连接中…",
   "settings.state.error": "✕ 连接错误",
   "settings.state.disconnected": "○ 已断开",
+  "settings.contract.matched": "服务端 {server}",
+  "settings.contract.serverTooOld": "服务端 {server} 太旧，请升级",
+  "settings.contract.clientTooOld": "服务端 {server} 已不支持本插件，请更新插件",
   "settings.section.vault": "远程库",
   "settings.section.vault.tooltip":
     "本机与远程库的连接。暂停只停止同步，连接和本机凭据都会保留；断开连接会解除绑定并清除本机保存的库密码。两者都不会改动本地库文件或服务器上的内容。",

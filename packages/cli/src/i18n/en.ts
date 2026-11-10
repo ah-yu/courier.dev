@@ -115,6 +115,11 @@ export const en: Record<MessageKey, string> = {
   "cli.device.renamed": 'Device name set to "{deviceName}".',
 
   "cli.status.label.server": "Server",
+  "cli.status.label.contract": "Contract",
+  "cli.status.contract.serverTooOld":
+    "this server ({server}) is older than this CLI ({cli}) can use — upgrade the server",
+  "cli.status.contract.clientTooOld":
+    "this CLI ({cli}) is older than this server ({server}) serves — update courier-cli",
   "cli.status.label.defaultDevice": "Default device",
   "cli.status.label.device": "Device",
   "cli.status.label.vaults": "Vaults",

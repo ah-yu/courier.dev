@@ -670,7 +670,8 @@ export async function runDaemon(
         runtime.set({ phase: "stopped", reason: "vault-deleted" });
         log(opts, t("cli.log.vaultDeleted"));
       },
-      onContractMismatch: (info) => {
+      onServerContract: (info) => {
+        if (info.verdict === "ok") return;
         // The command already asked before taking the lease, so this is the narrow race
         // where the server changed in between (or a host built by another caller). It is
         // still fatal: the daemon cannot wait for a server upgrade it cannot perform.

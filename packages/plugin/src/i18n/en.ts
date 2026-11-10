@@ -121,6 +121,9 @@ export const en: Record<PluginMessageKey, string> = {
   "settings.state.connecting": "○ Connecting…",
   "settings.state.error": "✕ Connection error",
   "settings.state.disconnected": "○ Disconnected",
+  "settings.contract.matched": "server {server}",
+  "settings.contract.serverTooOld": "server {server} is older than this plugin needs — upgrade it",
+  "settings.contract.clientTooOld": "server {server} no longer serves this plugin — update it",
   "settings.section.vault": "Remote vault",
   "settings.section.vault.tooltip":
     "This device's connection to the remote vault. Pausing only stops sync; the connection and this device's credentials stay. Disconnecting unbinds the vault and clears the vault password saved here. Neither changes the vault or anything on the server.",

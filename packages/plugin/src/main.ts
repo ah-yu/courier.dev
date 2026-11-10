@@ -57,7 +57,7 @@ import {
   SyncLease,
   type AuthFailureReason,
   type ConflictResolvedEvent,
-  type ContractMismatchInfo,
+  type ServerContractInfo,
   type FileTooLargeEvent,
   type FileTypeGroup,
   type SettingsGroup,
@@ -290,6 +290,15 @@ export default class CourierPlugin extends Plugin {
    * — `data.json` must not become a second, divergent copy of a server value.
    */
   vaultHistoryLimits: HistoryLimits | null = null;
+  /**
+   * What the server said about itself the last time a host started here.
+   *
+   * In memory only, and deliberately so: it is one observation, refreshed on every start,
+   * and a persisted copy would read as authority after the server had been upgraded. The
+   * settings page shows it so a support question ("which server am I on?") has an answer
+   * that does not need a browser tab.
+   */
+  serverContract: ServerContractInfo | null = null;
   /** The in-flight read behind {@link refreshVaultHistoryLimits}, so two rows share one. */
   private vaultLimitsInFlight: Promise<HistoryLimits | null> | null = null;
   /**
@@ -1275,7 +1284,7 @@ export default class CourierPlugin extends Plugin {
       onVaultDeleted: () => void this.handleRemoteVaultDeleted(),
       onVaultSettings: (limits) => this.handleVaultSettings(limits),
       onAuthFailure: (reason) => void this.handleAuthFailure(reason),
-      onContractMismatch: (info) => void this.handleContractMismatch(info),
+      onServerContract: (info) => void this.handleServerContract(info),
       // One writer per vault. The CLI takes the same lease, so this host does not start
       // its engine while that process owns the vault.
       lease: new SyncLease({
@@ -1768,18 +1777,31 @@ export default class CourierPlugin extends Plugin {
   }
 
   /**
-   * This plugin and the server do not speak the same contract generation.
+   * What the server said about itself on this start.
    *
-   * The host has already stopped and written nothing, so the only decision left is what the
-   * vault's state becomes. **Paused, not unbound**: the key, the vault and every version
-   * are still there on both sides, and upgrading the side that is behind makes this same
-   * binding work again — dropping it would make the user re-enter a password to fix a
-   * version problem. That is the `expired` / `disabled` shape, and this reuses it.
+   * On `ok` this is only an observation — the settings page shows which server this vault
+   * is talking to, and a matched pair is the ordinary case — and the host is already
+   * running.
+   *
+   * On a mismatch the host has **already stopped and written nothing**, so the only
+   * decision left is what the vault's state becomes. **Paused, not unbound**: the key, the
+   * vault and every version are still there on both sides, and upgrading the side that is
+   * behind makes this same binding work again — dropping it would make the user re-enter a
+   * password to fix a version problem. That is the `expired` / `disabled` shape, and this
+   * reuses it.
    *
    * The message names the side that has to move, because on a self-hosted server the person
    * reading it may not be the person who can upgrade the server.
    */
-  private async handleContractMismatch(info: ContractMismatchInfo): Promise<void> {
+  private async handleServerContract(info: ServerContractInfo): Promise<void> {
+    this.serverContract = info;
+    if (info.verdict === "ok") {
+      // In place, not a full render: this lands on every start, and rebuilding the page
+      // would throw away a scroll position and any field being edited.
+      this.refreshLiveState();
+      return;
+    }
+
     const server = info.serverVersion ?? `contract ${info.serverGeneration}`;
     if (!this.settings.syncPaused) {
       this.settings.syncPaused = true;
