@@ -39,13 +39,25 @@ import { LeaseStore } from "./lease";
 import { cliPlatform } from "./platform";
 import { FsAdapter } from "./fs-adapter";
 import { runDaemon, runOnceSync, type RunnerHandle } from "./runner";
+import {
+  EXIT_CONTRACT_MISMATCH,
+  ensureCompatibleServer,
+  ServerContractError,
+} from "./server-contract";
 import { clearActivityLog } from "./history";
 import { daemonStatus } from "./runtime";
-import { buildStatusReport, formatStatusLines, type VaultStatusInput } from "./status";
+import {
+  buildStatusReport,
+  formatStatusLines,
+  type ContractIssue,
+  type VaultStatusInput,
+} from "./status";
 import { BUILD_TIME, GIT_SHA, VERSION } from "./version";
 import {
   ApiClientError,
+  contractVerdict,
   historyLimitsOf,
+  isHealthResponse,
   normalizeDeviceName,
   runtimeLabel,
   type CreateVaultResponse,
@@ -63,9 +75,44 @@ function requireConfig(): CliConfig {
 }
 
 /** Print an error and exit, for the action-level refusals. */
-function fail(message: string): never {
+function fail(message: string, code = 1): never {
   console.error(message);
-  process.exit(1);
+  process.exit(code);
+}
+
+/**
+ * Whether this CLI and the server disagree on the contract, for the status block.
+ *
+ * Never throws and never aborts the block: an unreachable server, or a 200 that is not the
+ * health document (a proxy's page, a captive portal), is not a verdict — it is "no answer",
+ * and the daemon row is the only signal left.
+ */
+export async function readContractIssue(client: {
+  getServerInfo(): Promise<unknown>;
+}): Promise<ContractIssue | null> {
+  try {
+    const health = await client.getServerInfo();
+    if (!isHealthResponse(health)) return null;
+    const verdict = contractVerdict(health);
+    return verdict === "ok" ? null : { verdict };
+  } catch {
+    return null;
+  }
+}
+/**
+ * Refuse to go on when this CLI and the server speak different contract generations.
+ *
+ * A mismatch is a configuration fact, not a transient fault: it exits with its own code so
+ * a supervisor can be told not to restart it, and it is checked **before** a lease is taken
+ * or a binding is written, so nothing is left half-done. A server that cannot be reached is
+ * not this: that stays the caller's retry path.
+ */
+export async function requireCompatibleServer(config: CliConfig): Promise<void> {
+  try {
+    await ensureCompatibleServer(config);
+  } catch (err) {
+    if (err instanceof ServerContractError) fail(err.message, EXIT_CONTRACT_MISMATCH);
+  }
 }
 
 /** What binding one local folder to a known remote vault needs. */
@@ -367,6 +414,9 @@ export function createProgram(): Command {
         if (options.deviceName !== undefined && !options.deviceName.trim()) {
           fail(t("cli.error.deviceNameRequired"));
         }
+        // Before anything is written: a binding to a server this build cannot talk to
+        // would only be a folder that never syncs.
+        await requireCompatibleServer(config);
         const {
           vault: bound,
           count,
@@ -442,6 +492,8 @@ export function createProgram(): Command {
         // Refuse a taken folder before the remote vault exists: creating one and then
         // failing to bind it would leave a vault nobody asked for.
         assertPathFree(config, "", options.path);
+        // ...and refuse an incompatible server before creating one, for the same reason.
+        await requireCompatibleServer(config);
 
         const client = createCliClient({ serverUrl: config.serverUrl, userKey: config.userKey });
         let created: CreateVaultResponse;
@@ -632,6 +684,10 @@ export function createProgram(): Command {
         } catch (err) {
           fail(err instanceof Error ? err.message : String(err));
         }
+        // Before the lease, before the engine, before anything: a server this build cannot
+        // talk to is a configuration fact, and the daemon must not sit in a retry loop over
+        // it. `--once` is refused here too, so both forms answer the same way.
+        await requireCompatibleServer(config);
         try {
           if (options.once) {
             await runOnceSync(config, selected, {
@@ -711,6 +767,12 @@ export function createProgram(): Command {
       } catch {
         // A status block still renders offline; the limit row says it could not be read.
       }
+      // One extra unauthenticated request answers whether this CLI can talk to this server
+      // at all: a daemon that keeps exiting on a mismatch leaves nothing behind (a stopped
+      // process has no runtime record), so this is where a headless user finds out why.
+      // Every failure here falls through — an unreachable server, or a 200 that is not the
+      // health document (a proxy's page) — because a status block must still render.
+      const contractIssue = await readContractIssue(client);
       // Conflict files never sync, so they are the only place a resolved conflict is
       // visible on a headless machine; the same listing answers which files the size
       // cap keeps out. Each vault is read under its own scope and state file.
@@ -739,7 +801,7 @@ export function createProgram(): Command {
           coexistence: detectCoexistence(current),
         });
       }
-      const report = buildStatusReport(effective, inputs);
+      const report = buildStatusReport(effective, inputs, contractIssue);
       if (options.json) {
         console.log(JSON.stringify(report));
         return;

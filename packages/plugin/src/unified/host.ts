@@ -8,6 +8,7 @@ import {
   normalizeScope,
   type AuthFailureReason,
   type ConflictResolvedEvent,
+  type ServerContractInfo,
   type FileTooLargeEvent,
   type LocalVersionState,
   type SettingsAppliedEvent,
@@ -148,6 +149,13 @@ export interface EngineHostOptions {
    * disabled one pauses it and keeps everything the user would have to retype.
    */
   onAuthFailure?: (reason: AuthFailureReason) => void;
+  /**
+   * This plugin and the server speak different contract generations.
+   *
+   * The host has stopped and built nothing, so the plugin decides what the vault becomes
+   * (it pauses, rather than dropping a binding both sides still hold).
+   */
+  onServerContract?: (info: ServerContractInfo) => void;
   /**
    * The bind pass — this host's first look at the vault — could not be completed.
    *
@@ -505,6 +513,12 @@ export class EngineHost {
         this.opts.onVaultSettings?.(limits);
       },
       onAuthFailure: this.opts.onAuthFailure,
+      onServerContract: (info) => {
+        // A start that lands after this one replaced it must not repaint the page with an
+        // answer about a server the newer host is no longer talking to.
+        if (this.generation !== generation) return;
+        this.opts.onServerContract?.(info);
+      },
       onBindFailed: this.opts.onBindFailed,
       // The status bar reads this to say how far a first pass has got. Kept here, not in
       // the plugin, so the value dies with the host that produced it: a stopped host's

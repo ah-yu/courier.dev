@@ -36,6 +36,7 @@ import {
   recordedSurface,
   resetStubState,
   setLocalStorage,
+  setRequestUrlHandler,
   setStubLanguage,
   type MenuItem,
   type Modal,
@@ -54,6 +55,20 @@ import {
   VaultPickerModal,
   type VaultPickerHost,
 } from "../../plugin/src/ui/dialogs/vault-picker-modal";
+/**
+ * Answer `/api/health` with `body` for one test, then put the forwarding transport back.
+ *
+ * Module scope because it captures nothing — a function that could live outside a block is a
+ * lint warning, and a warning fails `bun run verify`.
+ */
+function installHealthAnswer(body: unknown, requested: string[] = []): () => void {
+  setRequestUrlHandler(async (param) => {
+    requested.push(param.url);
+    const text = JSON.stringify(body);
+    return { status: 200, headers: {}, text, json: body, arrayBuffer: new ArrayBuffer(0) };
+  });
+  return () => installFetchTransport();
+}
 import { FakeVault } from "./harness/fake-vault";
 import { createFakeApp, type FakeApp } from "./harness/fake-app";
 import {
@@ -1643,6 +1658,9 @@ describe("plugin e2e — the real plugin against a real server", () => {
       // The deletion reaches the client as a websocket event; wait for the subscription
       // the bind started before deleting, or the event has nobody to arrive at.
       await waitFor(() => plugin.wsState === "connected", "the host never subscribed");
+      // The start probe recorded what this server speaks; that observation dies with the
+      // binding, or a rebind with no answer shows the deleted vault's server.
+      expect(plugin.serverContract).not.toBeNull();
 
       await plugin.actions.deleteVault(remote.id);
       await waitFor(
@@ -1650,6 +1668,12 @@ describe("plugin e2e — the real plugin against a real server", () => {
         "the plugin never disconnected after the vault was deleted",
       );
       expect(plugin.settings.vaultConnections[remote.id]).toBeUndefined();
+      // The clear lands after `unbindVault`'s awaited write, so wait for it rather than
+      // reading it in the same tick.
+      await waitFor(
+        () => plugin.serverContract === null,
+        "the deleted vault's server observation survived the unbind",
+      );
     });
 
     it("forgets a disconnected vault's record when the vault is deleted from the picker", async () => {
@@ -6474,7 +6498,7 @@ describe("plugin e2e — the real plugin against a real server", () => {
         "the switch never restarted the host",
       );
       await waitFor(
-        () => connectionRow.desc === t("settings.state.connected"),
+        () => connectionRow.desc.startsWith(t("settings.state.connected")),
         "the connection row's state line never followed the restarted host",
       );
 
@@ -7083,6 +7107,122 @@ describe("plugin e2e — the real plugin against a real server", () => {
       expect(modal.scrollTop).toBe(0);
     });
 
+    /**
+     * The other reason a host stops: the server answered `/api/health` with a window this
+     * build is outside.
+     *
+     * The engine's own cases cover the stop ("stops before building an engine when the
+     * server is too old"); this covers what the plugin does with the report — the wiring is a
+     * single callback, and the paused-load probe below drives its own path end to end.
+     *
+     * The host has already stopped and built nothing (the engine covers that guarantee), so
+     * what is asserted here is the plugin's half: it pauses rather than unbinding, says the
+     * version is too old in the words a user can act on, and leaves the normal way back —
+     * 继续同步 — in place.
+     */
+    it("pauses and keeps the binding when the server's version is too old", async () => {
+      const { plugin, remote } = await startHostedPlugin("Contract Mismatch");
+      const tab = settingsTabOf(plugin);
+      tab.display();
+      notices.length = 0;
+
+      // The report the host's probe delivers, verbatim. The engine's own cases cover the
+      // stop (host.test.ts: "stops before building an engine when the server is too old");
+      // this covers what the plugin does with it.
+      await (
+        plugin as unknown as { handleServerContract(info: unknown): Promise<void> }
+      ).handleServerContract({
+        verdict: "server-too-old",
+        serverGeneration: 1,
+        serverMinClient: 1,
+        serverVersion: "0.5.2",
+      });
+
+      expect(plugin.settings.syncPaused).toBe(true);
+      expect(plugin.host).toBeNull();
+      expect(plugin.engine).toBeNull();
+      // Paused, not unbound: the key, the vault and the credential all stay.
+      expect(plugin.settings.connectedVaultId).toBe(remote.id);
+      expect(plugin.settings.userKey).toBe(server.userKey);
+      expect(((await plugin.loadData()) as { syncPaused?: boolean }).syncPaused).toBe(true);
+      expect(notices.some((message) => message.includes("服务端版本比本插件需要的旧"))).toBe(true);
+
+      // The row names the problem without a build id, and offers the way back.
+      const connection = settingsIn(tab.containerEl).find(
+        (row) => row.name === `已连接「${remote.name}」`,
+      )!;
+      expect(connection.desc).toContain("服务端版本太旧");
+      expect(connection.desc).not.toContain("dev");
+      const pauseRow = settingsIn(tab.containerEl).find((row) => row.name === "同步")!;
+      expect(pauseRow.buttons.map((button) => button.text)).toEqual(["继续同步"]);
+    });
+
+    it("explains a paused vault from one health ask on load", async () => {
+      // A paused vault never starts a host, so the probe of a normal start never runs and the
+      // row would read a bare "已暂停" after a reload. `onload` makes one unauthenticated ask.
+      const requested: string[] = [];
+      const restore = installHealthAnswer(
+        {
+          status: "ok",
+          timestamp: "2026-11-10T00:00:00.000Z",
+          generation: 1,
+          minClient: 1,
+          version: "0.5.2",
+        },
+        requested,
+      );
+      try {
+        const { plugin } = await loadPlugin({
+          vault: new FakeVault(),
+          settings: {
+            serverUrl: server.serverUrl,
+            connectedVaultId: "vault-paused",
+            connectedVaultName: "Paused",
+            syncPaused: true,
+          },
+        });
+        await waitFor(
+          () => plugin.serverContract !== null,
+          "the paused load never asked for the server's contract",
+        );
+        expect(plugin.serverContract).toMatchObject({ verdict: "server-too-old" });
+        expect(requested.filter((url) => url.endsWith("/api/health"))).toHaveLength(1);
+
+        const tab = settingsTabOf(plugin);
+        tab.display();
+        const connection = settingsIn(tab.containerEl).find((row) =>
+          row.name.startsWith("已连接"),
+        )!;
+        expect(connection.desc).toContain("服务端版本太旧");
+      } finally {
+        restore();
+      }
+    });
+
+    it("does not read a failure page as a health document", async () => {
+      // A 200 that is not the health document — a proxy's error object, a captive portal —
+      // must leave the observation alone rather than label the server as too old.
+      const { plugin } = await startHostedPlugin("Paused Display");
+      const sentinel = {
+        verdict: "server-too-old" as const,
+        serverGeneration: 1,
+        serverMinClient: 1,
+        serverVersion: "0.5.2",
+      };
+      plugin.serverContract = sentinel;
+      const requested: string[] = [];
+      const restore = installHealthAnswer({ error: "UPSTREAM_ERROR" }, requested);
+      try {
+        await (
+          plugin as unknown as { probeServerForDisplay(): Promise<void> }
+        ).probeServerForDisplay();
+      } finally {
+        restore();
+      }
+      // The ask happened, and the answer left the observation exactly as it was.
+      expect(requested).toEqual([`${server.serverUrl}/api/health`]);
+      expect(plugin.serverContract).toEqual(sentinel);
+    });
     it("pauses from its own row without unbinding, and resumes from the same row", async () => {
       const { plugin, vault, remote } = await startHostedPlugin("Pause Sync");
       const tab = settingsTabOf(plugin);
@@ -7138,7 +7278,11 @@ describe("plugin e2e — the real plugin against a real server", () => {
       const connection = settingsIn(tab.containerEl).find(
         (row) => row.name === `已连接「${remote.name}」`,
       )!;
-      expect(connection.desc).toBe("⏸ 同步已暂停");
+      // Paused wins over the socket. The server it last talked to rides on the same line —
+      // but only when it reported a real version: this harness's server reports `dev`, and
+      // a build id is not something to put in front of a user.
+      expect(connection.desc.startsWith("⏸ 同步已暂停")).toBe(true);
+      expect(connection.desc).not.toContain("dev");
       expect(connection.buttons.map((button) => button.text)).toEqual(["断开连接"]);
 
       // Nothing leaves while paused: the host that pushed is gone.

@@ -6,7 +6,7 @@ import {
   restoreGlobals,
   realPlatform,
 } from "@courier/testing";
-import { sortedCopy } from "@courier/shared";
+import { CONTRACT_GENERATION, sortedCopy } from "@courier/shared";
 import {
   LOCAL_DELETE_SEQUENCE_MS,
   LOCAL_EVENT_BURST_FLUSH_MS,
@@ -911,6 +911,59 @@ describe("SyncHost", () => {
    * while its watcher and interval kept running against a credential that could
    * never work again. The host stops first, then reports.
    */
+  it("stops when the settings poll is refused for the contract", async () => {
+    // The poll is a pass like any other: a 426 there used to be one log line and a retry
+    // every 30 seconds — the host running, holding the lease, and saying nothing.
+    vi.useFakeTimers();
+    const scope = normalizeScope({
+      configDir: ".obsidian",
+      settingsGroups: { ...NO_SETTINGS_GROUPS, app: true },
+      fileTypes: NO_FILE_TYPES,
+    });
+    const onServerContract = vi.fn();
+    const { host } = await newHost({ syncScope: scope, onServerContract });
+    track(host);
+    await host.start();
+    const poll = vi.spyOn(host.engine!, "syncLocalSettings").mockRejectedValue(
+      Object.assign(new Error("426"), {
+        status: 426,
+        code: "CONTRACT_MISMATCH",
+        body: { serverContract: 1, minClient: 1, serverVersion: "0.5.2" },
+      }),
+    );
+
+    await advanceTimersByTimeAsync(30_000);
+
+    expect(onServerContract).toHaveBeenCalledWith(
+      expect.objectContaining({ verdict: "server-too-old" }),
+    );
+    expect(host.engine).toBeNull();
+    await advanceTimersByTimeAsync(60_000);
+    expect(poll).toHaveBeenCalledTimes(1);
+  });
+  it("stops and reports when a pass is refused for the contract", async () => {
+    // The probe only runs at start(), so a host that began while the server was down meets a
+    // server of another generation on its first pass. Without this the refusal would be one
+    // more transient failure: retried for ever, the lease held, and nothing said.
+    const onServerContract = vi.fn();
+    const { host, api } = await newHost({ onServerContract });
+    track(host);
+    api.getVaultSyncIndex.mockRejectedValueOnce(
+      Object.assign(new Error("426"), {
+        status: 426,
+        code: "CONTRACT_MISMATCH",
+        body: { serverContract: 1, minClient: 1, serverVersion: "0.5.2" },
+      }),
+    );
+
+    await host.start();
+
+    expect(onServerContract).toHaveBeenCalledWith(
+      expect.objectContaining({ verdict: "server-too-old", serverVersion: "0.5.2" }),
+    );
+    expect(host.engine).toBeNull();
+    expect(host.wsState).toBe("disconnected");
+  });
   it("stops the loop when the credential is revoked or the vault is gone", async () => {
     const onAuthFailure = vi.fn();
     const { host, events } = await newHost({ onAuthFailure });
@@ -1505,5 +1558,136 @@ describe("SyncHost", () => {
       const held = batch.mock.calls[0]![0] as { deleted?: string[] };
       expect(held.deleted).toHaveLength(LOCAL_EVENT_BURST_MAX_FILES + 25 - 1);
     });
+  });
+});
+
+/**
+ * What a health endpoint answers, for the contract-probe cases.
+ *
+ * Module scope because it captures nothing: the lint rules treat a function that could live
+ * outside a block as a warning, and a warning fails `bun run verify`.
+ */
+function healthy(generation: number, minClient = 1): Record<string, unknown> {
+  return {
+    status: "ok",
+    timestamp: "2026-11-10T00:00:00.000Z",
+    generation,
+    minClient,
+    version: "0.6.0",
+  };
+}
+
+/**
+ * The contract probe: what a host does when the server answers `/api/health` with a window
+ * this build is outside.
+ *
+ * The guarantee is structural — the probe runs before anything is built — so the assertion
+ * that matters is an absence: no engine, no index read, no push.
+ */
+describe("the contract probe", () => {
+  const started: SyncHost[] = [];
+  afterEach(() => {
+    for (const host of started) host.stop();
+    started.length = 0;
+  });
+
+  /** A host over an API that records its calls, with a health endpoint answering `health`. */
+  async function probedHost(
+    health: Record<string, unknown>,
+    overrides: Partial<SyncHostOptions> = {},
+  ): Promise<{ host: SyncHost; api: Record<string, ReturnType<typeof vi.fn>> }> {
+    const api = { ...fakeApi(), getServerInfo: vi.fn(async () => health) };
+    const { host } = await newHost({ api: api as unknown as SyncApi, ...overrides });
+    started.push(host);
+    return { host, api };
+  }
+
+  it("reports the server and starts when the window matches", async () => {
+    const onServerContract = vi.fn();
+    const { host, api } = await probedHost(healthy(CONTRACT_GENERATION), { onServerContract });
+
+    await host.start();
+
+    expect(onServerContract).toHaveBeenCalledWith(
+      expect.objectContaining({ verdict: "ok", serverGeneration: CONTRACT_GENERATION }),
+    );
+    // The probe passed, so the bind pass ran.
+    expect(api.getVaultSyncIndex).toHaveBeenCalled();
+  });
+
+  it("stops before building an engine when the server is too old", async () => {
+    const onServerContract = vi.fn();
+    const { host, api } = await probedHost(healthy(CONTRACT_GENERATION - 1), { onServerContract });
+
+    await host.start();
+
+    expect(onServerContract).toHaveBeenCalledWith(
+      expect.objectContaining({ verdict: "server-too-old" }),
+    );
+    // Nothing was built and nothing was written.
+    expect(host.engine).toBeNull();
+    expect(api.getVaultSyncIndex).not.toHaveBeenCalled();
+    expect(api.push).not.toHaveBeenCalled();
+    expect(host.wsState).toBe("disconnected");
+  });
+
+  it("stops when the server's floor is above this build", async () => {
+    const onServerContract = vi.fn();
+    const { host, api } = await probedHost(
+      healthy(CONTRACT_GENERATION + 1, CONTRACT_GENERATION + 1),
+      { onServerContract },
+    );
+
+    await host.start();
+
+    expect(onServerContract).toHaveBeenCalledWith(
+      expect.objectContaining({ verdict: "client-too-old" }),
+    );
+    expect(host.engine).toBeNull();
+    expect(api.getVaultSyncIndex).not.toHaveBeenCalled();
+  });
+
+  it("does not mistake an unreachable server for a mismatch", async () => {
+    const onServerContract = vi.fn();
+    const api: Record<string, ReturnType<typeof vi.fn>> = {
+      ...fakeApi(),
+      getServerInfo: vi.fn(async () => {
+        throw new Error("ECONNREFUSED");
+      }),
+    };
+    const { host } = await newHost({ api: api as unknown as SyncApi, onServerContract });
+    started.push(host);
+
+    await host.start();
+
+    // No verdict is reported; the ordinary pass runs and fails on its own terms.
+    expect(onServerContract).not.toHaveBeenCalled();
+    expect(api.getVaultSyncIndex).toHaveBeenCalled();
+  });
+
+  it("does not resurrect a host that was stopped while the probe was in flight", async () => {
+    // The probe is the one await before the engine is built, so a pause that lands inside it
+    // must win: otherwise the continuation clears `stopped` and builds an engine for a host
+    // the caller has already dropped — an orphan writer holding no lease.
+    let release!: (health: unknown) => void;
+    const pending = new Promise((resolve) => {
+      release = resolve;
+    });
+    const api: Record<string, ReturnType<typeof vi.fn>> = {
+      ...fakeApi(),
+      getServerInfo: vi.fn(() => pending),
+    };
+    const { host } = await newHost({ api: api as unknown as SyncApi });
+    started.push(host);
+
+    const starting = host.start();
+    host.stop();
+    release(healthy(CONTRACT_GENERATION));
+    await starting;
+
+    expect(host.engine).toBeNull();
+    expect(api.getVaultSyncIndex).not.toHaveBeenCalled();
+    expect(api.push).not.toHaveBeenCalled();
+    expect(host.wsState).toBe("disconnected");
   });
 });

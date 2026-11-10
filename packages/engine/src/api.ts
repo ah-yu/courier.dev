@@ -1,6 +1,7 @@
 import {
   buildPushBody,
   type CourierClient,
+  type HealthResponse,
   type SyncPullResponse,
   type SyncPushResponse,
   type VaultSyncIndexResponse,
@@ -99,6 +100,16 @@ export interface SyncApi {
    * new session id.
    */
   setSessionId?(sessionId: string | null): void;
+
+  /**
+   * What the server says about itself (`GET /api/health`), read before the host builds
+   * anything: whether these two builds can work together at all is not something a pass
+   * can discover file by file.
+   *
+   * Optional because it is the one call a host may not have — every real host builds its
+   * `SyncApi` from `createSyncApi`, which provides it.
+   */
+  getServerInfo?(): Promise<HealthResponse>;
 }
 
 /**
@@ -117,6 +128,9 @@ export function createSyncApi(client: CourierClient, getDeviceName: () => string
   return {
     setSessionId(sessionId) {
       client.setSessionId(sessionId);
+    },
+    async getServerInfo() {
+      return await client.getServerInfo();
     },
     async push(vaultId, files) {
       return await client.push(vaultId, buildPushBody(files, { deviceName: getDeviceName() }));

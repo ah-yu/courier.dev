@@ -4,6 +4,7 @@ import { canAccessVault } from "../lib/vault-access";
 import type { FindVaultByIdFn, VaultRow } from "../handlers/vault-handlers";
 import type { FindUserByKeyFn, UserRow } from "../handlers/users-handlers";
 import type { RateLimiter } from "../middleware/rate-limit";
+import { requireContract } from "./contract";
 import type { RouteHandler } from "./router";
 
 /** The lookups a sync request needs: who the key belongs to, and which vault it names. */
@@ -41,6 +42,10 @@ export interface SyncRequestContext {
 /**
  * Authenticate the `ck_` key, resolve the vault from `params.id`, check that this
  * account may use it, then run the handler.
+ *
+ * The contract check comes first, for the same reason it comes first in `withUserAuth`:
+ * the two wrappers are the whole `ck_` surface, so a sync route cannot be added without
+ * the check.
  */
 export function withSyncAuth(
   deps: SyncAuthDeps,
@@ -50,6 +55,7 @@ export function withSyncAuth(
   ) => Response | Promise<Response>,
 ): RouteHandler {
   return async (request) => {
+    requireContract(request);
     const user = await authenticateUserHeader(
       request.headers.get("authorization"),
       deps.findUserByKey,

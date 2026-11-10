@@ -85,6 +85,24 @@ snapshot too, so a fresh clone is buildable; run the script before a build you w
 a commit. The form is valid semver, so `check-release.ts` (the versions agree and the root mirror
 matches) still runs in CI. A real release replaces it with `X.Y.Z` by hand.
 
+### The contract generation is not the version
+
+A release version (`X.Y.Z`) says what shipped; the **contract generation** in
+[`packages/shared/src/contract.ts`](../packages/shared/src/contract.ts) says whether an already
+deployed peer can still talk to it. They move independently on purpose: a release that only touches
+the settings page moves the version and leaves the generation alone, and a generation bump can ride
+on any version.
+
+`bun run contract` (a `bun run verify` gate) keeps the two in step with the API: it compares the
+observable surface with `packages/shared/contract/<generation>.surface.json` and refuses a change
+that was not classified. The rules, and when each number moves, are in
+[api.md](api.md#contract-generation).
+
+A release whose generation moved must say so in its notes, and name the side that has to upgrade —
+the plugin, the CLI, or the server. A release that moved `MIN_CLIENT_CONTRACT` stops serving older
+plugin versions, so the number is raised deliberately, on a release whose notes say which client
+generation is being dropped.
+
 ## Release procedure
 
 The three packages ship together under one product version, and the Obsidian community directory
@@ -103,7 +121,9 @@ edited by hand — copy the plugin manifest over it.
 
 1. Bump all three package versions to the same value, for example `0.1.0` (replacing the snapshot),
    and copy the plugin manifest to the root: `cp packages/plugin/manifest.json manifest.json`.
-2. Run `bun scripts/check-release.ts 0.1.0` and commit the bump. (A `v` prefix is accepted too,
+2. If this release changed the API, `bun run contract bump --write` has already written the new
+   generation and its surface file — commit both with the change. Then run
+   `bun scripts/check-release.ts 0.1.0` and commit the bump. (A `v` prefix is accepted too,
    but the tag itself is the bare version — see below.)
 3. Tag and push:
 

@@ -12,7 +12,10 @@ import {
   normalizeDeviceName,
   normalizeHistoryLimit,
   sortedCopy,
+  contractVerdict,
+  isHealthResponse,
   type CreateVaultResponse,
+  type HealthResponse,
   type HistoryLimits,
   type HttpTransport,
   type UserSummary,
@@ -57,6 +60,7 @@ import {
   SyncLease,
   type AuthFailureReason,
   type ConflictResolvedEvent,
+  type ServerContractInfo,
   type FileTooLargeEvent,
   type FileTypeGroup,
   type SettingsGroup,
@@ -289,6 +293,15 @@ export default class CourierPlugin extends Plugin {
    * — `data.json` must not become a second, divergent copy of a server value.
    */
   vaultHistoryLimits: HistoryLimits | null = null;
+  /**
+   * What the server said about itself the last time a host started here.
+   *
+   * In memory only, and deliberately so: it is one observation, refreshed on every start,
+   * and a persisted copy would read as authority after the server had been upgraded. The
+   * settings page shows it so a support question ("which server am I on?") has an answer
+   * that does not need a browser tab.
+   */
+  serverContract: ServerContractInfo | null = null;
   /** The in-flight read behind {@link refreshVaultHistoryLimits}, so two rows share one. */
   private vaultLimitsInFlight: Promise<HistoryLimits | null> | null = null;
   /**
@@ -475,6 +488,10 @@ export default class CourierPlugin extends Plugin {
         // because pausing exists to stop syncing without the credentials coming out. The
         // settings page offers 继续同步, which takes the normal unlock path.
         this.refreshSettings();
+        // A paused vault never starts a host, so the contract probe never runs and the
+        // connection row would read a bare "已暂停" after a reload. `/api/health` is
+        // unauthenticated: one best-effort ask is enough for the row to say *why*.
+        void this.probeServerForDisplay();
       } else {
         void this.autoUnlockOrPrompt();
       }
@@ -1029,6 +1046,9 @@ export default class CourierPlugin extends Plugin {
     await unbindVault(this.app, this);
     clearSyncLog();
     this.vaultHistoryLimits = null;
+    // The observation belonged to the vault that is now gone: a new binding must not be
+    // labelled with the previous server for the moment before its own probe lands.
+    this.serverContract = null;
     // The page returns to 选择远程库; that transition is the confirmation.
     this.refreshSettings();
   }
@@ -1044,6 +1064,8 @@ export default class CourierPlugin extends Plugin {
     await unbindVault(this.app, this, { forgetAccount: true });
     clearSyncLog();
     this.vaultHistoryLimits = null;
+    // The observation belonged to the account that just went away.
+    this.serverContract = null;
     this.forgetAccount();
     // The page returns to the sign-in step; that transition is the confirmation.
     this.refreshSettings();
@@ -1274,6 +1296,7 @@ export default class CourierPlugin extends Plugin {
       onVaultDeleted: () => void this.handleRemoteVaultDeleted(),
       onVaultSettings: (limits) => this.handleVaultSettings(limits),
       onAuthFailure: (reason) => void this.handleAuthFailure(reason),
+      onServerContract: (info) => void this.handleServerContract(info),
       // One writer per vault. The CLI takes the same lease, so this host does not start
       // its engine while that process owns the vault.
       lease: new SyncLease({
@@ -1721,6 +1744,9 @@ export default class CourierPlugin extends Plugin {
     await unbindVault(this.app, this);
     clearSyncLog();
     this.vaultHistoryLimits = null;
+    // The observation belonged to the vault that is now gone: a rebind whose probe is
+    // unanswered must not be labelled with the deleted vault's server.
+    this.serverContract = null;
     this.refreshSettings();
   }
 
@@ -1743,6 +1769,7 @@ export default class CourierPlugin extends Plugin {
       await unbindVault(this.app, this, { forgetAccount: true });
       clearSyncLog();
       this.vaultHistoryLimits = null;
+      this.serverContract = null;
       this.forgetAccount();
       this.refreshSettings();
       return;
@@ -1762,6 +1789,92 @@ export default class CourierPlugin extends Plugin {
     }
     this.stopHost();
     showNotice(t(reason === "expired" ? "notice.keyExpired" : "notice.keyDisabled"));
+    this.refreshSettings();
+  }
+
+  /**
+   * A paused vault never starts a host, so the probe of a normal start never runs.
+   *
+   * `/api/health` needs no key, so one ask is enough for the connection row to explain the
+   * pause after a reload — "服务端版本太旧，请升级" instead of a bare "已暂停". Best effort:
+   * an unreachable server leaves the row as it was, and nothing here starts a host, takes
+   * the lease or writes anything.
+   */
+  private async probeServerForDisplay(): Promise<void> {
+    let health: HealthResponse;
+    try {
+      const response = await requestUrl({
+        url: `${getServerUrl(this.settings)}/api/health`,
+        method: "GET",
+        throw: false,
+      });
+      // Only a 200 with an object body is an answer. A 404, a 500 or a gateway error page
+      // is a *failure*, and reading its JSON (or its absence) as a health answer would tell
+      // the user to upgrade a server that is merely unhappy — the "an error read as a
+      // state" mistake the reload card exists to avoid.
+      if (response.status !== 200) return;
+      const body = response.json as unknown;
+      // The same rule the host uses: only the health document counts, not any object a
+      // proxy or a captive portal put in its place.
+      if (!isHealthResponse(body)) return;
+      health = body;
+    } catch {
+      return;
+    }
+    if (this.unloaded) return;
+    this.serverContract = {
+      verdict: contractVerdict(health),
+      serverGeneration: health.generation ?? 1,
+      serverMinClient: health.minClient ?? 1,
+      serverVersion: health.version ?? null,
+    };
+    this.refreshLiveState();
+  }
+
+  /**
+   * What the server said about itself on this start.
+   *
+   * On `ok` this is only an observation — the settings page shows which server this vault
+   * is talking to, and a matched pair is the ordinary case — and the host is already
+   * running.
+   *
+   * On a mismatch the host has **already stopped and written nothing**, so the only
+   * decision left is what the vault's state becomes. **Paused, not unbound**: the key, the
+   * vault and every version are still there on both sides, and upgrading the side that is
+   * behind makes this same binding work again — dropping it would make the user re-enter a
+   * password to fix a version problem. That is the `expired` / `disabled` shape, and this
+   * reuses it.
+   *
+   * The message names the side that has to move, because on a self-hosted server the person
+   * reading it may not be the person who can upgrade the server.
+   */
+  private async handleServerContract(info: ServerContractInfo): Promise<void> {
+    this.serverContract = info;
+    if (info.verdict === "ok") {
+      // In place, not a full render: this lands on every start, and rebuilding the page
+      // would throw away a scroll position and any field being edited.
+      this.refreshLiveState();
+      return;
+    }
+
+    if (!this.settings.syncPaused) {
+      this.settings.syncPaused = true;
+      try {
+        await this.saveSettings();
+      } catch (err) {
+        // The in-memory flag already governs this session; a disk failure must not leave
+        // the host running against a server it cannot talk to.
+        console.error("Courier: saving the paused state failed:", err);
+      }
+    }
+    this.stopHost();
+    showNotice(
+      t(
+        info.verdict === "client-too-old"
+          ? "notice.contractClientOutdated"
+          : "notice.contractServerOutdated",
+      ),
+    );
     this.refreshSettings();
   }
 

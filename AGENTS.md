@@ -91,11 +91,12 @@ and its status.
 
 ```bash
 # Verification — after EVERY change; one command, one verdict
-bun run verify                  # docs + agent-safety + migrations + lint + review + typecheck + test, one summary
+bun run verify                  # docs + agent-safety + migrations + contract + lint + review + typecheck + test, one summary
 bun run verify test             # only the named gates
 bun run verify obsidian         # end-to-end against a real Obsidian (see the L3 rule)
 bun run verify obsidian-ci      # the non-layout L3 subset CI runs (see the L3 rule)
 bun run test:coverage           # the instrumented suite with the per-package floors
+bun run contract                # the API surface vs its committed generation (part of `bun run verify`)
 bun run check:docs              # AGENTS.md size, docs index and links/anchors (part of `bun run verify`)
 bun run lint:review             # the community directory's scan, mirrored: ESLint over the published packages and Obsidian's Stylelint over `styles.css` (part of `bun run verify`)
 
@@ -251,6 +252,17 @@ protocol or a security hole. Read the linked section before changing one.
     route is HTTP only, a handler takes injected `*Fn` dependencies and a repository owns SQL,
     enforced by `.oxlintrc.json`. See [server.md](docs/server.md#layering); the wire contract is
     [api.md](docs/api.md).
+14. **The API surface and its generation move together.** One tag ships the plugin, the CLI and
+    the server, but a _deployment_ upgrades them at three different times, so a peer states a
+    contract generation and the mismatched one is refused with the side that must upgrade. Change
+    anything a peer can observe — a shared wire type, a route, an error code, a shared constant —
+    and `bun run verify` fails on the `contract` gate until `packages/shared/src/contract.ts`
+    says what the change means; the gate prints the numbers, and adding a generation's
+    surface file is the bump. Never edit a number by hand — `bump --write` writes them, and
+    `--keep-floor` is the one deliberate exception: a change that degrades an older peer without
+    misreading it still moves the generation, and the floor stays, with the reason in the commit.
+    Never raise `MIN_CLIENT_CONTRACT` for a change an older client reads correctly. See
+    [api.md](docs/api.md#contract-generation).
 
 ## Destructive operations (hard rules)
 
@@ -372,4 +384,6 @@ details and the full contract are in [testing.md](docs/testing.md#stub-fidelity)
   `bun run version:snapshot` for test builds (`0.0.0-dev.YYYYMMDD.<shortsha>`) and mirrored to the
   repository-root `manifest.json` the Obsidian directory reads; `version:snapshot` writes all four
   and `scripts/check-release.ts` fails when the mirror and the plugin manifest differ; see
-  [docs/release.md](docs/release.md#snapshot-versions-for-test-builds).
+  [docs/release.md](docs/release.md#snapshot-versions-for-test-builds). A _release version_ is not
+  the wire identity: `packages/shared/src/contract.ts` carries the contract generation, and
+  `bun run contract` keeps it in step with the API (invariant 14).

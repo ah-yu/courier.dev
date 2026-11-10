@@ -75,6 +75,10 @@ export const en: Record<PluginMessageKey, string> = {
     "The user key has expired. Syncing is paused — resume it in Settings after renewal.",
   "notice.keyDisabled":
     "The user key has been disabled. Syncing is paused — resume it in Settings once it is enabled again.",
+  "notice.contractServerOutdated":
+    "This server's version is older than this plugin needs. Syncing is paused — upgrade the server, then resume it in Settings. If the server is not yours, ask whoever runs it.",
+  "notice.contractClientOutdated":
+    "This plugin is too old for this server. Syncing is paused — update the Courier plugin, then resume it in Settings.",
   "notice.manualReload": "Quit and reopen Obsidian manually.",
 
   // ── Settings page: login / choose / locked ──
@@ -117,6 +121,9 @@ export const en: Record<PluginMessageKey, string> = {
   "settings.state.connecting": "○ Connecting…",
   "settings.state.error": "✕ Connection error",
   "settings.state.disconnected": "○ Disconnected",
+  "settings.contract.matched": "server {server}",
+  "settings.contract.serverTooOld": "the server's version is too old — upgrade it",
+  "settings.contract.clientTooOld": "this plugin is too old — update it",
   "settings.section.vault": "Remote vault",
   "settings.section.vault.tooltip":
     "This device's connection to the remote vault. Pausing only stops sync; the connection and this device's credentials stay. Disconnecting unbinds the vault and clears the vault password saved here. Neither changes the vault or anything on the server.",

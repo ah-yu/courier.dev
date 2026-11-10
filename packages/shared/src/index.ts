@@ -1,3 +1,4 @@
+export * from "./contract";
 export * from "./vault";
 export * from "./auth";
 export * from "./blob";

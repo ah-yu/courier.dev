@@ -62,7 +62,21 @@ export interface CliVaultStatus extends CliVaultSummary {
 export interface CliStatusReport {
   serverUrl: string;
   deviceName: string;
+  /**
+   * Set when this CLI cannot work with the server it is configured for.
+   *
+   * `status` asks the server for the account's file cap and the vaults' retention
+   * limits, so the generation arrives on the same trip; it is `null` when the server could
+   * not be reached, because a status block must still render offline. This is the one place
+   * a headless user sees *why* the daemon keeps exiting without reading the journal.
+   */
+  contractIssue?: ContractIssue | null;
   vaults: CliVaultStatus[];
+}
+
+/** Which side is too old, as the status block names it. */
+export interface ContractIssue {
+  verdict: "client-too-old" | "server-too-old";
 }
 
 /** What the command already read for one vault. */
@@ -116,10 +130,12 @@ export function buildVaultSummary(
 export function buildStatusReport(
   config: CliConfig,
   vaults: readonly VaultStatusInput[],
+  contractIssue: ContractIssue | null = null,
 ): CliStatusReport {
   return {
     serverUrl: config.serverUrl,
     deviceName: config.deviceName,
+    contractIssue,
     vaults: vaults.map((input) => ({
       ...buildVaultSummary(
         config,
@@ -169,6 +185,17 @@ export function formatStatusLines(report: CliStatusReport): string[] {
     [t("cli.status.label.device"), report.deviceName],
     [t("cli.status.label.vaults"), t("cli.status.vaults.count", { count: report.vaults.length })],
   ];
+  if (report.contractIssue) {
+    const { verdict } = report.contractIssue;
+    headerRows.push([
+      t("cli.status.label.contract"),
+      t(
+        verdict === "client-too-old"
+          ? "cli.status.contract.clientTooOld"
+          : "cli.status.contract.serverTooOld",
+      ),
+    ]);
+  }
   lines.push(...renderRows(headerRows));
 
   if (report.vaults.length === 0) {

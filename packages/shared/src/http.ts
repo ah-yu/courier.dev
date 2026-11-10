@@ -1,5 +1,6 @@
 import type { ApiError } from "./errors";
 import type { UserSummary } from "./auth";
+import { CONTRACT_GENERATION, CONTRACT_HEADER, type HealthResponse } from "./contract";
 import { parseContentBatchBody } from "./wire";
 import type {
   ClearDeletedResponse,
@@ -100,13 +101,21 @@ export class ApiClientError extends Error {
    * limiter's window; absent means "the server did not say", not "retry at once".
    */
   public readonly retryAfterMs?: number;
+  /**
+   * The parsed error body, when the server sent one.
+   *
+   * A `CONTRACT_MISMATCH` carries the two generation numbers here; every other code answers
+   * `code`/`message` and ignores it. Kept as the raw object so a new field needs no new
+   * field on this class.
+   */
+  public readonly body?: unknown;
 
   constructor(
     status: number,
     code: string,
     message: string,
     details?: Array<{ field: string; message: string }>,
-    options?: { cause?: unknown; retryAfterMs?: number },
+    options?: { cause?: unknown; retryAfterMs?: number; body?: unknown },
   ) {
     super(message, options?.cause === undefined ? undefined : { cause: options.cause });
     this.name = "ApiClientError";
@@ -114,6 +123,7 @@ export class ApiClientError extends Error {
     this.code = code;
     this.details = details;
     this.retryAfterMs = options?.retryAfterMs;
+    this.body = options?.body;
   }
 }
 
@@ -150,7 +160,7 @@ export function handleApiError(
     body.error ?? "UNKNOWN_ERROR",
     body.message ?? `Request failed with status ${status}`,
     body.details,
-    { retryAfterMs: wait },
+    { retryAfterMs: wait, body },
   );
 }
 
@@ -182,6 +192,15 @@ export interface CourierClient {
    * device's own pushes back to it. A one-shot host (no socket) never sets one.
    */
   setSessionId(sessionId: string | null): void;
+
+  /**
+   * What the server says about itself (`GET /api/health`).
+   *
+   * The one request a host makes before it builds anything: the generation and the floor
+   * decide whether this client can work with that server at all, and a mismatch has to be
+   * found before the first write, not after it.
+   */
+  getServerInfo(): Promise<HealthResponse>;
 
   createVault(name: string, encryptionSalt: string, keyCheck: string): Promise<CreateVaultResponse>;
   listVaults(): Promise<ListVaultsResponse>;
@@ -270,6 +289,10 @@ export function createCourierClient(options: CourierClientOptions): CourierClien
     return {
       ...(key ? { Authorization: `Bearer ${key}` } : {}),
       ...(sessionId ? { "X-Courier-Session-Id": sessionId } : {}),
+      // Stated on every request, so the server can refuse a peer it cannot serve even
+      // when that peer skipped its own `/api/health` check. It is the same constant the
+      // client compares against, compiled in on both sides.
+      [CONTRACT_HEADER]: String(CONTRACT_GENERATION),
       ...(contentType ? { "Content-Type": contentType } : {}),
     };
   }
@@ -324,6 +347,10 @@ export function createCourierClient(options: CourierClientOptions): CourierClien
   return {
     setSessionId(id) {
       sessionId = id;
+    },
+
+    async getServerInfo() {
+      return await json<HealthResponse>("/health");
     },
 
     async createVault(name, encryptionSalt, keyCheck) {

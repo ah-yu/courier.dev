@@ -27,6 +27,7 @@
 import { readFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
+import { CONTRACT_GENERATION, MIN_CLIENT_CONTRACT } from "../packages/shared/src/contract.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
@@ -186,5 +187,13 @@ if (failures.length > 0) {
   for (const failure of failures) console.error(`  - ${failure}`);
   process.exit(1);
 }
+
+// The compatibility promise this release carries, on stderr so the version stays the only
+// thing on stdout: a release whose notes have to name the side that upgrades is the one whose
+// generation moved, and the release log is where that is first visible.
+console.error(
+  `[release] contract generation ${CONTRACT_GENERATION} ` +
+    `(serves clients >= ${MIN_CLIENT_CONTRACT}; clients need servers >= ${CONTRACT_GENERATION})`,
+);
 
 console.log(server.version);

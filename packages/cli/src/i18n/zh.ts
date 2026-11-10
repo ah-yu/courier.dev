@@ -77,6 +77,9 @@ export const zh = {
   "cli.error.takeOverFailed": "无法从对方手中接管这个 Vault（--take-over）。",
   "cli.error.leaseFailed":
     "无法访问同步锁：{error}。这是文件系统错误（权限、空间或文件损坏），不是另一个同步进程。",
+  "cli.error.contractServerOutdated": "配置的服务端版本太旧。请升级服务端，然后重新执行这条命令。",
+  "cli.error.contractClientOutdated":
+    "本 CLI 版本太旧，这台服务端已不再支持它。请更新 courier-cli，然后重新执行这条命令。",
 
   "cli.register.saved": "已保存设备名称「{deviceName}」。",
   "cli.register.vaultCount": "本机当前绑定 {count} 个 Vault。",
@@ -100,6 +103,9 @@ export const zh = {
   "cli.device.renamed": "设备名称已改为「{deviceName}」。",
 
   "cli.status.label.server": "服务器",
+  "cli.status.label.contract": "兼容性",
+  "cli.status.contract.serverTooOld": "服务端版本太旧，请升级",
+  "cli.status.contract.clientTooOld": "本 CLI 版本太旧，请更新 courier-cli",
   "cli.status.label.defaultDevice": "默认设备",
   "cli.status.label.device": "设备",
   "cli.status.label.vaults": "Vault 数量",

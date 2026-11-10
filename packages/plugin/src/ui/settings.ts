@@ -18,6 +18,7 @@ import {
 import {
   MAX_DEVICE_NAME_LENGTH,
   MAX_HISTORY_LIMIT,
+  isReleaseVersion,
   type HistoryLimits,
   type UserSummary,
 } from "@courier/shared";
@@ -949,8 +950,32 @@ export class CourierSettingTab extends PluginSettingTab {
   /**
    * The connection row's state line: paused wins over the socket, because a paused host is
    * stopped on purpose rather than disconnected.
+   *
+   * The server it is talking to rides on the same line, when a start has told us: "which
+   * server is this vault on" is the first question of every support conversation, and this
+   * page is where the user already is. It is the last observation, not a promise — it is
+   * replaced on the next start, and a mismatch replaces it with the sentence that says which
+   * side has to move.
    */
   private syncStateLabel(): string {
+    const state = this.syncStateWord();
+    const server = this.plugin.serverContract;
+    if (server === null) return state;
+    if (server.verdict === "client-too-old") {
+      return `${state} · ${t("settings.contract.clientTooOld")}`;
+    }
+    if (server.verdict === "server-too-old") {
+      return `${state} · ${t("settings.contract.serverTooOld")}`;
+    }
+    // A build from source reports `dev` — a build id, not a version — and a word the user
+    // cannot match to a release is worse than no word at all.
+    return isReleaseVersion(server.serverVersion)
+      ? `${state} · ${t("settings.contract.matched", { server: server.serverVersion })}`
+      : state;
+  }
+
+  /** The state word itself, without the server it is talking to. */
+  private syncStateWord(): string {
     if (this.plugin.settings.syncPaused) return t("settings.state.paused");
     const wsState = this.plugin.wsState;
     return wsState === "connected"

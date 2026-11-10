@@ -179,6 +179,33 @@ repository move means for an installer is in
 
 The complete release workflow (CI, tagging and published assets) is in [release.md](release.md).
 
+## When the CLI and the server are different versions
+
+A release ships the CLI and the server together, but a machine upgrades them at different
+times. Before `run`, `vault connect` and `vault create` touch anything, the CLI asks
+`/api/health` which contract generation the server speaks and compares it with its own
+([api.md](api.md#contract-generation)):
+
+- **the server is older** than this CLI can use — including a server built before the check
+  existed — the command prints one line saying the server's version is too old and exits with
+  **`78`**;
+- **this CLI is older** than the server still serves, the line says to update `courier-cli`
+  instead, and the exit code is the same;
+- anything else works: an older CLI keeps syncing against a newer server, because an
+  additive release does not move the server's floor.
+
+Nothing is left half-done: no vault is created, no binding is written, and the daemon does
+not take the vault lease before the check, so the plugin is never blocked by a CLI that is
+about to exit.
+
+`78` is `EX_CONFIG` from `sysexits.h`, and it is distinct on purpose: a supervisor that
+restarts on any failure would loop forever over a mismatch nobody is fixing. The service
+unit in [Service setup](#service-setup-systemd-user-service) therefore carries
+`RestartPreventExitStatus=78`.
+
+A server that cannot be reached is **not** this case: it stays the ordinary "cannot reach"
+error and keeps its retry path.
+
 ## Commands
 
 ### Save this machine's sync configuration
@@ -605,6 +632,21 @@ When no folders are excluded it displays `(none)`; the `Too large` line appears 
 actually exceed the cap — a headless machine has no UI, so this is the only place the user can tell
 why "that video didn't sync over".
 
+When this CLI and the server speak different contract generations
+([above](#when-the-cli-and-the-server-are-different-versions)), the header gains one row and
+`contractIssue` is set in `--json`:
+
+```
+Server:         https://vps.example.com:8443
+Device:         NAS
+Vaults:         1
+Compatibility:  the server's version is too old — upgrade it
+```
+
+It is one extra unauthenticated request, and an unreachable server simply leaves the row out. This
+is where a supervisor or a person finds out why the daemon keeps exiting: a process that stopped for
+this reason leaves no runtime record behind.
+
 `status --json` is a **list** built from one read per binding, because each vault has its own
 process. It is stable machine data, and a supervisor reads it verbatim:
 
@@ -612,6 +654,7 @@ process. It is stable machine data, and a supervisor reads it verbatim:
 {
   "serverUrl": "https://vps.example.com:8443",
   "deviceName": "NAS",
+  "contractIssue": null,
   "vaults": [
     {
       "vaultId": "vault-a",
@@ -693,6 +736,10 @@ Type=simple
 ExecStart=%h/courier/courier-cli run --vault vault-a
 Restart=on-failure
 RestartSec=5
+# A server this CLI cannot talk to is not a crash: the process exits 78 and stays down
+# until someone upgrades the side that is behind (see "When the CLI and the server are
+# different versions"). Restarting it every five seconds only fills the journal.
+RestartPreventExitStatus=78
 StandardOutput=journal
 StandardError=journal
 
