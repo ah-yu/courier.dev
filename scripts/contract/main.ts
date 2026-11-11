@@ -37,6 +37,7 @@ const assumeClientUsage = process.argv.includes("--server");
 const denyClientUsage = process.argv.includes("--no-server");
 const keepFloor = process.argv.includes("--keep-floor");
 const reason = argument("--reason");
+const fileVerdict = argument("--verdict") ?? "initial";
 
 const generations = readGenerations();
 const surface = readSurface();
@@ -58,7 +59,7 @@ switch (command) {
   default:
     console.error(`Unknown command: ${command}`);
     console.error(
-      "Usage: bun run contract [check | review --since <tag> | bump [--write] [--reason <text>] [--keep-floor] | write --reason <text>]",
+      "Usage: bun run contract [check | review --since <tag> | bump [--write] [--reason <text>] [--keep-floor] | write --reason <text> [--verdict initial|format-change]]",
     );
     process.exit(2);
 }
@@ -271,10 +272,14 @@ function createFirstSurface(): void {
     console.error('contract: write needs --reason "why this generation exists".\n');
     process.exit(1);
   }
+  if (fileVerdict !== "initial" && fileVerdict !== "format-change") {
+    console.error('contract: --verdict must be "initial" or "format-change".');
+    process.exit(2);
+  }
   mkdirSync(contractDirectory, { recursive: true });
   writeFileSync(
     generationFile,
-    generationFileText(generations.contract, "initial", reason, surface),
+    generationFileText(generations.contract, fileVerdict, reason, surface),
     "utf8",
   );
   console.log(`contract: wrote ${relative(generationFile)} for generation ${generations.contract}`);

@@ -117,14 +117,17 @@ The report names every generation file since the tag, its `decision.verdict` and
 contract-sensitive code that moved. Read it and confirm:
 
 - every reason names the side that must upgrade;
+- a `format-change` decision is a one-time format break: the previous surface is not comparable,
+  so read the reason and the whole surface rather than a diff;
 - the floor moved only for a breaking change;
 - a semantic change with no surface diff has an L1 test and an owning-document update;
 - the release notes say which side upgrades.
 
-The release workflow runs the same report in its `contract-review` job. That job is attached to
-the protected `release` environment, so the workflow stops for an approver before the binaries are
-built. The environment's required reviewers are configured in the repository settings, not in this
-file; without that setting the job runs immediately.
+The release workflow runs the same report in its `contract-report` job; the `contract-review` job
+is attached to the protected `release` environment and waits for an approver who has read that
+report, so the binaries are not built before the sign-off. The environment's required reviewers are
+configured in the repository settings, not in this file; without that setting the approval job runs
+immediately.
 
 ## Release procedure
 
@@ -161,8 +164,8 @@ The tag push starts `.github/workflows/release.yml`, which:
 
 1. `preflight` validates the tag against the four version files and captures the version;
 2. `verify` runs the same `bun run verify` and `bun run verify format` gates as CI;
-3. `contract-review` prints the contract delta since the previous tag and waits for the protected
-   `release` environment's approver;
+3. `contract-report` prints the contract delta since the previous tag; `contract-review` waits for
+   the protected `release` environment's approver, who reads that report;
 4. `server`, `cli` and `plugin` build in parallel;
 5. `release` downloads the three artifacts, checks every expected file, writes `checksums.txt`,
    attests every asset with `actions/attest-build-provenance` (SLSA provenance, which the community

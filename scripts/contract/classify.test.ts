@@ -59,6 +59,7 @@ function surface(overrides: Partial<Surface> = {}): Surface {
       server: { oneOf: [] },
     },
     binary: { pushBody: { headerLengthBytes: 4 }, contentBatch: {}, blob: {} },
+    error: {},
     constants: {},
     ...overrides,
   };

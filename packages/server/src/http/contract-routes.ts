@@ -19,6 +19,7 @@ import type { FindUserByKeyFn, UserRow } from "../handlers/users-handlers";
 import type { FindVaultByIdFn, VaultRow } from "../handlers/vault-handlers";
 import { NotFoundError, PayloadTooLargeError, ValidationError } from "../lib/errors";
 import type { Logger } from "../lib/logger";
+import { STRICT_CONTRACT } from "../lib/strict";
 import { validationDetails } from "../lib/validator";
 import {
   createRateLimiter,
@@ -27,6 +28,7 @@ import {
   type RateLimiter,
 } from "../middleware/rate-limit";
 import { withErrorMapping, withUserAuth } from "./auth";
+import { requireContract } from "./contract";
 import { withHostAuth } from "./guards";
 import { readPushBody } from "./push-body";
 import {
@@ -38,9 +40,6 @@ import {
   type RouteTable,
 } from "./router";
 import { withRateLimiter, withSyncAuth } from "./sync-guards";
-
-/** Whether responses and statuses are checked. Off in a production build for cost. */
-const STRICT = process.env.NODE_ENV !== "production";
 
 /** What a route handler gets: the parsed request, plus whatever its auth wrapper added. */
 export interface RouteContext {
@@ -97,7 +96,7 @@ interface Limits {
  */
 export function toRouteTable(
   contracts: readonly HttpContract[],
-  handlers: Partial<RouteHandlers>,
+  handlers: Record<string, RouteHandlerBody>,
   logger: Logger,
   deps: RouteDeps,
 ): RouteTable {
@@ -112,8 +111,16 @@ export function toRouteTable(
 
   const table: RouteTable = {};
   for (const contract of contracts) {
-    const handler = handlers[contract.id as HttpContractId];
+    const handler = handlers[contract.id];
     if (handler === undefined) throw new Error(`contract: no handler for "${contract.id}"`);
+    // The registry says which routes carry the generation check; a `ck_` route is the
+    // only kind that does. Refuse a declaration that contradicts its auth wrapper.
+    const expected = contract.auth === "user" || contract.auth === "sync" ? "required" : "exempt";
+    if (contract.contract !== expected) {
+      throw new Error(
+        `contract: ${contract.id} declares contract=${contract.contract} for auth=${contract.auth}`,
+      );
+    }
     const entry = (table[contract.path] ??= {});
     if (entry[contract.method] !== undefined) {
       throw new Error(`contract: duplicate route ${contract.method} ${contract.path}`);
@@ -154,6 +161,14 @@ function wrap(
       route = withHostAuth(deps.findByKey, contract.scope, (request) => run(request, {}));
       break;
     }
+  }
+
+  if (contract.contract === "required") {
+    const authed = route;
+    route = (request) => {
+      requireContract(request);
+      return authed(request);
+    };
   }
 
   if (contract.rateLimit !== undefined) {
@@ -268,7 +283,7 @@ function respond(contract: HttpContract, result: RouteResult): Response {
 }
 
 function assertStatus(contract: HttpContract, status: number): void {
-  if (!STRICT) return;
+  if (!STRICT_CONTRACT) return;
   if (!contract.status.includes(status)) {
     throw new Error(
       `contract: ${contract.id} answered ${status}, declared ${contract.status.join(", ")}`,
@@ -277,7 +292,7 @@ function assertStatus(contract: HttpContract, status: number): void {
 }
 
 function validateResponse(contract: HttpContract, body: unknown): void {
-  if (!STRICT || contract.response.kind !== "json") return;
+  if (!STRICT_CONTRACT || contract.response.kind !== "json") return;
   const parsed = contract.response.schema.safeParse(body);
   if (parsed.success) return;
   const details = validationDetails(parsed.error.issues)

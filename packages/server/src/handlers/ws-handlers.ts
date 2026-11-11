@@ -3,6 +3,7 @@ import type { FindVaultByIdFn } from "./vault-handlers";
 import { authenticateUserKey } from "../lib/user-credentials";
 import { canAccessVault } from "../lib/vault-access";
 import { AppError } from "../lib/errors";
+import { STRICT_CONTRACT } from "../lib/strict";
 import type { ApiErrorCode, HistoryLimits, WsServerMessage } from "@courier/shared";
 import { trimDeviceName } from "@courier/shared";
 import { WsServerMessageSchema } from "@courier/shared/wire";
@@ -131,18 +132,16 @@ function normalizeDeviceName(raw: string | undefined): string | null {
   return trimDeviceName(raw);
 }
 
-/** Whether a frame is checked against the wire schema. Off in a production build. */
-const STRICT = process.env.NODE_ENV !== "production";
-
 /**
  * Send one JSON frame, ignoring a socket that is already gone.
  *
- * In tests/dev the frame is validated first: `message` is typed as the shared union, and
- * the schema catches the one thing a union cannot — a payload the server built that no
- * longer matches it. A production build skips the parse to keep a notification cheap.
+ * In development and tests the frame is validated first: `message` is typed as the shared
+ * union, and the schema catches the one thing a union cannot — a payload the server built
+ * that no longer matches it. A production build skips the parse to keep a notification
+ * cheap (`COURIER_STRICT_CONTRACT=1` forces it back on).
  */
 function trySend(ws: WsConnection, message: WsServerMessage): void {
-  if (STRICT) {
+  if (STRICT_CONTRACT) {
     const parsed = WsServerMessageSchema.safeParse(message);
     if (!parsed.success) {
       const details = parsed.error.issues.map((issue) => issue.message).join("; ");

@@ -18,6 +18,8 @@ export interface WireSurface {
   http: Record<string, unknown>;
   ws: unknown;
   binary: unknown;
+  /** The body of every failed request. */
+  error: unknown;
   constants: unknown;
 }
 
@@ -52,6 +54,7 @@ export function readSurface(): WireSurface {
       contentBatch: { ...WIRE.binary.contentBatch },
       blob: { ...WIRE.binary.blob },
     },
+    error: schemaOf(WIRE.error),
     constants: sortRecord(
       Object.fromEntries(
         Object.entries(WIRE.constants).map(([name, value]) => [name, valueOf(value)]),

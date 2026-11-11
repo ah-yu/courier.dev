@@ -1,4 +1,4 @@
-﻿/**
+/**
  * The bridge between the readable interfaces and the executable schemas.
  *
  * Each assertion is compile-time: if an interface and its schema drift, `bun run

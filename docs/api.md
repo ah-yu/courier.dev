@@ -135,8 +135,9 @@ make.
 
 The gate is load-bearing, not a report. `packages/server/src/http/contract-routes.ts` builds the
 Bun table from the registry: a route that is not in the registry is not served, a handler that is
-missing or orphaned is a startup error, and auth, body parsing, status codes and (in tests/dev)
-response validation all come from the contract. The L1 suite drives every route and every frame;
+missing or orphaned is a startup error, and auth, body parsing, status codes and response
+validation all come from the contract. Validation is on in development and tests and off in a
+production build for cost; `COURIER_STRICT_CONTRACT=1` / `=0` overrides either way. The L1 suite drives every route and every frame;
 `packages/shared/src/wire/conformance.test.ts` pins each schema's inferred type to the interface it
 replaced.
 

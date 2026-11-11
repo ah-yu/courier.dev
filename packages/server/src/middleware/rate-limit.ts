@@ -119,7 +119,7 @@ function envPositiveInt(name: string, fallback: number): number {
  * files into a failed pass followed by five-minute retries
  * (see `docs/first-bind-performance.md`).
  *
- * Read per `syncRoutes()` call (not at import) so the e2e harness can raise the
+ * Read per `toRouteTable()` call (not at import) so the e2e harness can raise the
  * ceiling for its test server: the suite drives two real Obsidian instances that
  * burst well past the production allowance, and a 429 in the middle of a
  * scenario reads as a sync failure instead of the rate limit it is. Production
@@ -150,7 +150,7 @@ export function syncRateLimitOptions(): RateLimitOptions {
  * a download takes, not whether it completes.
  *
  * Overridable with `SYNC_TRANSFER_RATE_LIMIT_MAX_ATTEMPTS` /
- * `SYNC_TRANSFER_RATE_LIMIT_WINDOW_MS`, read per `syncRoutes()` call like the sync pair.
+ * `SYNC_TRANSFER_RATE_LIMIT_WINDOW_MS`, read per `toRouteTable()` call like the sync pair.
  */
 export function syncTransferRateLimitOptions(): RateLimitOptions {
   return {

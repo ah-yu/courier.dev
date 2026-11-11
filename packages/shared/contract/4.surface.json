@@ -1,8 +1,8 @@
 {
   "generation": 4,
   "decision": {
-    "verdict": "initial",
-    "reason": "the runtime contract registry replaces the static declaration scan; request constraints, route metadata and WebSocket frames are now part of the surface, and no older client is misread"
+    "verdict": "format-change",
+    "reason": "generation 3's declaration surface is not comparable with the registry; generation 4 records request constraints, auth, status, the error body and WebSocket frames for the first time. The wire is not misread, so the floor stays 1"
   },
   "surface": {
     "unknownKeys": "strip",
@@ -623,7 +623,11 @@
             ],
             "type": "object"
           }
-        }
+        },
+        "errors": [
+          "NOT_FOUND",
+          "INTERNAL_ERROR"
+        ]
       },
       "GET /api/vaults/:id/key-check": {
         "auth": "none",
@@ -658,7 +662,11 @@
             ],
             "type": "object"
           }
-        }
+        },
+        "errors": [
+          "NOT_FOUND",
+          "INTERNAL_ERROR"
+        ]
       },
       "GET /api/vaults/:id/sync/blobs/:contentHash/status": {
         "auth": "sync",
@@ -2701,6 +2709,55 @@
         "maxChunks": 1048576,
         "chunkAadFlag": 1
       }
+    },
+    "error": {
+      "properties": {
+        "details": {
+          "items": {
+            "properties": {
+              "field": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "field",
+              "message"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "error": {
+          "enum": [
+            "CONTRACT_MISMATCH",
+            "INSUFFICIENT_SCOPE",
+            "INTERNAL_ERROR",
+            "KEY_DISABLED",
+            "KEY_EXPIRED",
+            "NOT_FOUND",
+            "PAYLOAD_TOO_LARGE",
+            "QUOTA_EXCEEDED",
+            "RANGE_NOT_SATISFIABLE",
+            "RATE_LIMITED",
+            "UNAUTHORIZED",
+            "UNKNOWN_ERROR",
+            "VALIDATION_ERROR",
+            "VAULT_LIMIT_REACHED"
+          ],
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "error",
+        "message"
+      ],
+      "type": "object"
     },
     "constants": {
       "API_ERROR_CODES": [

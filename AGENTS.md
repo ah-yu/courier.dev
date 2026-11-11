@@ -409,6 +409,6 @@ A wire change is a decision, not a side effect. Before committing anything under
 
 The agent review is a draft. The human approval is the protected `release` environment: before
 tagging, run `bun run contract review --since <previous-tag>` and read it; the release workflow
-runs the same command in its `contract-review` job, which waits for an approver. The pull
-request's "Contract impact" section is the author's record, not the approval. `--reason` is the
-decision record, not the review.
+runs the same command in its `contract-report` job, and its `contract-review` job waits for an
+approver who has read that report. The pull request's "Contract impact" section is the author's
+record, not the approval. `--reason` is the decision record, not the review.

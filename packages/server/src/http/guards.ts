@@ -9,9 +9,9 @@ import type { RouteHandler } from "./router";
  * The Hono middleware the admin/user routes used, as Bun route wrappers.
  *
  * `withHostAuth` answers the same three refusals the middleware did, in the same
- * order (missing key → inactive key → missing scope), and `withJson` produces the
- * same 422 body `createValidator` produced — including the `details` array, which
- * `docs/api.md` documents.
+ * order (missing key → inactive key → missing scope). The adapter parses and validates
+ * a JSON body and produces the same 422 body `createValidator` produced — including the
+ * `details` array, which `docs/api.md` documents.
  */
 
 /** Require an `ak_` host key carrying `scope`, and hand the handler the key row. */

@@ -1,4 +1,4 @@
-import type { ApiErrorCode, HistoryLimits } from "@courier/shared";
+import { trimDeviceName, type ApiErrorCode, type HistoryLimits } from "@courier/shared";
 import { WsServerMessageSchema } from "@courier/shared/wire";
 import type { Platform, TimerHandle } from "./platform";
 
@@ -74,7 +74,10 @@ export class SyncWebSocket {
   private readonly platform: Platform;
 
   constructor(private opts: SyncWebSocketOptions) {
-    this.platform = opts.platform;
+    // The subscribe schema bounds the label; clamp here as well so an over-long setting
+    // (or a third-party host) cannot produce a frame the server silently drops.
+    this.opts = { ...opts, deviceName: trimDeviceName(opts.deviceName) ?? "" };
+    this.platform = this.opts.platform;
   }
 
   private setState(state: WsConnectionState): void {

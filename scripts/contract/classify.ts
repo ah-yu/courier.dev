@@ -45,7 +45,15 @@ export function classify(previous: Surface, current: Surface): Classification {
   diffHttp(previous.http, current.http, changes);
   diffWs(previous.ws, current.ws, changes);
   diffBinary(previous.binary, current.binary, changes);
+  diffSchema(previous.error, current.error, "error", "response", changes);
   diffConstants(previous.constants, current.constants, changes);
+  if (previous.unknownKeys !== current.unknownKeys) {
+    changes.push({
+      verdict: "breaking",
+      path: "unknownKeys",
+      detail: "the rule for unknown JSON keys changed",
+    });
+  }
 
   const sorted = [...changes].toSorted((left, right) => byCodeUnits(left.path, right.path));
   return { changes: sorted, verdict: verdictOf(sorted) };
@@ -349,6 +357,17 @@ function diffSchema(
 
   if (oldSchema.items !== undefined || newSchema.items !== undefined) {
     diffSchema(oldSchema.items, newSchema.items, `${path}[]`, direction, changes);
+  }
+  if (oldSchema.prefixItems !== undefined || newSchema.prefixItems !== undefined) {
+    const oldItems = values(oldSchema.prefixItems);
+    const newItems = values(newSchema.prefixItems);
+    if (oldItems.length !== newItems.length) {
+      changes.push({ verdict: "breaking", path, detail: "the tuple's length changed" });
+    } else {
+      oldItems.forEach((item, index) => {
+        diffSchema(item, newItems[index], `${path}.prefixItems[${index}]`, direction, changes);
+      });
+    }
   }
   for (const key of ["anyOf", "oneOf", "allOf"] as const) {
     if (oldSchema[key] === undefined && newSchema[key] === undefined) continue;

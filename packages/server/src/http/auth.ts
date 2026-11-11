@@ -1,9 +1,10 @@
+import { ApiErrorSchema } from "@courier/shared/wire";
 import { AppError, ValidationError } from "../lib/errors";
 import { logger as processLogger } from "../lib/log";
 import type { Logger } from "../lib/logger";
+import { STRICT_CONTRACT } from "../lib/strict";
 import { authenticateUserHeader } from "../lib/user-credentials";
 import type { FindUserByKeyFn, UserRow } from "../handlers/users-handlers";
-import { requireContract } from "./contract";
 import { json, type RouteHandler, type RouteRequest } from "./router";
 
 /**
@@ -30,6 +31,15 @@ export function toErrorResponse(err: unknown, log: Logger = processLogger): Resp
     const body: Record<string, unknown> = { error: err.code, message: err.message };
     if (err instanceof ValidationError && err.details) body.details = err.details;
     if (err.extra) Object.assign(body, err.extra);
+    if (STRICT_CONTRACT) {
+      const parsed = ApiErrorSchema.safeParse(body);
+      if (!parsed.success) {
+        const details = parsed.error.issues
+          .map((issue) => `${issue.path.map(String).join(".") || "(root)"}: ${issue.message}`)
+          .join("; ");
+        throw new Error(`contract: error response does not match ApiErrorSchema: ${details}`);
+      }
+    }
     return json(body, err.statusCode, err.headers);
   }
   const error = err instanceof Error ? err : new Error(String(err));
@@ -55,21 +65,19 @@ export function withErrorMapping(handler: RouteHandler, log: Logger): RouteHandl
  * `subscribe` use, so expiry, disabling and "an `ak_` key is not a user key" all
  * behave identically here and there.
  *
- * The contract check runs first: it is the other thing that can make a request
- * impossible, and "upgrade the server" is a different answer from "your credential is
- * wrong". This wrapper and `withSyncAuth` are the whole **HTTP** `ck_` surface, so the two
- * of them are where the check belongs — a route that adds auth gets it without remembering.
- * The WebSocket `subscribe` is the third surface and is deliberately not gated: the gate
- * protects writes, and a build from before the mechanism never probes at all. Such a client
- * can still open the socket, but it ignores a notification type it does not know — missed
- * pushes, not a wrong reading. See `docs/api.md` for the trade-off.
+ * The generation check is the adapter's job, from the registry's `contract` flag: it runs
+ * before this wrapper, so "upgrade the server" is a different answer from "your credential
+ * is wrong". This wrapper is only the credential. The WebSocket `subscribe` is the third
+ * surface and is deliberately not gated: the gate protects writes, and a build from before
+ * the mechanism never probes at all. Such a client can still open the socket, but it
+ * ignores a notification type it does not know — missed pushes, not a wrong reading. See
+ * `docs/api.md` for the trade-off.
  */
 export function withUserAuth(
   findUserByKey: FindUserByKeyFn,
   handler: (request: RouteRequest, user: UserRow) => Response | Promise<Response>,
 ): RouteHandler {
   return async (request) => {
-    requireContract(request);
     const user = await authenticateUserHeader(request.headers.get("authorization"), findUserByKey);
     return await handler(request, user);
   };

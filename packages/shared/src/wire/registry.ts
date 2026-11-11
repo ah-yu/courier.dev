@@ -44,6 +44,7 @@ import { BLOB_SPEC, CONTENT_BATCH_SPEC, PUSH_BODY_SPEC } from "./binary";
 import {
   AdminRuntimeResponseSchema,
   AdminStatusResponseSchema,
+  ApiErrorSchema,
   ChunkUploadAckSchema,
   ChunkUploadQuerySchema,
   ChunkUploadStatusSchema,
@@ -314,6 +315,7 @@ export const HTTP = [
     body: { kind: "none" },
     response: { kind: "json", schema: VaultEncryptionSaltResponseSchema },
     status: [200],
+    errors: ["NOT_FOUND", "INTERNAL_ERROR"],
   },
   {
     id: "vaults.keyCheck",
@@ -325,6 +327,7 @@ export const HTTP = [
     body: { kind: "none" },
     response: { kind: "json", schema: VaultKeyCheckResponseSchema },
     status: [200],
+    errors: ["NOT_FOUND", "INTERNAL_ERROR"],
   },
   {
     id: "admin.status",
@@ -582,6 +585,7 @@ export const WIRE = {
   http: HTTP,
   ws: WS,
   binary: BINARY,
+  error: ApiErrorSchema,
   constants: CONSTANTS,
 } as const;
 

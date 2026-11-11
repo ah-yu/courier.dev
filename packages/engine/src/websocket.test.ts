@@ -125,6 +125,15 @@ afterEach(() => {
 });
 
 describe("SyncWebSocket — subscribing", () => {
+  it("bounds the device label before it goes on the wire", () => {
+    const { socket } = makeSocket({ deviceName: "x".repeat(200) });
+    socket.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+
+    expect((ws.lastSent as { deviceName: string }).deviceName).toHaveLength(100);
+  });
+
   it("states the vault, the user key and its own device label when the socket opens", () => {
     const { socket } = makeSocket();
 
