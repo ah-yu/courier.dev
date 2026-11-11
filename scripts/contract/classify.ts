@@ -46,13 +46,23 @@ export function classify(previous: Surface, current: Surface): Classification {
   diffWs(previous.ws, current.ws, changes);
   diffBinary(previous.binary, current.binary, changes);
   diffSchema(previous.error, current.error, "error", "response", changes);
-  diffSchema(
-    previous.contractMismatch,
-    current.contractMismatch,
-    "contractMismatch",
-    "response",
-    changes,
-  );
+  // A new error-body schema is additive: no route starts returning it because the
+  // surface records it, and an older peer never reads it.
+  if (previous.contractMismatch === undefined && current.contractMismatch !== undefined) {
+    changes.push({
+      verdict: "additive",
+      path: "contractMismatch",
+      detail: "a new error body schema",
+    });
+  } else {
+    diffSchema(
+      previous.contractMismatch,
+      current.contractMismatch,
+      "contractMismatch",
+      "response",
+      changes,
+    );
+  }
   diffConstants(previous.constants, current.constants, changes);
   if (previous.unknownKeys !== current.unknownKeys) {
     changes.push({
@@ -394,7 +404,11 @@ function diffSchema(
     }
     if (oldNullable !== null && newNullable === null) {
       diffSchema(oldNullable.member, after, path, direction, changes);
-      changes.push({ verdict: "breaking", path, detail: "stopped being nullable" });
+      changes.push({
+        verdict: direction === "request" ? "breaking" : "additive",
+        path,
+        detail: "stopped being nullable",
+      });
       return;
     }
   }
@@ -512,7 +526,7 @@ function diffTypes(
           : "breaking"
         : newNullable
           ? "degrading"
-          : "breaking";
+          : "additive";
     changes.push({
       verdict,
       path,

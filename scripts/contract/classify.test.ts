@@ -204,10 +204,65 @@ describe("the classifier", () => {
     expect(routeVerdict(responseWith(plain), responseWith(constrained))).toBe("degrading");
   });
 
+  it("reads a nullable removal in its direction", () => {
+    const plain = { type: "string" };
+    const nullable = { anyOf: [{ type: "string" }, { type: "null" }] };
+    expect(routeVerdict(bodyWith(nullable), bodyWith(plain))).toBe("breaking");
+    expect(routeVerdict(responseWith(nullable), responseWith(plain))).toBe("additive");
+  });
+
+  it("reads a plain multi-type nullable removal in its direction", () => {
+    const before = { type: ["string", "number", "null"] };
+    const after = { type: ["string", "number"] };
+    expect(routeVerdict(bodyWith(before), bodyWith(after))).toBe("breaking");
+    expect(routeVerdict(responseWith(before), responseWith(after))).toBe("additive");
+  });
+
+  it("reads a multi-member nullable union conservatively", () => {
+    const wide = {
+      anyOf: [{ type: "string", maxLength: 10 }, { type: "number" }, { type: "null" }],
+    };
+    const narrow = {
+      anyOf: [{ type: "string", maxLength: 5 }, { type: "number" }, { type: "null" }],
+    };
+    expect(routeVerdict(bodyWith(wide), bodyWith(narrow))).toBe("breaking");
+  });
+
   it("reads a changed contract-mismatch body as breaking", () => {
     const before = surface({ contractMismatch: mismatchSchema("string") });
     const after = surface({ contractMismatch: mismatchSchema("number") });
     expect(verdict(before, after)).toBe("breaking");
+  });
+
+  it("reads a new error-body schema as additive", () => {
+    const before = surface({ contractMismatch: undefined });
+    const after = surface({ contractMismatch: { type: "object" } });
+    expect(verdict(before, after)).toBe("additive");
+  });
+
+  it("diffs the contract-mismatch body through its dedicated rule", () => {
+    const base = mismatchSchema("string");
+    const properties = base.properties as Record<string, unknown>;
+    const required = base.required as string[];
+    const withExtra = {
+      ...base,
+      properties: { ...properties, extra: { type: "string" } },
+      required: [...required, "extra"],
+    };
+
+    const added = classify(
+      surface({ contractMismatch: base }),
+      surface({ contractMismatch: withExtra }),
+    );
+    expect(added.verdict).toBe("additive");
+    expect(added.changes.some((change) => change.path.startsWith("contractMismatch"))).toBe(true);
+
+    const removed = classify(
+      surface({ contractMismatch: withExtra }),
+      surface({ contractMismatch: base }),
+    );
+    expect(removed.verdict).toBe("breaking");
+    expect(removed.changes.some((change) => change.path.startsWith("contractMismatch"))).toBe(true);
   });
 
   it("reads a changed unknown-key rule as breaking", () => {
