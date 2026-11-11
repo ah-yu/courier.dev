@@ -33,3 +33,17 @@ export interface ApiError {
     message: string;
   }>;
 }
+
+/**
+ * The body of a `426 CONTRACT_MISMATCH`: the base error plus the two generation
+ * windows and the server's release version, so a caller that skipped `/api/health`
+ * can still tell which side has to move.
+ */
+export interface ContractMismatchErrorBody {
+  error: "CONTRACT_MISMATCH";
+  message: string;
+  serverContract: number;
+  minClient: number;
+  clientContract: number;
+  serverVersion: string;
+}

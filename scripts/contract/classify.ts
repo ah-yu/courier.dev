@@ -46,6 +46,13 @@ export function classify(previous: Surface, current: Surface): Classification {
   diffWs(previous.ws, current.ws, changes);
   diffBinary(previous.binary, current.binary, changes);
   diffSchema(previous.error, current.error, "error", "response", changes);
+  diffSchema(
+    previous.contractMismatch,
+    current.contractMismatch,
+    "contractMismatch",
+    "response",
+    changes,
+  );
   diffConstants(previous.constants, current.constants, changes);
   if (previous.unknownKeys !== current.unknownKeys) {
     changes.push({

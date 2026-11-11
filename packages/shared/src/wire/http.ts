@@ -47,6 +47,16 @@ export const ApiErrorSchema = z.object({
   details: z.optional(z.array(z.object({ field: z.string(), message: z.string() }))),
 });
 
+/** The 426 body: the base error plus the two windows and the server's version. */
+export const ContractMismatchErrorSchema = z.object({
+  error: z.literal("CONTRACT_MISMATCH"),
+  message: z.string(),
+  serverContract: z.number(),
+  minClient: z.number(),
+  clientContract: z.number(),
+  serverVersion: z.string(),
+});
+
 // ── Health ──
 
 export const HealthResponseSchema = z.object({

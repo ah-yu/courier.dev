@@ -2,7 +2,7 @@
   "generation": 4,
   "decision": {
     "verdict": "format-change",
-    "reason": "generation 3's declaration surface is not comparable with the registry; generation 4 records request constraints, auth, status, headers, the error body and WebSocket frames for the first time. The wire is not misread, so the floor stays 1"
+    "reason": "generation 3's declaration surface is not comparable with the registry; generation 4 records request constraints, auth, status, headers, the error bodies (including the 426 extension) and WebSocket frames for the first time. The wire is not misread, so the floor stays 1"
   },
   "surface": {
     "unknownKeys": "strip",
@@ -2758,6 +2758,38 @@
       "required": [
         "error",
         "message"
+      ],
+      "type": "object"
+    },
+    "contractMismatch": {
+      "properties": {
+        "clientContract": {
+          "type": "number"
+        },
+        "error": {
+          "const": "CONTRACT_MISMATCH",
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "minClient": {
+          "type": "number"
+        },
+        "serverContract": {
+          "type": "number"
+        },
+        "serverVersion": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "clientContract",
+        "error",
+        "message",
+        "minClient",
+        "serverContract",
+        "serverVersion"
       ],
       "type": "object"
     },
