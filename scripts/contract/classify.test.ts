@@ -80,6 +80,17 @@ function responseWith(schema: unknown): Record<string, unknown> {
   });
 }
 
+function mismatchSchema(versionType: string): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: {
+      error: { const: "CONTRACT_MISMATCH" },
+      serverVersion: { type: versionType },
+    },
+    required: ["error", "serverVersion"],
+  };
+}
+
 function surface(overrides: Partial<Surface> = {}): Surface {
   return {
     unknownKeys: "strip",
@@ -91,6 +102,7 @@ function surface(overrides: Partial<Surface> = {}): Surface {
     },
     binary: { pushBody: { headerLengthBytes: 4 }, contentBatch: {}, blob: {} },
     error: {},
+    contractMismatch: {},
     constants: {},
     ...overrides,
   };
@@ -190,6 +202,12 @@ describe("the classifier", () => {
     const constrained = { anyOf: [{ type: "string", maxLength: 5 }, { type: "null" }] };
     expect(routeVerdict(bodyWith(plain), bodyWith(constrained))).toBe("breaking");
     expect(routeVerdict(responseWith(plain), responseWith(constrained))).toBe("degrading");
+  });
+
+  it("reads a changed contract-mismatch body as breaking", () => {
+    const before = surface({ contractMismatch: mismatchSchema("string") });
+    const after = surface({ contractMismatch: mismatchSchema("number") });
+    expect(verdict(before, after)).toBe("breaking");
   });
 
   it("reads a changed unknown-key rule as breaking", () => {

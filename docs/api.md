@@ -115,7 +115,9 @@ serve traffic:
   required/optional);
 - both WebSocket directions, frame by frame;
 - the binary framing (push body, content batch, blob envelope) as explicit descriptors;
-- the shared constants as **values**, not printed source.
+- the shared constants as **values**, not printed source;
+- the 426 body's generation fields as their own schema (`contractMismatch`), so a typo in the
+  upgrade refusal is a surface change too.
 
 `bun run verify` runs `bun run contract`, which compares that surface with
 `packages/shared/contract/<CONTRACT_GENERATION>.surface.json`. A change fails until the numbers say

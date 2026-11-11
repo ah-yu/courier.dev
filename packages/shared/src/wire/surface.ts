@@ -20,6 +20,8 @@ export interface WireSurface {
   binary: unknown;
   /** The body of every failed request. */
   error: unknown;
+  /** The 426 body, with the two generation windows and the server's version. */
+  contractMismatch: unknown;
   constants: unknown;
 }
 
@@ -55,6 +57,7 @@ export function readSurface(): WireSurface {
       blob: { ...WIRE.binary.blob },
     },
     error: schemaOf(WIRE.error),
+    contractMismatch: schemaOf(WIRE.contractMismatch),
     constants: sortRecord(
       Object.fromEntries(
         Object.entries(WIRE.constants).map(([name, value]) => [name, valueOf(value)]),

@@ -118,6 +118,9 @@ it("HTTP request and response schemas match their interfaces", () => {
 
   expectTypeOf<z.infer<typeof http.ApiErrorSchema>>().toEqualTypeOf<errors.ApiError>();
   expectTypeOf<
+    z.infer<typeof http.ContractMismatchErrorSchema>
+  >().toEqualTypeOf<errors.ContractMismatchErrorBody>();
+  expectTypeOf<
     z.infer<typeof http.AdminStatusResponseSchema>
   >().toEqualTypeOf<auth.AdminStatusResponse>();
   expectTypeOf<

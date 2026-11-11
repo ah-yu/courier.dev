@@ -1,4 +1,4 @@
-import { ApiErrorSchema } from "@courier/shared/wire";
+import { ApiErrorSchema, ContractMismatchErrorSchema } from "@courier/shared/wire";
 import { AppError, ValidationError } from "../lib/errors";
 import { logger as processLogger } from "../lib/log";
 import type { Logger } from "../lib/logger";
@@ -32,12 +32,16 @@ export function toErrorResponse(err: unknown, log: Logger = processLogger): Resp
     if (err instanceof ValidationError && err.details) body.details = err.details;
     if (err.extra) Object.assign(body, err.extra);
     if (STRICT_CONTRACT) {
-      const parsed = ApiErrorSchema.safeParse(body);
+      const mismatch = err.code === "CONTRACT_MISMATCH";
+      const parsed = mismatch
+        ? ContractMismatchErrorSchema.safeParse(body)
+        : ApiErrorSchema.safeParse(body);
       if (!parsed.success) {
         const details = parsed.error.issues
           .map((issue) => `${issue.path.map(String).join(".") || "(root)"}: ${issue.message}`)
           .join("; ");
-        throw new Error(`contract: error response does not match ApiErrorSchema: ${details}`);
+        const schema = mismatch ? "ContractMismatchErrorSchema" : "ApiErrorSchema";
+        throw new Error(`contract: error response does not match ${schema}: ${details}`);
       }
     }
     return json(body, err.statusCode, err.headers);

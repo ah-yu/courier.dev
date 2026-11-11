@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { byCodeUnits, formatSurface, readSurface } from "./surface";
 import { HTTP } from "./registry";
 import {
+  ContractMismatchErrorSchema,
   PushBodyHeaderSchema,
   PushBodySchema,
   UpdateUserRequestSchema,
@@ -73,6 +74,20 @@ describe("the wire schemas are executable", () => {
     expect(WsServerMessageSchema.safeParse({ type: "invented" }).success).toBe(false);
     expect(
       WsServerMessageSchema.safeParse({ type: "files_pushed", vaultId: "v", files: [] }).success,
+    ).toBe(true);
+  });
+
+  it("records and accepts the 426 body", () => {
+    expect(readSurface().contractMismatch).toBeDefined();
+    expect(
+      ContractMismatchErrorSchema.safeParse({
+        error: "CONTRACT_MISMATCH",
+        message: "upgrade",
+        serverContract: 4,
+        minClient: 1,
+        clientContract: 5,
+        serverVersion: "0.1.0",
+      }).success,
     ).toBe(true);
   });
 

@@ -46,6 +46,7 @@ import {
   AdminStatusResponseSchema,
   ApiErrorSchema,
   ChunkUploadAckSchema,
+  ContractMismatchErrorSchema,
   ChunkUploadQuerySchema,
   ChunkUploadStatusSchema,
   ClearDeletedResponseSchema,
@@ -591,6 +592,7 @@ export const WIRE = {
   ws: WS,
   binary: BINARY,
   error: ApiErrorSchema,
+  contractMismatch: ContractMismatchErrorSchema,
   constants: CONSTANTS,
 } as const;
 
