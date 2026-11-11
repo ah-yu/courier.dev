@@ -14,6 +14,7 @@
  *
  * See `docs/api.md` → "Contract generation" for the rules.
  */
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -48,13 +49,16 @@ switch (command) {
   case "bump":
     bump();
     break;
+  case "review":
+    review();
+    break;
   case "write":
     createFirstSurface();
     break;
   default:
     console.error(`Unknown command: ${command}`);
     console.error(
-      "Usage: bun run contract [check | bump [--write] [--reason <text>] [--keep-floor] | write --reason <text>]",
+      "Usage: bun run contract [check | review --since <tag> | bump [--write] [--reason <text>] [--keep-floor] | write --reason <text>]",
     );
     process.exit(2);
 }
@@ -85,6 +89,121 @@ function check(): void {
       "  If the change is meant to be invisible to peers, put it back.\n",
   );
   process.exit(1);
+}
+
+/**
+ * The release-stage review: what moved since the previous release tag.
+ *
+ * `check` is per change; this is per release. It names every generation's decision, the
+ * generation/floor window and the contract-sensitive code that moved, so the human
+ * approving the protected `release` environment has the surface history in front of them.
+ * It is a report, not a gate: the environment approval is the gate.
+ */
+function review(): void {
+  const since = argument("--since") ?? latestTag();
+  if (since === undefined) {
+    console.error("contract: review needs --since <tag>, or a repository with at least one tag.");
+    process.exit(2);
+  }
+
+  const head = git(["rev-parse", "HEAD"]);
+  const changed = git(["diff", "--name-only", `${since}..${head}`])
+    .split("\n")
+    .filter((file) => file !== "");
+  const generationFiles = changed.filter((file) =>
+    /^packages\/shared\/contract\/\d+\.surface\.json$/.test(file),
+  );
+  const sensitive = changed.filter(
+    (file) =>
+      file === "packages/shared/src/contract.ts" ||
+      file.startsWith("packages/shared/src/wire/") ||
+      file.startsWith("packages/server/src/") ||
+      file.startsWith("scripts/contract/") ||
+      file === "packages/engine/src/websocket.ts",
+  );
+  const previous = previousGenerations(since);
+
+  console.log(`Contract review: ${since}..${head.slice(0, 7)}`);
+  console.log(`  generation: ${previous?.contract ?? "?"} → ${generations.contract}`);
+  console.log(`  floor:      ${previous?.minClient ?? "?"} → ${generations.minClient}`);
+  console.log("");
+
+  if (generationFiles.length === 0) {
+    console.log("  No generation file changed since the tag.");
+  } else {
+    console.log("  Generation files since the tag:");
+    for (const file of generationFiles) {
+      const meta = readGenerationMeta(file);
+      console.log(`    ${file}: ${meta?.verdict ?? "?"} — ${meta?.reason ?? "?"}`);
+    }
+  }
+  console.log("");
+
+  if (sensitive.length === 0) {
+    console.log("  No contract-sensitive code changed since the tag.");
+  } else {
+    console.log("  Contract-sensitive code changed since the tag:");
+    for (const file of sensitive) console.log(`    ${file}`);
+  }
+  console.log("");
+
+  console.log("Checklist:");
+  console.log("  [ ] every decision.reason is accurate and names the side that upgrades");
+  console.log("  [ ] MIN_CLIENT_CONTRACT moved only for a breaking change");
+  console.log(
+    "  [ ] a semantic change with no surface diff has an L1 test and an owning-document update",
+  );
+  console.log("  [ ] the release notes say which side upgrades");
+  console.log("  [ ] this report was read before approving the release environment");
+}
+
+/** The latest reachable tag, for a local review with no `--since`. */
+function latestTag(): string | undefined {
+  try {
+    return git(["describe", "--tags", "--abbrev=0"]);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Run one git command in the repository and return its trimmed stdout. */
+function git(args: readonly string[]): string {
+  return execFileSync("git", args, { cwd: repoRoot, encoding: "utf8" }).trim();
+}
+
+/** The generation numbers as they were at `since`, or undefined before the file existed. */
+function previousGenerations(since: string): Generations | undefined {
+  try {
+    const source = execFileSync("git", ["show", `${since}:packages/shared/src/contract.ts`], {
+      cwd: repoRoot,
+      encoding: "utf8",
+    });
+    const contract = declarationNumber(source, "CONTRACT_GENERATION");
+    const minClient = declarationNumber(source, "MIN_CLIENT_CONTRACT");
+    return contract === undefined || minClient === undefined ? undefined : { contract, minClient };
+  } catch {
+    return undefined;
+  }
+}
+
+function declarationNumber(source: string, name: string): number | undefined {
+  const match = new RegExp(`export const ${name} = (\\d+);`).exec(source);
+  return match === null ? undefined : Number(match[1]);
+}
+
+/** One generation file's decision, for the release report. */
+function readGenerationMeta(file: string): { verdict: string; reason: string } | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(join(repoRoot, file), "utf8")) as {
+      decision?: { verdict?: unknown; reason?: unknown };
+    };
+    return {
+      verdict: typeof parsed.decision?.verdict === "string" ? parsed.decision.verdict : "?",
+      reason: typeof parsed.decision?.reason === "string" ? parsed.decision.reason : "?",
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 /** Classify the diff against the current generation and (with `--write`) apply it. */

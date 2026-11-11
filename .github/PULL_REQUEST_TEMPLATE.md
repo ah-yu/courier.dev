@@ -8,12 +8,13 @@
 - [ ] `bun run verify obsidian` (L3) — or `L3 not run: <why>`
 - [ ] `bun run test:coverage` at the boundary (when the change is at a release boundary)
 
-## Contract review
+## Contract impact
 
-<!-- Required when a contract-sensitive path changed; delete this section otherwise.
-     Paths: packages/shared/src/contract.ts, packages/shared/contract/, packages/shared/src/wire/,
-     packages/server/src/, scripts/contract/, packages/engine/src/websocket.ts.
-     See AGENTS.md -> "Contract review". -->
+<!-- Author record for the release review; the human approval is the protected `release`
+     environment, not this pull request. Fill this when a contract-sensitive path changed;
+     delete it otherwise. Paths: packages/shared/src/contract.ts, packages/shared/contract/,
+     packages/shared/src/wire/, packages/server/src/, scripts/contract/,
+     packages/engine/src/websocket.ts. See AGENTS.md -> "Contract review". -->
 
 - [ ] `bun run contract` read: every `!` / `~` / `+` is intended
 - [ ] `CONTRACT_GENERATION` / `MIN_CLIENT_CONTRACT` are correct; the floor moved only for breaking

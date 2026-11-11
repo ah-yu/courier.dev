@@ -407,5 +407,8 @@ A wire change is a decision, not a side effect. Before committing anything under
    check; a WebSocket or binary change needs both sides and its frame/round-trip test.
 5. Run `bun run verify` and L3; report the outcome.
 
-The agent review is a draft. The human approval is the `CODEOWNERS` review on the pull request,
-and the template's "Contract review" section is the record. `--reason` is not proof of review.
+The agent review is a draft. The human approval is the protected `release` environment: before
+tagging, run `bun run contract review --since <previous-tag>` and read it; the release workflow
+runs the same command in its `contract-review` job, which waits for an approver. The pull
+request's "Contract impact" section is the author's record, not the approval. `--reason` is the
+decision record, not the review.

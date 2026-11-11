@@ -50,9 +50,44 @@ jobs:
       - name: Check formatting
         run: bun run verify format
 
+  contract-report:
+    name: Contract report
+    needs: [preflight, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: ./.github/actions/setup
+
+      - name: Contract delta since the previous release
+        run: |
+          set -euo pipefail
+          previous="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+          if [ -z "$previous" ]; then
+            echo "No previous tag; reviewing the whole history."
+            previous="$(git rev-list --max-parents=0 HEAD)"
+          fi
+          bun run contract review --since "$previous"
+
+  contract-review:
+    name: Contract review
+    needs: [preflight, verify, contract-report]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # The human gate. Configure this environment with required reviewers in the repository
+    # settings; without that setting the job runs immediately. The report is the
+    # `contract-report` job's log, which is visible before this approval is requested.
+    environment: release
+    steps:
+      - name: Approved
+        run: echo "The contract report was reviewed."
+
   server:
     name: Build server binaries
-    needs: [preflight, verify]
+    needs: [preflight, contract-review]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -116,7 +151,7 @@ jobs:
 
   cli:
     name: Build CLI binaries
-    needs: [preflight, verify]
+    needs: [preflight, contract-review]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -158,7 +193,7 @@ jobs:
 
   plugin:
     name: Build Obsidian plugin
-    needs: [preflight, verify]
+    needs: [preflight, contract-review]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

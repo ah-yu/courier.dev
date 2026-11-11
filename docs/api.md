@@ -140,9 +140,10 @@ response validation all come from the contract. The L1 suite drives every route 
 `packages/shared/src/wire/conformance.test.ts` pins each schema's inferred type to the interface it
 replaced.
 
-The gate cannot prove a human read the change. Contract-sensitive paths are owned in
-`.github/CODEOWNERS`; the pull request template records the review, including which side must
-upgrade. `--reason` is the decision record, not the review.
+The gate cannot prove a human read the change. A human reviews the contract delta since the
+previous release before the release is published — the release workflow's protected `release`
+environment, fed by `bun run contract review --since <tag>`. `--reason` is the decision record,
+not the review.
 
 What the tool still cannot see:
 
