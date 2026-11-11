@@ -156,7 +156,10 @@ What the tool still cannot see:
   change, pinned by the L1 tests and the owning document, not by the surface;
 - a **custom refinement** that JSON Schema cannot express (for example "at least one of these three
   fields"). It is enforced by the runtime schema and pinned by a test, but the serialized tree
-  records the shape, not the rule.
+  records the shape, not the rule;
+- a **nullable union with more than one non-null member** is compared as an opaque union, so a
+  change inside it is reported conservatively as breaking. A simple nullable field — one non-null
+  member plus `null` — is diffed through that member in the field's direction.
 
 `--keep-floor` remains for the one case a classification reads as breaking but the team judges to
 be a degradation; the reason goes in the commit.

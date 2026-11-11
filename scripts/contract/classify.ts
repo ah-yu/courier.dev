@@ -366,6 +366,32 @@ function diffSchema(
     return;
   }
 
+  // A nullable field is either a `type` array or an `anyOf`/`oneOf` with a `null`
+  // member. Diff the non-null member structurally so a constraint change inside it is
+  // read in its direction instead of as an opaque union member.
+  const oldNullable = nullableView(oldSchema);
+  const newNullable = nullableView(newSchema);
+  if (oldNullable !== null || newNullable !== null) {
+    if (oldNullable !== null && newNullable !== null) {
+      diffSchema(oldNullable.member, newNullable.member, path, direction, changes);
+      return;
+    }
+    if (oldNullable === null && newNullable !== null) {
+      diffSchema(before, newNullable.member, path, direction, changes);
+      changes.push({
+        verdict: direction === "request" ? "additive" : "degrading",
+        path,
+        detail: "became nullable",
+      });
+      return;
+    }
+    if (oldNullable !== null && newNullable === null) {
+      diffSchema(oldNullable.member, after, path, direction, changes);
+      changes.push({ verdict: "breaking", path, detail: "stopped being nullable" });
+      return;
+    }
+  }
+
   diffEnum(path, oldSchema, newSchema, direction, changes);
   diffTypes(path, oldSchema, newSchema, direction, changes);
   diffProperties(path, oldSchema, newSchema, direction, changes);
@@ -389,6 +415,44 @@ function diffSchema(
     if (oldSchema[key] === undefined && newSchema[key] === undefined) continue;
     diffVariants(path, key, oldSchema[key], newSchema[key], direction, changes);
   }
+}
+
+interface NullableView {
+  member: Record<string, unknown>;
+}
+
+/**
+ * The non-null member of a simple nullable schema, or null.
+ *
+ * Handles both spellings Zod emits: a `type` array with one non-null type and `null`,
+ * and an `anyOf`/`oneOf` with exactly one non-null member and a `null` member. A union
+ * with several non-null members is not "nullable" in this sense and stays conservative.
+ */
+function nullableView(schema: Record<string, unknown>): NullableView | null {
+  for (const key of ["anyOf", "oneOf"] as const) {
+    if (!Array.isArray(schema[key])) continue;
+    const variants = values(schema[key]);
+    const nulls = variants.filter(isNullVariant);
+    const nonNull = variants.filter((variant) => !isNullVariant(variant));
+    if (nulls.length === 1 && nonNull.length === 1) {
+      const member = object(nonNull[0]);
+      if (member !== null) return { member };
+    }
+  }
+
+  const types = typeSet(schema.type);
+  if (types !== null && types.has("null")) {
+    const nonNull = [...types].filter((type) => type !== "null");
+    if (nonNull.length === 1) {
+      return { member: { ...schema, type: nonNull[0] } };
+    }
+  }
+  return null;
+}
+
+function isNullVariant(value: unknown): boolean {
+  const variant = object(value);
+  return variant !== null && variant.type === "null" && Object.keys(variant).length === 1;
 }
 
 function diffEnum(
