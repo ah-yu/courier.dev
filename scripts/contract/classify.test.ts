@@ -226,6 +226,9 @@ describe("the classifier", () => {
       anyOf: [{ type: "string", maxLength: 5 }, { type: "number" }, { type: "null" }],
     };
     expect(routeVerdict(bodyWith(wide), bodyWith(narrow))).toBe("breaking");
+    // The response is the discriminating direction: a flattened member diff would say
+    // "degrading"; the opaque-union rule must say breaking.
+    expect(routeVerdict(responseWith(wide), responseWith(narrow))).toBe("breaking");
   });
 
   it("reads a changed contract-mismatch body as breaking", () => {
