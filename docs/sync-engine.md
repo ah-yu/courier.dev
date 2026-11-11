@@ -444,7 +444,20 @@ file now lives at.
     something this device builds on top of (`SyncPushBaseError`, handled by `decideIncremental` and
     by the reconcile's push branch; the delete/rename intent paths converge the same way). A refusal
     whose head already holds the pushed bytes is adopted as the sync point instead — that is the
-    lost-response retry, which no longer duplicates a version or invents a conflict. No client-side
+    lost-response retry, which no longer duplicates a version or invents a conflict. The one other
+    head that is adopted is **this device's own, unapplied tombstone**: a move's create half can be
+    refused against the tombstone its own delete half published while that half's answer is still
+    outstanding, and the state is then a version behind. Each deletion's decision is recorded with a
+    version that a retry of the **same** decision (same chain, bytes and base) reuses; a re-prepare
+    from a different base mints a new version and rewrites the record. The settlement therefore
+    recognises the head when it is the version the create half **carried** (on the prepared version,
+    `ownDeleteVersion` — the record itself is consumed by the decision) or one of the (newest eight)
+    tombstone versions the chain's record still holds, which covers a newer mint prepared while the
+    create half was deciding. It then adopts the head and decides again: a recreate, not a peer's
+    deletion (`settleRefusedMove`; a peer's tombstone is in neither place). That peer rule is also
+    what a refused tombstone obeys: only the version this device pushed counts as its deletion having
+    landed (`settleStaleBase`), so a peer's tombstone is never adopted as this device's sync point.
+    No client-side
     queue is involved, and none would help: two devices cannot see each other's order, and the
     engine's deliberate no-lock rule (above) exists because waiting on a path deadlocks a host whose
     adapter awaits the event its own write fires. Covered by the
@@ -564,7 +577,9 @@ file now lives at.
     from the pass's snapshot: the file is still gone, the state still holds it at that path, no event
     owns the path, and the sync point is still the head the decision was taken from — a version a pull
     adopted meanwhile wins. A `stale_base` refusal settles through the single-file rules (the peer's
-    version comes back, nothing local to park), and a failed request leaves the state entries alone so
+    version comes back, nothing local to park — unless a file was written back at the path while that
+    tombstone was on the wire, which the settlement checks and parks), and a failed request leaves the
+    state entries alone so
     the next pass retries them in a batch.
   - **A `429` is waited out, not failed.** The server states the window (`Retry-After`); the batch is
     re-sent after that wait, up to `MAX_RATE_LIMIT_WAITS` times, and only then does the pass stop and
@@ -770,9 +785,37 @@ file now lives at.
     `rename` events against the
     **deployed** 600/minute allowance: every version lands, fewer than 40 requests each way, and the
     receiving host's only index read is its bind). The shape a watcher reports as its two halves
-    (remove + create) has no L1 case of its own — a split-move scenario proved flaky on the peer's
-    notification apply for reasons unrelated to the batch — and is pinned at L0 instead: the batch
-    turns it into one content-less `rename` with no tombstone.
+    (remove + create) is pinned by `bulk-rename.e2e.test.ts` (200 notes through a real server: the two
+    halves in one batch, and the delete sequence a window before the create burst), and the two halves
+    of one move are **two paths**, so a split can decide them in two jobs at once: both decide from the
+    same head, the tombstone lands first, and the create's `rename` is refused `stale_base`. That
+    refusal is re-decided from the fresh chain, and — when the head is **this device's own tombstone**,
+    recognised as one of the (newest eight) versions its delete record holds — the head is adopted as
+    the sync point first. That is what the delete half's own `applyPushedVersion` would have done, and
+    it can be later than this refusal because the two halves are separate jobs: the state is then a
+    version behind, and reading it alone would take our own delete for a peer's, apply it, and delete
+    the file the move carried in — bytes that exist nowhere else. With the head adopted, the recreate
+    rule fires and the create travels as a `restore`; a later tombstone whose base the chain has since
+    passed is dropped by `applyPushedVersion`, so the held answer cannot make the chain deleted again.
+    The bound is safe because a newer mint moved the state point past the earlier version, so an
+    evicted version cannot be the head of the refusal being settled. A **peer's** tombstone is not
+    adopted: it lands (invariant 3), and the move does not push the note back. Reporting the refusal
+    instead (the behaviour before this fix) left one note of a bulk move unsent while every peer held
+    its tombstone, until a pass ran.
+
+    Pinned at L0 by "turns a move the watcher reports as delete+create into one rename" (the batch's
+    answer: one content-less `rename`, no tombstone) and the eleven "a move split across two event jobs"
+    cases: the refusal itself, the delete half's apply still pending, a **pass's** tombstone in that
+    position, the same split between a single event and a batch, a peer's tombstone in that window, the
+    retry that reuses the version a lost answer published, a newer tombstone minted while the create
+    half was deciding, and the three parking cases (a note recreated during the tombstone push at the
+    event site, a note that appears between the settlement's stat and its own read, and a note
+    recreated while a **pass's** tombstone was refused). The peer case is pinned twice: the refusal
+    settles as a deletion, and a refused tombstone never adopts the peer's version as this device's
+    sync point; a refused tombstone also asks the disk before applying a head, and the conflict
+    resolver reads the local bytes rather than trusting its caller's `localExists` hint, so a note
+    written back in that window is parked instead of deleted.
+
   - **A download's content reads travel in batches too.** `ContentReader.read` holds a read until the
     batch is full (`maxConcurrent` entries — the most reads the pool can have outstanding, capped at the
     route's 64 hashes), or for one turn of the event loop for the tail of a pass, and fetches them with

@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_RECONCILE_INTERVAL_MS } from "./host";
-import { DEFAULT_RENAME_WINDOW_MS, MAX_PENDING_DELETES, SelfEventLog } from "./self-events";
+import {
+  DEFAULT_RENAME_WINDOW_MS,
+  MAX_DELETE_VERSIONS,
+  MAX_PENDING_DELETES,
+  SelfEventLog,
+} from "./self-events";
 
 /**
  * The records that let the engine recognise its own events.
@@ -312,6 +317,37 @@ describe("SelfEventLog — a delete awaiting a rename", () => {
     expect(log.matchDeletedFile("same-content")).toMatchObject({ fileId: "f1" });
     // Consumed: one delete explains one new file.
     expect(log.matchDeletedFile("same-content")).toBeNull();
+  });
+
+  it("keeps every tombstone version a chain minted, so a stale capture still recognises a newer head", () => {
+    // A create half can capture the record before a newer tombstone is prepared for the same
+    // chain (a delete half re-members it while the create half is deciding). The version it
+    // carries is then not the head it is refused against, so the settlement asks for every
+    // version this device minted — never a peer's.
+    const log = new SelfEventLog({ now: fakeClock().now });
+    log.rememberDelete("f1", "same-content", "v1", "base-a");
+    log.rememberDelete("f1", "same-content", "v2", "base-b");
+
+    expect(log.deleteVersionsFor("f1")).toEqual(["v1", "v2"]);
+    // The retry rule stays narrow: only the same decision reuses a version.
+    expect(log.pendingDeleteVersion("f1", "same-content", "base-a")).toBeNull();
+    expect(log.pendingDeleteVersion("f1", "same-content", "base-b")).toBe("v2");
+    expect(log.pendingDeleteVersionFor("f1")).toBe("v2");
+    expect(log.deleteVersionsFor("other-chain")).toEqual([]);
+  });
+
+  it("keeps the newest eight tombstone versions, dropping the oldest", () => {
+    const log = new SelfEventLog({ now: fakeClock().now });
+    for (let index = 0; index < 9; index += 1) {
+      log.rememberDelete("f1", "same-content", `v${index}`, `base-${index}`);
+    }
+
+    const versions = log.deleteVersionsFor("f1");
+    expect(versions).toHaveLength(MAX_DELETE_VERSIONS);
+    expect(versions[0]).toBe("v1");
+    expect(versions.at(-1)).toBe("v8");
+    // The newest is still the one a same-decision retry reuses, whatever was evicted.
+    expect(log.pendingDeleteVersion("f1", "same-content", "base-8")).toBe("v8");
   });
 
   it("keeps a delete adoptable across the gap between a bulk move's two batches", () => {

@@ -191,7 +191,10 @@ protocol or a security hole. Read the linked section before changing one.
 4. **Every push names its base.** `baseVersionId`; the server checks and inserts atomically, so
    two pushes decided from the same head cannot both land. A `stale_base` refusal is re-decided
    from the fresh chain without moving this device's sync point; the same bytes are adopted as
-   the sync point (lost-response retry). See
+   the sync point (lost-response retry). A refusal whose fresh head is **this device's own
+   version, still unapplied** — a tombstone whose push answered after the version that took it
+   back — is adopted first and decided again, so a move's create half is a recreate and not a
+   peer's deletion; a peer's tombstone is never adopted. See
    [sync-engine.md](docs/sync-engine.md#offline-changes-and-reconciliation).
 5. **There is no offline queue; the reconcile pass is the retry.** A failed push or pull must be
    visible (never resolved as "nothing to do"). Hosts reconcile on a **re**connect, never on the

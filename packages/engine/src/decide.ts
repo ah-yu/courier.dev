@@ -328,3 +328,31 @@ export type RefusedPushStep = "re-decide" | "report";
 export function decideRefusedPush(attempt: number): RefusedPushStep {
   return attempt + 1 < EVENT_DECISION_ATTEMPTS ? "re-decide" : "report";
 }
+
+/**
+ * Whether a refused `rename` was refused against a tombstone **this device** minted.
+ *
+ * A move's create half takes the delete half's record back and re-points the chain; when
+ * that tombstone's push answered first, the `rename` is refused `stale_base` with the
+ * tombstone as the head. Adopting that head as the sync point before deciding again is
+ * what makes the create a recreate (`restore`) instead of a peer's deletion applied to the
+ * only copy of the bytes.
+ *
+ * `captured` is the version the decision carried, and `minted` the versions the chain's
+ * delete record still holds (its newest few). Both are this device's
+ * own: a create half can capture the record before a newer tombstone for the same chain is
+ * prepared, so either may be the head. A peer's tombstone is never in `minted`.
+ */
+export function adoptsOwnTombstone(input: {
+  readonly headAction: string | undefined;
+  readonly headVersionId: string | null | undefined;
+  readonly captured: string | null;
+  readonly minted: readonly string[];
+}): boolean {
+  const headVersionId = input.headVersionId;
+  if (input.headAction !== "delete" || headVersionId === null || headVersionId === undefined) {
+    return false;
+  }
+  if (input.captured !== null && headVersionId === input.captured) return true;
+  return input.minted.includes(headVersionId);
+}

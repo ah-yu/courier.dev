@@ -24,6 +24,7 @@ interface V extends BatchVersion {
 function version(name: string, size: number, chunkCount = 0): V {
   return {
     fileId: `id-${name}`,
+    versionId: `v-${name}`,
     plainPath: name,
     name,
     chunkCount,
