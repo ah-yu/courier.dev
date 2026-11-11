@@ -70,6 +70,7 @@
         "@courier/shared": "workspace:*",
         "commander": "^15.0.0",
         "drizzle-orm": "1.0.0-beta.22",
+        "zod": "^4.6.7",
       },
       "devDependencies": {
         "@courier/build": "workspace:*",
