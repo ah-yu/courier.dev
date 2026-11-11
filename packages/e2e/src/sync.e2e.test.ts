@@ -8,6 +8,7 @@ import {
   encryptString,
   sha256Hex,
   type WsConnectionState,
+  type WsEvent,
 } from "../../engine/src/index";
 import { buildPushBody } from "../../shared/src/index";
 import { createTestClient, type TestClient } from "./harness/client";
@@ -595,6 +596,58 @@ describe("sync e2e — two clients through a real server", () => {
       expect(b.read("live.md")).toBe("second revision, pushed live");
     } finally {
       socket.disconnect();
+    }
+  });
+
+  it("skips the pushing session's own socket when the push names it", async () => {
+    const vault = await newVault("session-echo");
+    const a = await newClient(vault.id, "device-a");
+    a.write("echo.md", "first");
+    await a.sync();
+
+    const senderEvents: WsEvent[] = [];
+    const peerEvents: WsEvent[] = [];
+    const senderSocket = new SyncWebSocket({
+      platform: realPlatform,
+      wsUrl: server.wsUrl,
+      vaultId: vault.id,
+      userKey: server.userKey,
+      deviceName: a.deviceName,
+      onEvent: (event) => senderEvents.push(event),
+    });
+    const peerSocket = new SyncWebSocket({
+      platform: realPlatform,
+      wsUrl: server.wsUrl,
+      vaultId: vault.id,
+      userKey: server.userKey,
+      deviceName: "device-peer",
+      onEvent: (event) => peerEvents.push(event),
+    });
+    senderSocket.connect();
+    peerSocket.connect();
+
+    try {
+      await waitFor(
+        () => senderSocket.getSessionId() !== null && peerSocket.getSessionId() !== null,
+        "websockets never subscribed",
+      );
+      const sessionId = senderSocket.getSessionId();
+      if (sessionId === null) throw new Error("the sender socket has no session id");
+      a.setSessionId(sessionId);
+
+      a.write("echo.md", "second");
+      await a.change("echo.md");
+
+      await waitFor(
+        () => peerEvents.some((event) => event.type === "files_pushed"),
+        "the peer never received the push",
+      );
+      // Give the server a turn to deliver to the sender's socket too, if it were going to.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(senderEvents.some((event) => event.type === "files_pushed")).toBe(false);
+    } finally {
+      senderSocket.disconnect();
+      peerSocket.disconnect();
     }
   });
 

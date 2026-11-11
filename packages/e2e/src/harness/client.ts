@@ -232,6 +232,11 @@ export class TestClient {
     return isSyncablePath(path, this.scope);
   }
 
+  /** Claim a session id for the pushes this client makes, as a host does after subscribing. */
+  setSessionId(sessionId: string | null): void {
+    this.api.setSessionId(sessionId);
+  }
+
   /** Every push the engine made, with its file count and content bytes. */
   get pushCalls(): ReadonlyArray<{ files: number; contentBytes: number }> {
     return this.api.pushCalls;

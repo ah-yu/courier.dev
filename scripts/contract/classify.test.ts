@@ -62,6 +62,24 @@ function tupleSchema(first: string): Record<string, unknown> {
   };
 }
 
+function bodyWith(schema: unknown): Record<string, unknown> {
+  return route({
+    body: {
+      kind: "json",
+      schema: { type: "object", properties: { value: schema }, required: ["value"] },
+    },
+  });
+}
+
+function responseWith(schema: unknown): Record<string, unknown> {
+  return route({
+    response: {
+      kind: "json",
+      schema: { type: "object", properties: { value: schema }, required: ["value"] },
+    },
+  });
+}
+
 function surface(overrides: Partial<Surface> = {}): Surface {
   return {
     unknownKeys: "strip",
@@ -151,6 +169,27 @@ describe("the classifier", () => {
     const before = withRoute(surface(), "POST /x", route());
     const after = withRoute(surface(), "POST /x", route({ extra: true }));
     expect(verdict(before, after)).toBe("breaking");
+  });
+
+  it("reads a plain nullable addition in its direction", () => {
+    const plain = { type: "string" };
+    const nullable = { anyOf: [{ type: "string" }, { type: "null" }] };
+    expect(routeVerdict(bodyWith(plain), bodyWith(nullable))).toBe("additive");
+    expect(routeVerdict(responseWith(plain), responseWith(nullable))).toBe("degrading");
+  });
+
+  it("diffs a constrained nullable member structurally", () => {
+    const wide = { anyOf: [{ type: "string", maxLength: 10 }, { type: "null" }] };
+    const narrow = { anyOf: [{ type: "string", maxLength: 5 }, { type: "null" }] };
+    expect(routeVerdict(bodyWith(wide), bodyWith(narrow))).toBe("breaking");
+    expect(routeVerdict(responseWith(wide), responseWith(narrow))).toBe("degrading");
+  });
+
+  it("diffs a plain nullable against a constrained one", () => {
+    const plain = { type: ["string", "null"] };
+    const constrained = { anyOf: [{ type: "string", maxLength: 5 }, { type: "null" }] };
+    expect(routeVerdict(bodyWith(plain), bodyWith(constrained))).toBe("breaking");
+    expect(routeVerdict(responseWith(plain), responseWith(constrained))).toBe("degrading");
   });
 
   it("reads a changed unknown-key rule as breaking", () => {
