@@ -351,7 +351,11 @@ describe("EngineHost", () => {
    * and the only thing that moves the host's connection state to `connected`.
    */
   function subscribed(sessionId = "session-1"): void {
-    MockWebSocket.instances.at(-1)!.deliver({ type: "subscribe_success", sessionId });
+    MockWebSocket.instances.at(-1)!.deliver({
+      type: "subscribe_success",
+      vaultId: "vault-1",
+      sessionId,
+    });
   }
 
   describe("the vault lease", () => {

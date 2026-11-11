@@ -103,6 +103,32 @@ the plugin, the CLI, or the server. A release that moved `MIN_CLIENT_CONTRACT` s
 plugin versions, so the number is raised deliberately, on a release whose notes say which client
 generation is being dropped.
 
+### Contract review at release
+
+A contract generation is a decision, and the human sign-off happens at release, not on every pull
+request. Before tagging:
+
+```bash
+bun run contract review --since <previous-release-tag>
+```
+
+The report names every generation file since the tag, its `decision.verdict` and
+`decision.reason`, the `CONTRACT_GENERATION` / `MIN_CLIENT_CONTRACT` window, and the
+contract-sensitive code that moved. Read it and confirm:
+
+- every reason names the side that must upgrade;
+- a `format-change` decision is a one-time format break: the previous surface is not comparable,
+  so read the reason and the whole surface rather than a diff;
+- the floor moved only for a breaking change;
+- a semantic change with no surface diff has an L1 test and an owning-document update;
+- the release notes say which side upgrades.
+
+The release workflow runs the same report in its `contract-report` job; the `contract-review` job
+is attached to the protected `release` environment and waits for an approver who has read that
+report, so the binaries are not built before the sign-off. The environment's required reviewers are
+configured in the repository settings, not in this file; without that setting the approval job runs
+immediately.
+
 ## Release procedure
 
 The three packages ship together under one product version, and the Obsidian community directory
@@ -123,7 +149,9 @@ edited by hand — copy the plugin manifest over it.
    and copy the plugin manifest to the root: `cp packages/plugin/manifest.json manifest.json`.
 2. If this release changed the API, `bun run contract bump --write` has already written the new
    generation and its surface file — commit both with the change. Then run
-   `bun scripts/check-release.ts 0.1.0` and commit the bump. (A `v` prefix is accepted too,
+   `bun scripts/check-release.ts 0.1.0` and commit the bump. Before tagging, run
+   `bun run contract review --since <previous-release-tag>` and read the report; the release
+   workflow repeats it behind the protected `release` environment. (A `v` prefix is accepted too,
    but the tag itself is the bare version — see below.)
 3. Tag and push:
 
@@ -136,13 +164,15 @@ The tag push starts `.github/workflows/release.yml`, which:
 
 1. `preflight` validates the tag against the four version files and captures the version;
 2. `verify` runs the same `bun run verify` and `bun run verify format` gates as CI;
-3. `server`, `cli` and `plugin` build in parallel;
-4. `release` downloads the three artifacts, checks every expected file, writes `checksums.txt`,
+3. `contract-report` prints the contract delta since the previous tag; `contract-review` waits for
+   the protected `release` environment's approver, who reads that report;
+4. `server`, `cli` and `plugin` build in parallel;
+5. `release` downloads the three artifacts, checks every expected file, writes `checksums.txt`,
    attests every asset with `actions/attest-build-provenance` (SLSA provenance, which the community
    directory recommends and anyone can verify with `gh attestation verify`), creates a **draft**
    release, uploads the assets — the binaries, the plugin zip and the three files the Obsidian
    directory reads (`main.js`, `manifest.json`, `styles.css`) — then publishes it;
-5. `cnb` (optional) mirrors the published assets to cnb.cool. It is skipped when the repository
+6. `cnb` (optional) mirrors the published assets to cnb.cool. It is skipped when the repository
    variable `CNB_REPO` is unset, and a failure there cannot fail the release. Only stable releases
    are mirrored; tags containing a hyphen (release candidates and snapshot builds) are skipped.
    The `latest` alias is updated only when GitHub reports the tag as the latest stable release, so

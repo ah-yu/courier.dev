@@ -1,16 +1,20 @@
 import { isIP } from "net";
 import crypto from "crypto";
+import type { WsServerMessage } from "@courier/shared";
+import { HTTP, WsClientMessageSchema } from "@courier/shared/wire";
 import { createServerApp } from "../index";
 import { notFound } from "../http/router";
 import { toErrorResponse } from "../http/auth";
-import { healthRoutes } from "../routes/health";
-import { meRoutes } from "../routes/me";
-import { userRoutes } from "../routes/users";
-import { adminRoutes } from "../routes/admin";
-import { vaultRoutes } from "../routes/vaults";
-import { syncRoutes } from "../routes/sync";
+import { toRouteTable, type RouteHandlers } from "../http/contract-routes";
+import { healthHandlers } from "../routes/health";
+import { meHandlers } from "../routes/me";
+import { userHandlers } from "../routes/users";
+import { adminHandlers } from "../routes/admin";
+import { vaultHandlers } from "../routes/vaults";
+import { syncHandlers } from "../routes/sync";
 import { findVaultById, listVaultIds } from "../db/repositories/vaults";
 import { listReferencedContentHashes } from "../db/repositories/file-versions";
+import { findByKey } from "../lib/api-keys";
 import { findUserByKey } from "../lib/users-db";
 import { startHeartbeat, stopHeartbeat, type WsConnection } from "../handlers/ws-handlers";
 import { logger } from "../lib/log";
@@ -108,17 +112,20 @@ export function startServer(options: StartOptions = {}): StartedServer {
 
   /** Bind the listener. Called immediately without TLS, or once a certificate exists. */
   function startListener(certificate: CertificatePair | null): Bun.Server<WsData> {
+    // The registry is the route table: every contract has exactly one handler, and a
+    // missing or orphan handler is a startup error rather than a silent 404.
+    const handlers: RouteHandlers = {
+      ...healthHandlers,
+      ...meHandlers(),
+      ...userHandlers(hub),
+      ...adminHandlers(hub),
+      ...vaultHandlers(hub),
+      ...syncHandlers(hub, logger),
+    };
     const instance = Bun.serve<WsData, never>({
       port,
       // Every route is a table entry; `fetch` below only answers what no entry matched.
-      routes: {
-        ...healthRoutes(logger),
-        ...meRoutes(logger),
-        ...userRoutes(hub, logger),
-        ...adminRoutes(hub, logger),
-        ...vaultRoutes(hub, logger),
-        ...syncRoutes(hub, logger),
-      },
+      routes: toRouteTable(HTTP, handlers, logger, { findUserByKey, findVaultById, findByKey }),
       // Bun's default is 10 s; the plugin may sit idle between saves longer than
       // that, and a keep-alive socket reaped mid-request reads as a sync failure.
       idleTimeout: 120,
@@ -184,20 +191,20 @@ export function startServer(options: StartOptions = {}): StartedServer {
 
   /** One frame from a client: subscribe, unsubscribe, or a heartbeat reply. */
   async function handleSocketMessage(ws: Bun.ServerWebSocket<WsData>, raw: string): Promise<void> {
-    let msg: {
-      type: string;
-      vaultId?: string;
-      userKey?: string;
-      deviceName?: string;
-    };
+    let rawMessage: unknown;
     try {
-      msg = JSON.parse(raw);
+      rawMessage = JSON.parse(raw);
     } catch {
       return;
     }
+    // The frame is validated against the shared schema, not just switched on: an
+    // unknown type or a missing field is ignored exactly like a malformed body.
+    const parsed = WsClientMessageSchema.safeParse(rawMessage);
+    if (!parsed.success) return;
+    const msg = parsed.data;
 
-    const credential = msg.userKey;
-    if (msg.type === "subscribe" && msg.vaultId && credential) {
+    if (msg.type === "subscribe") {
+      if (msg.vaultId === "" || msg.userKey === "") return;
       const sessionId = crypto.randomUUID();
       // The hub registers the session **only after** the credential and the
       // vault's ownership have been checked; a refused subscribe leaves nothing
@@ -205,7 +212,7 @@ export function startServer(options: StartOptions = {}): StartedServer {
       // session that was never added is a no-op.
       const result = await hub.subscribe(
         msg.vaultId,
-        credential,
+        msg.userKey,
         msg.deviceName,
         { findUserByKey, findVaultById },
         asWsConnection(ws),
@@ -222,13 +229,15 @@ export function startServer(options: StartOptions = {}): StartedServer {
       const owned = ws.data.sessions.get(msg.vaultId);
       if (owned) owned.push(sessionId);
       else ws.data.sessions.set(msg.vaultId, [sessionId]);
-    } else if (msg.type === "unsubscribe" && msg.vaultId) {
+    } else if (msg.type === "unsubscribe") {
+      if (msg.vaultId === "") return;
       for (const sessionId of ws.data.sessions.get(msg.vaultId) ?? []) {
         hub.removeConnection(msg.vaultId, sessionId);
       }
       ws.data.sessions.delete(msg.vaultId);
+      const frame: WsServerMessage = { type: "unsubscribed", vaultId: msg.vaultId };
       try {
-        ws.send(JSON.stringify({ type: "unsubscribed", vaultId: msg.vaultId }));
+        ws.send(JSON.stringify(frame));
       } catch {
         // The socket may already be gone; the close handler is what cleans up.
       }

@@ -34,6 +34,15 @@ export type VaultSummary = {
   createdAt: string;
 } & VaultHistorySettings;
 
+/** `POST /api/vaults`: the three values a client generates locally at creation. */
+export interface CreateVaultRequest {
+  name: string;
+  /** base64 of the random salt the vault's key is derived from. */
+  encryptionSalt: string;
+  /** base64(iv ‖ ciphertext ‖ tag) of the fixed key-check plaintext. */
+  keyCheck: string;
+}
+
 export interface CreateVaultResponse {
   id: string;
   name: string;

@@ -107,7 +107,7 @@ function connected(socket: SyncWebSocket, sessionId = "sess-1") {
   socket.connect();
   const ws = FakeWebSocket.instances.at(-1)!;
   ws.open();
-  ws.deliver({ type: "subscribe_success", sessionId });
+  ws.deliver({ type: "subscribe_success", vaultId: "v1", sessionId });
   return ws;
 }
 
@@ -125,6 +125,15 @@ afterEach(() => {
 });
 
 describe("SyncWebSocket — subscribing", () => {
+  it("bounds the device label before it goes on the wire", () => {
+    const { socket } = makeSocket({ deviceName: "x".repeat(200) });
+    socket.connect();
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+
+    expect((ws.lastSent as { deviceName: string }).deviceName).toHaveLength(100);
+  });
+
   it("states the vault, the user key and its own device label when the socket opens", () => {
     const { socket } = makeSocket();
 
@@ -153,7 +162,7 @@ describe("SyncWebSocket — subscribing", () => {
     expect(socket.getState()).toBe("connecting");
     expect(socket.getSessionId()).toBeNull();
 
-    ws.deliver({ type: "subscribe_success", sessionId: "sess-42" });
+    ws.deliver({ type: "subscribe_success", vaultId: "v1", sessionId: "sess-42" });
 
     expect(socket.getState()).toBe("connected");
     expect(socket.getSessionId()).toBe("sess-42");
@@ -234,7 +243,7 @@ describe("SyncWebSocket — messages", () => {
     });
   });
 
-  it("drops a malformed entry instead of the whole frame", () => {
+  it("drops a frame whose batch names a malformed entry", () => {
     const { socket, events } = makeSocket();
     const ws = connected(socket);
 
@@ -244,10 +253,9 @@ describe("SyncWebSocket — messages", () => {
       files: [{ fileId: "f1", versionId: "ver-1" }, { fileId: 42, versionId: "ver-2" } as never],
     });
 
-    expect(events).toContainEqual({
-      type: "files_pushed",
-      files: [{ fileId: "f1", versionId: "ver-1" }],
-    });
+    // The frame is validated whole, so one bad entry means none of it is read. The
+    // versions it named are not lost: the next pass reconciles them from the chain.
+    expect(events.some((event) => event.type === "files_pushed")).toBe(false);
   });
 
   it("reports a vault deleted elsewhere and stops", () => {
@@ -287,7 +295,7 @@ describe("SyncWebSocket — messages", () => {
     const { socket, events, states } = makeSocket();
     const ws = connected(socket);
 
-    ws.deliver({ type: "api_key_revoked" });
+    ws.deliver({ type: "api_key_revoked", vaultId: "v1" });
 
     expect(events).toContainEqual({ type: "user_key_revoked" });
     expect(states().at(-1)).toBe("disconnected");
@@ -301,7 +309,7 @@ describe("SyncWebSocket — messages", () => {
     const { socket, events, states } = makeSocket();
     const ws = connected(socket);
 
-    ws.deliver({ type: "api_key_disabled" });
+    ws.deliver({ type: "api_key_disabled", vaultId: "v1" });
 
     expect(events).toContainEqual({ type: "user_key_disabled" });
     expect(events).not.toContainEqual({ type: "user_key_revoked" });
@@ -369,7 +377,7 @@ describe("SyncWebSocket — reconnecting", () => {
     // …then a working socket.
     const ws = FakeWebSocket.instances.at(-1)!;
     ws.open();
-    ws.deliver({ type: "subscribe_success", sessionId: "s" });
+    ws.deliver({ type: "subscribe_success", vaultId: "v1", sessionId: "s" });
 
     ws.close();
     vi.advanceTimersByTime(999);

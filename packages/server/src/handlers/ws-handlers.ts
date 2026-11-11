@@ -3,8 +3,10 @@ import type { FindVaultByIdFn } from "./vault-handlers";
 import { authenticateUserKey } from "../lib/user-credentials";
 import { canAccessVault } from "../lib/vault-access";
 import { AppError } from "../lib/errors";
-import type { ApiErrorCode, HistoryLimits } from "@courier/shared";
+import { STRICT_CONTRACT } from "../lib/strict";
+import type { ApiErrorCode, HistoryLimits, WsServerMessage } from "@courier/shared";
 import { trimDeviceName } from "@courier/shared";
+import { WsServerMessageSchema } from "@courier/shared/wire";
 
 /**
  * The WebSocket side of the sync service: who is subscribed, and what a change is
@@ -130,8 +132,22 @@ function normalizeDeviceName(raw: string | undefined): string | null {
   return trimDeviceName(raw);
 }
 
-/** Send one JSON frame, ignoring a socket that is already gone. */
-function trySend(ws: WsConnection, message: unknown): void {
+/**
+ * Send one JSON frame, ignoring a socket that is already gone.
+ *
+ * In development and tests the frame is validated first: `message` is typed as the shared
+ * union, and the schema catches the one thing a union cannot — a payload the server built
+ * that no longer matches it. A production build skips the parse to keep a notification
+ * cheap (`COURIER_STRICT_CONTRACT=1` forces it back on).
+ */
+function trySend(ws: WsConnection, message: WsServerMessage): void {
+  if (STRICT_CONTRACT) {
+    const parsed = WsServerMessageSchema.safeParse(message);
+    if (!parsed.success) {
+      const details = parsed.error.issues.map((issue) => issue.message).join("; ");
+      throw new Error(`ws: invalid server frame: ${details}`);
+    }
+  }
   try {
     ws.send(JSON.stringify(message));
   } catch {
@@ -184,11 +200,14 @@ export function createWsHub(): WsHub {
   function revokeUserSessions(userId: string, reason: "deleted" | "disabled"): void {
     const sessions = userSessions.get(userId);
     if (!sessions) return;
-    const type = reason === "deleted" ? "api_key_revoked" : "api_key_disabled";
     for (const sessionId of sessions) {
       const meta = sessionMeta.get(sessionId);
       if (!meta) continue;
-      trySend(meta.ws, { type, vaultId: meta.vaultId });
+      const message: WsServerMessage =
+        reason === "deleted"
+          ? { type: "api_key_revoked", vaultId: meta.vaultId }
+          : { type: "api_key_disabled", vaultId: meta.vaultId };
+      trySend(meta.ws, message);
       removeConnection(meta.vaultId, sessionId);
     }
     userSessions.delete(userId);
@@ -219,15 +238,11 @@ export function createWsHub(): WsHub {
   function broadcastVaultSettings(vaultId: string, historyLimits: HistoryLimits): void {
     const set = vaultConnections.get(vaultId);
     if (!set) return;
-    const message = JSON.stringify({ type: "vault_settings", vaultId, historyLimits });
+    const message: WsServerMessage = { type: "vault_settings", vaultId, historyLimits };
     for (const sessionId of set) {
       const meta = sessionMeta.get(sessionId);
       if (!meta) continue;
-      try {
-        meta.ws.send(message);
-      } catch {
-        // Connection might be dead — ignore; the close handler removes it.
-      }
+      trySend(meta.ws, message);
     }
   }
 
@@ -248,7 +263,7 @@ export function createWsHub(): WsHub {
     // One frame for the request, not one per file: a phone receives the batch as the
     // server applied it instead of as hundreds of frames whose delivery the client has
     // to re-batch, and one frame costs the peer one chain pull.
-    const message = JSON.stringify({
+    const message: WsServerMessage = {
       type: "files_pushed",
       vaultId,
       files: files.map((file) => ({
@@ -256,16 +271,12 @@ export function createWsHub(): WsHub {
         versionId: file.versionId,
         deviceName: deviceName ?? null,
       })),
-    });
+    };
     for (const sessionId of set) {
       if (sessionId === excludeSessionId) continue;
       const meta = sessionMeta.get(sessionId);
       if (!meta) continue;
-      try {
-        meta.ws.send(message);
-      } catch {
-        // Connection might be dead — ignore
-      }
+      trySend(meta.ws, message);
     }
   }
 
@@ -278,7 +289,11 @@ export function createWsHub(): WsHub {
     sessionId: string,
   ): Promise<SubscribeResult> {
     const fail = (message: string, code?: ApiErrorCode): SubscribeResult => {
-      trySend(ws, { type: "subscribe_error", vaultId, message, ...(code ? { code } : {}) });
+      const frame: WsServerMessage =
+        code === undefined
+          ? { type: "subscribe_error", vaultId, message }
+          : { type: "subscribe_error", vaultId, message, code };
+      trySend(ws, frame);
       return { ok: false, reason: message };
     };
 
@@ -333,11 +348,7 @@ export function createWsHub(): WsHub {
 
 export function startHeartbeat(ws: WsConnection): Timer {
   return setInterval(() => {
-    try {
-      ws.send(JSON.stringify({ type: "ping" }));
-    } catch {
-      // Connection closed — heartbeat will be cleaned up on close
-    }
+    trySend(ws, { type: "ping" });
   }, 30_000);
 }
 

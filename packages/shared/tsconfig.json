@@ -5,7 +5,9 @@
     "rootDir": "src",
     // `DOM` for the globals every host already provides (`TextEncoder`/`TextDecoder`
     // in the wire frame, `btoa`/`atob` nowhere else) — the same lib the engine uses.
-    // Nothing here touches a DOM API: the module is pure and dependency-free.
+    // Nothing here touches a DOM API: the main entry is pure and dependency-free. The
+    // `./wire` subpath is the executable contract and imports `zod/mini`; it is a
+    // separate entry so a host that only needs the types does not bundle Zod.
     "lib": ["ES2022", "DOM"]
   },
   "include": ["src"],

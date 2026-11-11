@@ -1,5 +1,7 @@
+import { HTTP } from "@courier/shared/wire";
 import { describe, expect, it } from "vitest";
-import { healthRoutes } from "./health";
+import { toRouteTable, type RouteDeps } from "../http/contract-routes";
+import { healthHandlers } from "./health";
 import type { Logger, LogLevel } from "../lib/logger";
 import type { RouteRequest } from "../http/router";
 
@@ -30,9 +32,17 @@ function recordingLogger(level: LogLevel = "debug") {
   return { logger, records };
 }
 
+/** The health route never authenticates; these lookups exist to keep the adapter pure. */
+const noDeps: RouteDeps = {
+  findUserByKey: async () => undefined,
+  findVaultById: async () => undefined,
+  findByKey: async () => undefined,
+};
+
 /** Call the table's GET the way the listener does, with no path parameters. */
 function health(logger: Logger): Promise<Response> {
-  const handler = healthRoutes(logger)["/api/health"]!.GET!;
+  const contracts = HTTP.filter((contract) => contract.id === "health.get");
+  const handler = toRouteTable(contracts, healthHandlers, logger, noDeps)["/api/health"]!.GET!;
   return Promise.resolve(
     handler(
       Object.assign(new Request("http://localhost/api/health"), { params: {} }) as RouteRequest,
@@ -40,7 +50,7 @@ function health(logger: Logger): Promise<Response> {
   );
 }
 
-describe("healthRoutes", () => {
+describe("health route", () => {
   it("answers a constant liveness body", async () => {
     const response = await health(recordingLogger("info").logger);
     expect(response.status).toBe(200);

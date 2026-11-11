@@ -1,207 +1,249 @@
 import { describe, expect, it } from "vitest";
-import { arrayMembers, classify } from "./classify";
-import { stripComments } from "./surface";
-import { byCodeUnits } from "./surface";
-import type { Property, Surface } from "./surface";
+import { classify } from "./classify";
+import { byCodeUnits, type Surface } from "./surface";
 
 /**
- * The classifier is the gate's whole product: it decides which of the two numbers a wire
- * change moves, and its output is what an agent writes. Each rule in `docs/api.md`'s table
- * is pinned here, because a regression in it silently changes a compatibility promise.
+ * The direction-aware rules, as the table in `docs/api.md` reads them.
  *
- * The cases are the shapes a real change takes, not every possible one: a new optional
- * field, a new required one, a removal, a retype, a route, and a member of an `as const`
- * set — the last one is the one that once read as "breaking" because the surface stores a
- * constant as its printed text.
+ * Each case builds a minimal registry surface: the classifier only looks at the fields
+ * the surface serializer writes, so a route fixture is enough to pin one rule.
  */
+
+function jsonSchema(
+  properties: Record<string, unknown> = {},
+  required: string[] = [],
+): Record<string, unknown> {
+  return { type: "object", properties, required };
+}
+
+function jsonBody(
+  properties: Record<string, unknown> = {},
+  required: string[] = [],
+): Record<string, unknown> {
+  return { kind: "json", schema: jsonSchema(properties, required) };
+}
+
+function jsonResponse(
+  properties: Record<string, unknown> = {},
+  required: string[] = [],
+): Record<string, unknown> {
+  return { kind: "json", schema: jsonSchema(properties, required) };
+}
+
+function route(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    auth: "user",
+    contract: "required",
+    status: [200],
+    body: { kind: "none" },
+    response: jsonResponse({ id: { type: "string" } }, ["id"]),
+    ...overrides,
+  };
+}
+
+function frame(type: string): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: { type: { const: type, type: "string" } },
+    required: ["type"],
+  };
+}
+
+function tupleSchema(first: string): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: {
+      loadAverage: {
+        type: "array",
+        prefixItems: [{ type: first }, { type: "number" }, { type: "number" }],
+      },
+    },
+    required: ["loadAverage"],
+  };
+}
+
 function surface(overrides: Partial<Surface> = {}): Surface {
-  return { types: {}, routes: {}, constants: {}, ...overrides };
+  return {
+    unknownKeys: "strip",
+    http: {},
+    ws: {
+      upgrade: { path: "/", anyPath: true, contract: "exempt", headers: ["upgrade"] },
+      client: { oneOf: [] },
+      server: { oneOf: [] },
+    },
+    binary: { pushBody: { headerLengthBytes: 4 }, contentBatch: {}, blob: {} },
+    error: {},
+    constants: {},
+    ...overrides,
+  };
 }
 
-function text(value: string): Property {
-  return { optional: false, shape: { primitive: value } };
+function withRoute(base: Surface, key: string, value: unknown): Surface {
+  return { ...base, http: { ...(base.http as Record<string, unknown>), [key]: value } };
 }
 
-function iface(entries: Record<string, Property>): Surface["types"][string] {
-  return { kind: "interface", extends: [], properties: entries };
+function verdict(before: Surface, after: Surface): string {
+  return classify(before, after).verdict;
 }
 
-describe("classify", () => {
+function routeVerdict(before: Record<string, unknown>, after: Record<string, unknown>): string {
+  return verdict(withRoute(surface(), "POST /x", before), withRoute(surface(), "POST /x", after));
+}
+
+describe("the classifier", () => {
   it("answers unchanged when the surface is the same", () => {
-    const one = surface({
-      types: { A: iface({ a: text("string") }) },
-      routes: { "/api/x": ["GET"] },
-    });
-    const two = surface({
-      types: { A: iface({ a: text("string") }) },
-      routes: { "/api/x": ["GET"] },
-    });
-    expect(classify(one, two).verdict).toBe("unchanged");
+    expect(verdict(surface(), surface())).toBe("unchanged");
   });
 
-  it("reads a new optional field as additive", () => {
-    const result = classify(
-      surface({ types: { A: iface({ a: text("string") }) } }),
+  it("reads a new route as additive and a removed one as breaking", () => {
+    expect(verdict(surface(), withRoute(surface(), "POST /x", route()))).toBe("additive");
+    expect(verdict(withRoute(surface(), "POST /x", route()), surface())).toBe("breaking");
+  });
+
+  it("distinguishes an optional request field from a required one", () => {
+    const before = route({ body: jsonBody({ a: { type: "string" } }, ["a"]) });
+    const optional = route({
+      body: jsonBody({ a: { type: "string" }, b: { type: "string" } }, ["a"]),
+    });
+    const required = route({
+      body: jsonBody({ a: { type: "string" }, b: { type: "string" } }, ["a", "b"]),
+    });
+    expect(routeVerdict(before, optional)).toBe("additive");
+    expect(routeVerdict(before, required)).toBe("breaking");
+  });
+
+  it("reads a new response field as additive, but a removed one as breaking", () => {
+    const before = route();
+    const added = route({
+      response: jsonResponse({ id: { type: "string" }, extra: { type: "string" } }, [
+        "id",
+        "extra",
+      ]),
+    });
+    const removed = route({ response: jsonResponse({}, []) });
+    expect(routeVerdict(before, added)).toBe("additive");
+    expect(routeVerdict(before, removed)).toBe("breaking");
+  });
+
+  it("reads a narrowed request constraint as breaking and a widened one as additive", () => {
+    const wide = route({ body: jsonBody({ name: { type: "string", maxLength: 255 } }, ["name"]) });
+    const narrow = route({
+      body: jsonBody({ name: { type: "string", maxLength: 100 } }, ["name"]),
+    });
+    const wider = route({ body: jsonBody({ name: { type: "string", maxLength: 300 } }, ["name"]) });
+    expect(routeVerdict(wide, narrow)).toBe("breaking");
+    expect(routeVerdict(wide, wider)).toBe("additive");
+  });
+
+  it("reads a retyped tuple member as breaking", () => {
+    const before = route({ response: { kind: "json", schema: tupleSchema("number") } });
+    const after = route({ response: { kind: "json", schema: tupleSchema("string") } });
+    expect(routeVerdict(before, after)).toBe("breaking");
+  });
+
+  it("reads a changed bytes-body limit as breaking", () => {
+    const chunk = route({ body: { kind: "bytes", limit: "chunk" } });
+    const other = route({ body: { kind: "bytes", limit: "other" } });
+    expect(routeVerdict(chunk, other)).toBe("breaking");
+  });
+
+  it("fails closed on a surface field the classifier does not model", () => {
+    const before = withRoute(surface(), "POST /x", route());
+    const after = withRoute(surface(), "POST /x", route({ extra: true }));
+    expect(verdict(before, after)).toBe("breaking");
+  });
+
+  it("reads a changed unknown-key rule as breaking", () => {
+    const after = { ...surface(), unknownKeys: "reject" } as unknown as Surface;
+    expect(verdict(surface(), after)).toBe("breaking");
+  });
+
+  it("reads a removed status as breaking and an added one as additive", () => {
+    const two = route({ status: [200, 206] });
+    const one = route({ status: [200] });
+    expect(routeVerdict(two, one)).toBe("breaking");
+    expect(routeVerdict(one, two)).toBe("additive");
+  });
+
+  it("reads a tightened auth requirement as breaking", () => {
+    expect(routeVerdict(route({ auth: "none" }), route({ auth: "user" }))).toBe("breaking");
+  });
+
+  it("reads a removed server frame as degrading and a removed client frame as breaking", () => {
+    const withServer = surface({
+      ws: {
+        upgrade: { path: "/", anyPath: true, contract: "exempt", headers: ["upgrade"] },
+        client: { oneOf: [] },
+        server: { oneOf: [frame("ping")] },
+      },
+    });
+    const withoutServer = surface({
+      ws: {
+        upgrade: { path: "/", anyPath: true, contract: "exempt", headers: ["upgrade"] },
+        client: { oneOf: [] },
+        server: { oneOf: [] },
+      },
+    });
+    expect(verdict(withServer, withoutServer)).toBe("degrading");
+
+    const withClient = surface({
+      ws: {
+        upgrade: { path: "/", anyPath: true, contract: "exempt", headers: ["upgrade"] },
+        client: { oneOf: [frame("pong")] },
+        server: { oneOf: [] },
+      },
+    });
+    expect(verdict(withClient, withoutServer)).toBe("breaking");
+  });
+
+  it("reads any binary framing change as breaking", () => {
+    const changed = surface({
+      binary: { pushBody: { headerLengthBytes: 8 }, contentBatch: {}, blob: {} },
+    });
+    expect(verdict(surface(), changed)).toBe("breaking");
+  });
+
+  it("treats a constant's array as a set", () => {
+    const two = surface({ constants: { API_ERROR_CODES: ["A", "B"] } });
+    const three = surface({ constants: { API_ERROR_CODES: ["A", "B", "C"] } });
+    expect(verdict(two, three)).toBe("additive");
+    expect(verdict(three, two)).toBe("breaking");
+  });
+
+  it("orders by code unit, never by locale", () => {
+    expect(byCodeUnits("Z", "a")).toBeLessThan(0);
+  });
+
+  it("lets a degrading change outrank an additive one, but not a breaking one", () => {
+    const before = withRoute(
       surface({
-        types: {
-          A: iface({ a: text("string"), b: { optional: true, shape: { primitive: "string" } } }),
+        ws: {
+          upgrade: { path: "/", anyPath: true, contract: "exempt", headers: ["upgrade"] },
+          client: { oneOf: [] },
+          server: { oneOf: [frame("ping")] },
         },
       }),
+      "POST /x",
+      route(),
     );
-    expect(result.verdict).toBe("additive");
-  });
-
-  it("reads a new required field as breaking", () => {
-    // An older client cannot send it, and the surface does not say whether this is a request
-    // or a response, so the conservative reading is the one that keeps the two in step.
-    const result = classify(
-      surface({ types: { A: iface({ a: text("string") }) } }),
-      surface({ types: { A: iface({ a: text("string"), b: text("string") }) } }),
+    const after = withRoute(
+      withRoute(
+        surface({
+          ws: {
+            upgrade: { path: "/", anyPath: true, contract: "exempt", headers: ["upgrade"] },
+            client: { oneOf: [] },
+            server: { oneOf: [] },
+          },
+        }),
+        "POST /x",
+        route(),
+      ),
+      "POST /y",
+      route(),
     );
-    expect(result.verdict).toBe("breaking");
-  });
+    expect(verdict(before, after)).toBe("degrading");
 
-  it("reads a removed field as breaking", () => {
-    const result = classify(
-      surface({ types: { A: iface({ a: text("string"), b: text("string") }) } }),
-      surface({ types: { A: iface({ a: text("string") }) } }),
-    );
-    expect(result.verdict).toBe("breaking");
-  });
-
-  it("reads a retyped field as breaking", () => {
-    const result = classify(
-      surface({ types: { A: iface({ a: text("string") }) } }),
-      surface({ types: { A: iface({ a: text("number") }) } }),
-    );
-    expect(result.verdict).toBe("breaking");
-  });
-
-  it("reads optional -> required as breaking and the reverse as additive", () => {
-    const optional = surface({
-      types: { A: iface({ a: { optional: true, shape: { primitive: "string" } } }) },
-    });
-    const required = surface({ types: { A: iface({ a: text("string") }) } });
-    expect(classify(optional, required).verdict).toBe("breaking");
-    expect(classify(required, optional).verdict).toBe("additive");
-  });
-
-  it("reads an added route as additive and a removed one as breaking", () => {
-    expect(classify(surface(), surface({ routes: { "/api/x": ["GET"] } })).verdict).toBe(
-      "additive",
-    );
-    expect(classify(surface({ routes: { "/api/x": ["GET"] } }), surface()).verdict).toBe(
-      "breaking",
-    );
-    expect(
-      classify(
-        surface({ routes: { "/api/x": ["GET", "POST"] } }),
-        surface({ routes: { "/api/x": ["GET"] } }),
-      ).verdict,
-    ).toBe("breaking");
-  });
-
-  it("reads an identical-shape type rename as additive", () => {
-    const result = classify(
-      surface({ types: { Old: iface({ a: text("string") }) } }),
-      surface({ types: { New: iface({ a: text("string") }) } }),
-    );
-    expect(result.verdict).toBe("additive");
-  });
-
-  it("reads a member added to an `as const` set as additive", () => {
-    // The case that matters: a new error code is a string in the surface, not a shape, so
-    // comparing the text would have raised the client floor for something no old client can
-    // notice.
-    const result = classify(
-      surface({ constants: { API_ERROR_CODES: '["A", "B"] as const' } }),
-      surface({ constants: { API_ERROR_CODES: '["A", "B", "C"] as const' } }),
-    );
-    expect(result.verdict).toBe("additive");
-    expect(result.changes[0]?.detail).toContain("C");
-  });
-
-  it("reads a member removed from an `as const` set as breaking", () => {
-    const result = classify(
-      surface({ constants: { API_ERROR_CODES: '["A", "B"] as const' } }),
-      surface({ constants: { API_ERROR_CODES: '["A"] as const' } }),
-    );
-    expect(result.verdict).toBe("breaking");
-  });
-
-  it("reads a reformatted set with the same members as unchanged", () => {
-    const result = classify(
-      surface({ constants: { API_ERROR_CODES: '["A", "B"] as const' } }),
-      surface({ constants: { API_ERROR_CODES: '["B", "A"] as const' } }),
-    );
-    expect(result.verdict).toBe("unchanged");
-  });
-
-  it("reads a changed scalar constant as breaking", () => {
-    const result = classify(
-      surface({ constants: { CHUNK_PLAINTEXT_BYTES: "4 * 1024 * 1024" } }),
-      surface({ constants: { CHUNK_PLAINTEXT_BYTES: "8 * 1024 * 1024" } }),
-    );
-    expect(result.verdict).toBe("breaking");
-  });
-});
-
-describe("byCodeUnits", () => {
-  it("orders by code unit, not by the machine's locale", () => {
-    // The surface is committed and compared on three CI platforms, so its order has to be a
-    // property of the bytes. `localeCompare` is not: ICU puts "a" before "Z" (and orders
-    // punctuation differently per locale), which made the same union come out in two orders
-    // on two runners and read as "a member was removed and another added".
-    expect(byCodeUnits("Z", "a")).toBeLessThan(0);
-    expect(byCodeUnits("a", "a")).toBe(0);
-    expect(byCodeUnits("b", "a")).toBeGreaterThan(0);
-  });
-
-  it("cannot be swapped back to localeCompare without failing", () => {
-    // The property the gate depends on, stated as one assertion: code-unit order differs
-    // from collation for these two, so a regression to `localeCompare` is visible here.
-    const shapes = [{ literal: "a" as const }, { literal: "Z" as const }];
-    const sorted = shapes.toSorted((left, right) =>
-      byCodeUnits(JSON.stringify(left), JSON.stringify(right)),
-    );
-    expect(sorted[0]!.literal).toBe("Z");
-    expect(
-      shapes.toSorted((left, right) => left.literal.localeCompare(right.literal))[0]!.literal,
-    ).toBe("a");
-  });
-});
-
-describe("arrayMembers", () => {
-  it("reads a set of literals", () => {
-    expect(arrayMembers('["a", "b", "c"] as const')).toEqual(['"a"', '"b"', '"c"']);
-    expect(arrayMembers("[1, 2] as const")).toEqual(["1", "2"]);
-  });
-
-  it("ignores comments inside the set", () => {
-    // The surface stores the printed source, and a comment explaining a code is exactly
-    // where one lands. Left in, the set became unreadable and fell back to a text compare.
-    expect(arrayMembers('[\n  "A", // why A exists\n  "B",\n] as const')).toEqual(['"A"', '"B"']);
-    expect(arrayMembers('[/* the codes */ "A", "B"] as const')).toEqual(['"A"', '"B"']);
-  });
-
-  it("answers null for anything that is not a set of literals", () => {
-    expect(arrayMembers("4 * 1024 * 1024")).toBeNull();
-    expect(arrayMembers("[SOME_REFERENCE] as const")).toBeNull();
-    expect(arrayMembers('["a"]')).toBeNull();
-  });
-});
-
-describe("stripComments", () => {
-  it("drops a comment inside an `as const` set", () => {
-    expect(stripComments('[\n  "A", // why A exists\n  "B",\n] as const')).toBe(
-      '[\n  "A", \n  "B",\n] as const',
-    );
-  });
-
-  it("leaves a value whose text merely contains // alone", () => {
-    // A URL in a string literal is not a comment. Stripping it would make two different
-    // constants compare equal — the one thing the gate must never do.
-    expect(stripComments('"https://a.example/x"')).toBe('"https://a.example/x"');
-    expect(stripComments("4 * 1024 * 1024")).toBe("4 * 1024 * 1024");
+    const breaking = withRoute(before, "POST /x", route({ status: [] }));
+    expect(verdict(before, breaking)).toBe("breaking");
   });
 });

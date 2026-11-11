@@ -45,8 +45,13 @@
  *
  * A client states it on every request (`X-Courier-Contract`), a server publishes it on
  * `/api/health`. Mismatched peers are refused, and the refusal names the side to upgrade.
+ *
+ * Generation 4 is the first surface serialized from the runtime registry. The wire did
+ * not change meaning; the gate now sees request constraints, status codes, auth and the
+ * WebSocket frames the declaration scan could not. `MIN_CLIENT_CONTRACT` stays at 1
+ * because no older client is misread.
  */
-export const CONTRACT_GENERATION = 3;
+export const CONTRACT_GENERATION = 4;
 
 /**
  * The oldest client generation this server still serves, published on `/api/health`.

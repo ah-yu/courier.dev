@@ -212,8 +212,8 @@ export function buildPushBody(
   // stated once rather than repeated per file. It is display text, so it must never be
   // able to fail a batch: the server's push schema rejects anything over
   // `MAX_DEVICE_NAME_LENGTH` **for the whole request** (a 422 on every push, i.e. a
-  // device that silently never syncs), while its subscribe path truncates the same
-  // string — so both ends apply the one rule in `trimDeviceName`.
+  // device that silently never syncs). The client applies `trimDeviceName` before the
+  // subscribe frame, and the schema rejects a longer label.
   const deviceName = trimDeviceName(options.deviceName);
   const headerBytes = new TextEncoder().encode(
     JSON.stringify(deviceName === null ? { files: header } : { deviceName, files: header }),
