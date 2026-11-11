@@ -11,6 +11,7 @@ import type {
 function version(fileId: string, size: number, overrides: Partial<JobVersion> = {}): JobVersion {
   return {
     fileId,
+    versionId: `v-${fileId}-${size}`,
     plainPath: `${fileId}.md`,
     chunkCount: 0,
     reusesStoredContent: true,
@@ -178,11 +179,14 @@ describe("LocalEventJob — settlement", () => {
 describe("LocalEventJob — the tombstone ledger", () => {
   it("finds a prepared tombstone by content hash, and takes it back", async () => {
     const { job, pushed } = makeJob();
-    job.noteTombstone("a.md", version("a", 0, { content: null }), "h1");
-    expect(job.deletedFileIdForHash("h1")).toBe("a");
+    const tombstone = version("a", 0, { content: null });
+    job.noteTombstone("a.md", tombstone, "h1");
+    // The version travels with the match: a refused create half compares it with the fresh
+    // head to tell this device's own tombstone from a peer's deletion.
+    expect(job.deletedForHash("h1")).toEqual({ fileId: "a", versionId: tombstone.versionId });
     expect(job.tombstoneAt("a.md")).toBe("a");
     job.takeBackTombstone("a");
-    expect(job.deletedFileIdForHash("h1")).toBeNull();
+    expect(job.deletedForHash("h1")).toBeNull();
     expect(job.tombstoneAt("a.md")).toBeNull();
     await job.drainTombstones();
     await job.complete();

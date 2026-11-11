@@ -46,6 +46,12 @@ export function classifyPushResult(result: BatchPushResult | undefined): PushRes
  */
 export interface BatchVersion {
   readonly fileId: string;
+  /**
+   * The version this push creates. A batch never reads it; the event job's tombstone ledger
+   * does, so a refused create half can recognise this device's own tombstone on the fresh
+   * chain (`SyncEngine.settleRefusedMove`).
+   */
+  readonly versionId: string;
   readonly plainPath: string;
   /** How many chunks the payload travels in, or `0` for a single request (see `chunkCount`). */
   readonly chunkCount: number;

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  adoptsOwnTombstone,
   decideFile,
   decideInputFrom,
   decideNewLocalFile,
@@ -671,5 +672,57 @@ describe("decideRefusedPush", () => {
 
   it("reports the second refusal instead of looping", () => {
     expect(decideRefusedPush(1)).toBe("report");
+  });
+});
+describe("adoptsOwnTombstone", () => {
+  it("adopts the tombstone version the create half captured", () => {
+    expect(
+      adoptsOwnTombstone({
+        headAction: "delete",
+        headVersionId: "v1",
+        captured: "v1",
+        minted: ["v1"],
+      }),
+    ).toBe(true);
+  });
+
+  it("adopts a newer tombstone this chain minted after the capture", () => {
+    // The record can be replaced while the create half is deciding, so the head it is
+    // refused against is not always the version it carries.
+    expect(
+      adoptsOwnTombstone({
+        headAction: "delete",
+        headVersionId: "v2",
+        captured: "v1",
+        minted: ["v1", "v2"],
+      }),
+    ).toBe(true);
+  });
+
+  it("never adopts a peer's tombstone, nor a live head", () => {
+    expect(
+      adoptsOwnTombstone({
+        headAction: "delete",
+        headVersionId: "peer",
+        captured: "v1",
+        minted: ["v1"],
+      }),
+    ).toBe(false);
+    expect(
+      adoptsOwnTombstone({
+        headAction: "modify",
+        headVersionId: "v1",
+        captured: "v1",
+        minted: ["v1"],
+      }),
+    ).toBe(false);
+    expect(
+      adoptsOwnTombstone({
+        headAction: undefined,
+        headVersionId: undefined,
+        captured: null,
+        minted: [],
+      }),
+    ).toBe(false);
   });
 });

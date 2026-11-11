@@ -165,8 +165,10 @@ describe("ConflictResolver — vault paths", () => {
 
     await expect(h.resolver.resolve("file-1", "notes/plan.md", head, false)).resolves.toBe(true);
 
-    // Nothing local exists to keep, so there is no read and no copy — the file comes back.
-    expect(h.adapter.readFile).not.toHaveBeenCalled();
+    // Nothing local exists to keep, so there is no copy — the file comes back. The read is
+    // how the resolver confirms that itself instead of trusting the caller's `localExists`
+    // hint, which can be one await stale (a note recreated in between is the only copy).
+    expect(h.adapter.readFile).toHaveBeenCalledTimes(1);
     expect(h.adapter.statFile).not.toHaveBeenCalled();
     expect(h.adapter.writeFile).not.toHaveBeenCalled();
     expect(h.applyRemote).toHaveBeenCalledWith("file-1", "notes/plan.md", head, null, null);

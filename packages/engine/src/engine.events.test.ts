@@ -1678,3 +1678,554 @@ describe("SyncEngine — a batch of local events", () => {
     await expectConsistent(engine, adapter, api);
   });
 });
+
+/**
+ * A move the host reports as **two separate event jobs**.
+ *
+ * A bulk write is split by the host: the first events of the window keep their immediate
+ * per-path job and the rest travel as one batch (`LOCAL_EVENT_BURST_SIZE`). The two halves
+ * of one move are two different paths, so they can be decided by two jobs at the same
+ * time — and both decide from the head the chain had before either landed.
+ *
+ * The delete half usually wins, and the create half's `rename` is then refused
+ * `stale_base`. That refusal is a decision, not a failure (invariant 4): the chain is one
+ * this device deleted **at its own sync point**, so deciding again from the fresh chain is
+ * a recreate — a `restore` at the new path. Reporting it instead leaves the file unsent
+ * until a pass runs, and every peer holds the tombstone in the meantime.
+ */
+describe("SyncEngine — a move split across two event jobs", () => {
+  it("re-decides the create half when the delete half lands first", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    const bytes = encoder.encode("moved bytes");
+    adapter.files.set("old.md", bytes);
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("old.md")!;
+
+    // The vault renames the file; the host reports the two halves to two jobs.
+    adapter.files.delete("old.md");
+    adapter.files.set("new.md", bytes);
+
+    // Order the jobs the way the race does. The tombstone is decided (its push is held on
+    // the wire) while the create is decided and prepared from the same head; only then
+    // does the tombstone land, so the create's base is stale by the time it is sent.
+    let tombstoneDecided!: () => void;
+    const tombstoneOnTheWire = new Promise<void>((resolve) => (tombstoneDecided = resolve));
+    let createPrepared!: () => void;
+    const createOnTheWire = new Promise<void>((resolve) => (createPrepared = resolve));
+    let releaseTombstone!: () => void;
+    const tombstoneMayLand = new Promise<void>((resolve) => (releaseTombstone = resolve));
+    let tombstoneLanded!: () => void;
+    const tombstoneIsHead = new Promise<void>((resolve) => (tombstoneLanded = resolve));
+
+    api.onPush = async (files) => {
+      const action = files[0]?.action;
+      if (action === "delete") {
+        tombstoneDecided();
+        await tombstoneMayLand;
+        return;
+      }
+      if (action === "rename") {
+        createPrepared();
+        await tombstoneIsHead;
+      }
+    };
+
+    const remove = engine.handleLocalDelete("old.md");
+    await tombstoneOnTheWire;
+    const create = engine.handleLocalChange("new.md");
+    await createOnTheWire;
+
+    releaseTombstone();
+    await remove;
+    tombstoneLanded();
+    await create;
+    api.onPush = null;
+
+    // The `rename` was refused against the tombstone; the event decided again and pushed
+    // the restore that makes the chain live at the new path.
+    expect(api.chains.get(fileId)!.map((version) => version.action)).toEqual([
+      "create",
+      "delete",
+      "restore",
+    ]);
+    expect(engine.fileIdForPath("new.md")).toBe(fileId);
+    expect(engine.fileIdForPath("old.md")).toBeNull();
+    expect(new TextDecoder().decode(adapter.files.get("new.md"))).toBe("moved bytes");
+    await expectConsistent(engine, adapter, api);
+  });
+
+  it("restores the file when the delete half's own apply has not run yet", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    const bytes = encoder.encode("moved bytes");
+    adapter.files.set("old.md", bytes);
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("old.md")!;
+
+    adapter.files.delete("old.md");
+    adapter.files.set("new.md", bytes);
+
+    // The tombstone reaches the server but its **response** is held, so the delete job's
+    // `applyPushedVersion` has not run when the create's `rename` is refused: the state is
+    // still the pre-delete sync point. The refusal must not read this device's own
+    // tombstone as a peer's deletion — that applies the deletion and destroys the bytes
+    // the move carried to the new path, which exist nowhere else.
+    const realPush = api.push.bind(api);
+    let releaseTombstone!: () => void;
+    const tombstoneMayAnswer = new Promise<void>((resolve) => (releaseTombstone = resolve));
+    let tombstoneInserted!: () => void;
+    const tombstoneLanded = new Promise<void>((resolve) => (tombstoneInserted = resolve));
+    api.push = async (vaultId, files) => {
+      const response = await realPush(vaultId, files);
+      if (files[0]?.action === "delete") {
+        tombstoneInserted();
+        await tombstoneMayAnswer;
+      }
+      return response;
+    };
+
+    const remove = engine.handleLocalDelete("old.md");
+    await tombstoneLanded;
+    // Settled while the delete's apply is still pending, out of order with it.
+    await engine.handleLocalChange("new.md");
+
+    expect(adapter.files.has("new.md"), "the moved bytes are still on disk").toBe(true);
+    expect(api.chains.get(fileId)!.map((version) => version.action)).toEqual([
+      "create",
+      "delete",
+      "restore",
+    ]);
+
+    // The held answer arrives last. The tombstone was decided from a head the chain has
+    // long passed, so it must not become the sync point again and re-delete the file.
+    releaseTombstone();
+    await remove;
+    api.push = realPush;
+    expect(adapter.files.has("new.md")).toBe(true);
+    expect(engine.fileIdForPath("new.md")).toBe(fileId);
+    expect(syncPointOf(engine, fileId)).toBe(api.chains.get(fileId)!.at(-1)!.versionId);
+    await expectConsistent(engine, adapter, api);
+  });
+
+  it("settles a batch's refused move the same way while the delete half is in flight", async () => {
+    // The halves can also land in different **jobs of different kinds**: the delete travels
+    // on its own event and the create in a burst (or the other way round). The batch's
+    // `rename` refusal reads the same state, so it needs the same settlement.
+    const { engine, adapter, api } = await makeEngine();
+    const bytes = encoder.encode("moved bytes");
+    adapter.files.set("old.md", bytes);
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("old.md")!;
+
+    adapter.files.delete("old.md");
+    adapter.files.set("new.md", bytes);
+
+    const realPush = api.push.bind(api);
+    let releaseTombstone!: () => void;
+    const tombstoneMayAnswer = new Promise<void>((resolve) => (releaseTombstone = resolve));
+    let tombstoneInserted!: () => void;
+    const tombstoneLanded = new Promise<void>((resolve) => (tombstoneInserted = resolve));
+    api.push = async (vaultId, files) => {
+      const response = await realPush(vaultId, files);
+      if (files[0]?.action === "delete") {
+        tombstoneInserted();
+        await tombstoneMayAnswer;
+      }
+      return response;
+    };
+
+    const remove = engine.handleLocalDelete("old.md");
+    await tombstoneLanded;
+    await engine.handleLocalEvents({ changed: ["new.md"] });
+
+    expect(adapter.files.has("new.md"), "the moved bytes are still on disk").toBe(true);
+    expect(api.chains.get(fileId)!.map((version) => version.action)).toEqual([
+      "create",
+      "delete",
+      "restore",
+    ]);
+
+    releaseTombstone();
+    await remove;
+    api.push = realPush;
+    expect(adapter.files.has("new.md")).toBe(true);
+    expect(engine.fileIdForPath("new.md")).toBe(fileId);
+    await expectConsistent(engine, adapter, api);
+  });
+
+  it("lets a peer's tombstone land instead of resurrecting the note", async () => {
+    // The same window with a **peer's** deletion in the head: the create half took back a
+    // delete this device decided, but the chain's head is someone else's tombstone. A
+    // remote deletion lands (invariant 3) — the move must not push the note back.
+    const { engine, adapter, api } = await makeEngine();
+    const bytes = encoder.encode("moved bytes");
+    adapter.files.set("old.md", bytes);
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("old.md")!;
+
+    adapter.files.delete("old.md");
+    adapter.files.set("new.md", bytes);
+
+    const realPush = api.push.bind(api);
+    let releaseTombstone!: () => void;
+    const tombstoneMayAnswer = new Promise<void>((resolve) => (releaseTombstone = resolve));
+    let tombstoneInserted!: () => void;
+    const tombstoneLanded = new Promise<void>((resolve) => (tombstoneInserted = resolve));
+    api.push = async (vaultId, files) => {
+      const response = await realPush(vaultId, files);
+      if (files[0]?.action === "delete") {
+        tombstoneInserted();
+        await tombstoneMayAnswer;
+      }
+      return response;
+    };
+
+    const remove = engine.handleLocalDelete("old.md");
+    await tombstoneLanded;
+    // A peer deletes the same chain: the head the create's `rename` is refused against is
+    // that tombstone, not the one this device prepared.
+    await api.remoteDelete(fileId);
+    await engine.handleLocalChange("new.md");
+
+    expect(adapter.files.has("new.md"), "the peer's deletion wins").toBe(false);
+    expect(api.chains.get(fileId)!.map((version) => version.action)).toEqual([
+      "create",
+      "delete",
+      "delete",
+    ]);
+
+    releaseTombstone();
+    await remove;
+    api.push = realPush;
+    await expectConsistent(engine, adapter, api);
+  });
+
+  it("restores the file when a pass published the tombstone and its apply is pending", async () => {
+    // The delete half can be a **pass's** tombstone (the file was removed while nothing
+    // watched), whose record `prepareTombstone` writes; the create half then arrives as an
+    // event. Its version has to be in that record from the start, or the refusal cannot
+    // tell our own tombstone from a peer's.
+    const { engine, adapter, api } = await makeEngine();
+    const bytes = encoder.encode("moved bytes");
+    adapter.files.set("old.md", bytes);
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("old.md")!;
+
+    adapter.files.delete("old.md");
+
+    const realPush = api.push.bind(api);
+    let releaseTombstone!: () => void;
+    const tombstoneMayAnswer = new Promise<void>((resolve) => (releaseTombstone = resolve));
+    let tombstoneInserted!: () => void;
+    const tombstoneLanded = new Promise<void>((resolve) => (tombstoneInserted = resolve));
+    api.push = async (vaultId, files) => {
+      const response = await realPush(vaultId, files);
+      if (files[0]?.action === "delete") {
+        tombstoneInserted();
+        await tombstoneMayAnswer;
+      }
+      return response;
+    };
+
+    // The pass lists the vault before the file reappears, so its tombstone is decided on
+    // its own and `new.md` is nobody's claim yet.
+    const pass = engine.initialSync();
+    await tombstoneLanded;
+    adapter.files.set("new.md", bytes);
+    // The create half, decided while the pass's tombstone answer is still outstanding.
+    await engine.handleLocalChange("new.md");
+
+    expect(adapter.files.has("new.md"), "the moved bytes are still on disk").toBe(true);
+    expect(api.chains.get(fileId)!.map((version) => version.action)).toEqual([
+      "create",
+      "delete",
+      "restore",
+    ]);
+
+    releaseTombstone();
+    await pass;
+    api.push = realPush;
+    expect(engine.fileIdForPath("new.md")).toBe(fileId);
+    await expectConsistent(engine, adapter, api);
+  });
+
+  it("reuses the version a lost tombstone answer published, so its retry keeps the record valid", async () => {
+    // The delete push is stored, but its answer never arrives: the tombstone is the server's
+    // head while this device's state is still the pre-delete point. A pass then re-prepares
+    // the same decision. Inventing a new version there leaves the delete record naming one
+    // the head is not, so a move's create half can no longer recognise its own tombstone.
+    const { engine, adapter, api } = await makeEngine();
+    const bytes = encoder.encode("moved bytes");
+    adapter.files.set("old.md", bytes);
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("old.md")!;
+
+    const realPush = api.push.bind(api);
+    const realPull = api.pull.bind(api);
+    const realIndex = api.getVaultSyncIndex.bind(api);
+    const deleteVersions: string[] = [];
+    api.push = async (vaultId, files) => {
+      if (files[0]?.action === "delete") {
+        deleteVersions.push(files[0].versionId);
+        if (deleteVersions.length === 1) {
+          // Stored on the server; the answer is lost on the way back.
+          await realPush(vaultId, files);
+          throw new Error("answer lost");
+        }
+      }
+      return await realPush(vaultId, files);
+    };
+
+    adapter.files.delete("old.md");
+    await expect(engine.handleLocalDelete("old.md")).rejects.toThrow("answer lost");
+
+    // A pass whose chain view predates the tombstone decides the same deletion again.
+    api.pull = async (vaultId, fileIds) => {
+      const response = await realPull(vaultId, fileIds);
+      for (const file of response.files) {
+        if (file.fileId === fileId)
+          file.versions = file.versions.filter((v) => v.action !== "delete");
+      }
+      return response;
+    };
+    api.getVaultSyncIndex = async (vaultId) => {
+      const response = await realIndex(vaultId);
+      for (const file of response.files) {
+        if (file.fileId !== fileId) continue;
+        const live = (api.chains.get(fileId) ?? []).filter((v) => v.action !== "delete").at(-1);
+        if (live) file.head = live;
+      }
+      return response;
+    };
+    await engine.initialSync();
+    api.push = realPush;
+    api.pull = realPull;
+    api.getVaultSyncIndex = realIndex;
+
+    // The retry is the same decision, so it must publish the same version: the lost answer
+    // may have stored it, and the record may not name a version the head is not.
+    expect(deleteVersions).toHaveLength(2);
+    expect(deleteVersions[1]).toBe(deleteVersions[0]);
+
+    // The move's create half then has a record that names this device's head, so the refusal
+    // settles as a recreate instead of applying a deletion to the only copy of the bytes.
+    adapter.files.set("new.md", bytes);
+    await engine.handleLocalChange("new.md");
+    expect(api.chains.get(fileId)!.map((version) => version.action)).toEqual([
+      "create",
+      "delete",
+      "restore",
+    ]);
+    expect(adapter.files.has("new.md"), "the moved bytes are still on disk").toBe(true);
+    expect(engine.fileIdForPath("new.md")).toBe(fileId);
+    await expectConsistent(engine, adapter, api);
+  });
+
+  it("adopts a newer own tombstone the create half never saw", async () => {
+    // The first tombstone applies while the move's create half is deciding, so the create
+    // half captures **that** version; a second delete (the host's delete sequence) then
+    // publishes a newer tombstone on the applied one, and the refusal names the newer
+    // version. Both are this device's, so the settlement must still adopt the head.
+    const { engine, adapter, api } = await makeEngine();
+    const bytes = encoder.encode("moved bytes");
+    adapter.files.set("old.md", bytes);
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("old.md")!;
+
+    const realPush = api.push.bind(api);
+    let deletePushes = 0;
+    let releaseFirstAnswer!: () => void;
+    const firstMayAnswer = new Promise<void>((resolve) => (releaseFirstAnswer = resolve));
+    let firstStored!: () => void;
+    const firstOnTheWire = new Promise<void>((resolve) => (firstStored = resolve));
+    let releaseSecondAnswer!: () => void;
+    const secondMayAnswer = new Promise<void>((resolve) => (releaseSecondAnswer = resolve));
+    let secondStored!: () => void;
+    const secondOnTheWire = new Promise<void>((resolve) => (secondStored = resolve));
+    let releaseRename!: () => void;
+    const renameMayGo = new Promise<void>((resolve) => (releaseRename = resolve));
+    let renameStarted!: () => void;
+    const renameOnTheWire = new Promise<void>((resolve) => (renameStarted = resolve));
+    api.push = async (vaultId, files) => {
+      if (files[0]?.action === "delete") {
+        deletePushes += 1;
+        const response = await realPush(vaultId, files);
+        if (deletePushes === 1) {
+          firstStored();
+          await firstMayAnswer;
+        } else {
+          secondStored();
+          await secondMayAnswer;
+        }
+        return response;
+      }
+      if (files[0]?.action === "rename") {
+        renameStarted();
+        await renameMayGo;
+      }
+      return await realPush(vaultId, files);
+    };
+
+    adapter.files.delete("old.md");
+    const firstDelete = engine.handleLocalDelete("old.md");
+    await firstOnTheWire;
+
+    // The create half of the move captures the first tombstone's version.
+    adapter.files.set("new.md", bytes);
+    const create = engine.handleLocalChange("new.md");
+    await renameOnTheWire;
+
+    // The first tombstone applies; the second delete then publishes a newer one on it.
+    releaseFirstAnswer();
+    await firstDelete;
+    const secondDelete = engine.handleLocalDelete("old.md");
+    await secondOnTheWire;
+
+    releaseRename();
+    await create;
+
+    expect(adapter.files.has("new.md"), "the moved bytes are still on disk").toBe(true);
+    expect(api.chains.get(fileId)!.map((version) => version.action)).toEqual([
+      "create",
+      "delete",
+      "delete",
+      "restore",
+    ]);
+
+    releaseSecondAnswer();
+    await secondDelete;
+    api.push = realPush;
+    expect(engine.fileIdForPath("new.md")).toBe(fileId);
+    await expectConsistent(engine, adapter, api);
+  });
+
+  it("applies a peer's tombstone the delete half met, instead of moving the note back", async () => {
+    // The delete half's push is refused against a tombstone a peer published inside the
+    // same window. That tombstone must not be adopted as this device's own deletion: the
+    // create half would then move the surviving copy back over the peer's delete, which is
+    // exactly what invariant 3 forbids.
+    const { engine, adapter, api } = await makeEngine();
+    const bytes = encoder.encode("moved bytes");
+    adapter.files.set("old.md", bytes);
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("old.md")!;
+
+    adapter.files.delete("old.md");
+    adapter.files.set("new.md", bytes);
+    api.onPush = async (files) => {
+      if (files[0]?.action === "delete") await api.remoteDelete(fileId);
+    };
+    await engine.handleLocalDelete("old.md");
+    api.onPush = null;
+    expect(api.chains.get(fileId)!.map((version) => version.action)).toEqual(["create", "delete"]);
+
+    await engine.handleLocalChange("new.md");
+
+    expect(adapter.files.has("new.md"), "the peer's deletion lands").toBe(false);
+    expect(api.chains.get(fileId)!.map((version) => version.action)).toEqual(["create", "delete"]);
+    await expectConsistent(engine, adapter, api);
+  });
+
+  it("parks a note recreated while the tombstone was on the wire", async () => {
+    // A peer's tombstone refuses this device's delete, and the user recreated the note in
+    // between (an undo, an editor writing it back). Settling the refusal with `localExists:
+    // false` deletes the recreated bytes with the peer's head and leaves no copy; the disk
+    // has to be asked first, so the local copy is parked as a conflict.
+    const { engine, adapter, api } = await makeEngine();
+    const bytes = encoder.encode("moved bytes");
+    adapter.files.set("old.md", bytes);
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("old.md")!;
+
+    // The peer's tombstone is the head before this device's delete is decided.
+    await api.remoteDelete(fileId);
+    adapter.files.delete("old.md");
+
+    const realPush = api.push.bind(api);
+    let refused!: () => void;
+    const refusalOnTheWire = new Promise<void>((resolve) => (refused = resolve));
+    let releaseAnswer!: () => void;
+    const answerMayGo = new Promise<void>((resolve) => (releaseAnswer = resolve));
+    api.push = async (vaultId, files) => {
+      if (files[0]?.action === "delete") {
+        const response = await realPush(vaultId, files);
+        refused();
+        await answerMayGo;
+        return response;
+      }
+      return await realPush(vaultId, files);
+    };
+
+    const remove = engine.handleLocalDelete("old.md");
+    await refusalOnTheWire;
+    adapter.files.set("old.md", encoder.encode("recreated bytes"));
+    releaseAnswer();
+    await remove;
+    api.push = realPush;
+
+    expect(adapter.files.has("old.md"), "the peer's deletion lands").toBe(false);
+    expect(textOf(adapter, conflictFilePath("old.md")), "the recreate is parked").toBe(
+      "recreated bytes",
+    );
+    await expectConsistent(engine, adapter, api);
+  });
+
+  it("parks a note that appears between the settlement's stat and its own read", async () => {
+    // The settlement stats the path and answers "gone", and the write lands immediately
+    // after: the resolver must not trust that hint, or it applies the peer's deletion to the
+    // only copy without parking it.
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("old.md", encoder.encode("moved bytes"));
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("old.md")!;
+
+    await api.remoteDelete(fileId);
+    adapter.files.delete("old.md");
+
+    const realStat = adapter.statFile.bind(adapter);
+    let armed = true;
+    adapter.statFile = async (path: string) => {
+      const stamp = await realStat(path);
+      if (path === "old.md" && armed) {
+        armed = false;
+        // The user's undo/editor write, one microtask after the settlement's stat.
+        queueMicrotask(() => adapter.files.set("old.md", encoder.encode("late bytes")));
+      }
+      return stamp;
+    };
+
+    const remove = engine.handleLocalDelete("old.md");
+    await remove;
+    adapter.statFile = realStat;
+
+    expect(adapter.files.has("old.md"), "the peer's deletion lands").toBe(false);
+    expect(textOf(adapter, conflictFilePath("old.md")), "the late write is parked").toBe(
+      "late bytes",
+    );
+    await expectConsistent(engine, adapter, api);
+  });
+
+  it("parks a note recreated while a pass's tombstone was refused", async () => {
+    // The same protection on the pass's site (`settleTombstoneRefusal`): its tombstone is
+    // refused against a peer's, and the note is written back before the settlement runs.
+    const { engine, adapter, api } = await makeEngine();
+    const bytes = encoder.encode("moved bytes");
+    adapter.files.set("old.md", bytes);
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("old.md")!;
+
+    adapter.files.delete("old.md");
+    api.onPush = async (files) => {
+      if (files[0]?.action !== "delete") return;
+      await api.remoteDelete(fileId);
+      adapter.files.set("old.md", encoder.encode("recreated bytes"));
+    };
+    await engine.initialSync();
+    api.onPush = null;
+
+    expect(adapter.files.has("old.md"), "the peer's deletion lands").toBe(false);
+    expect(textOf(adapter, conflictFilePath("old.md")), "the recreate is parked").toBe(
+      "recreated bytes",
+    );
+    await expectConsistent(engine, adapter, api);
+  });
+});

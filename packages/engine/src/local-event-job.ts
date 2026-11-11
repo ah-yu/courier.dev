@@ -108,7 +108,7 @@ interface Tombstone<T extends JobVersion> {
 /** The ledger a new-file decision can ask about and take a tombstone back from. */
 export interface TombstoneLedger {
   /** The chain this job already prepared a delete for, when its bytes match. */
-  deletedFileIdForHash(contentHash: string): string | null;
+  deletedForHash(contentHash: string): { fileId: string; versionId: string | null } | null;
   /** The tombstone this job prepared for `fileId`, if it still holds one. */
   takeBackTombstone(fileId: string): void;
 }
@@ -276,9 +276,15 @@ export class LocalEventJob<T extends JobVersion> implements TombstoneLedger {
   /**
    * The tombstone this job prepared whose content hash matches, if it still holds one.
    * The self-event log cannot answer this once a burst's tail outlives its window.
+   *
+   * `versionId` is the version that tombstone pushes, or null once its answer settled it
+   * (sent, applied or taken back): a refused create half compares it with the fresh head
+   * to tell this device's own tombstone from a peer's deletion.
    */
-  deletedFileIdForHash(contentHash: string): string | null {
-    return this.pendingRenames.get(contentHash) ?? null;
+  deletedForHash(contentHash: string): { fileId: string; versionId: string | null } | null {
+    const fileId = this.pendingRenames.get(contentHash);
+    if (fileId === undefined) return null;
+    return { fileId, versionId: this.pendingDeletes.get(fileId)?.prepared.versionId ?? null };
   }
 
   /**

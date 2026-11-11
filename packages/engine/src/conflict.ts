@@ -100,7 +100,11 @@ export class ConflictResolver {
       return await this.resolveSettings(fileId, plainPath, head, localExists, deviceName);
     }
 
-    const localBytes = localExists ? await this.opts.adapter.readFile(plainPath) : null;
+    // Read the local side instead of trusting `localExists`: the caller's stat is a hint
+    // taken an await ago, and a note recreated in between (an undo, an editor writing it
+    // back) is the only copy — applying a delete head without parking it would destroy it.
+    // A missing file reads as absent, which is all the hint was for.
+    const localBytes = await this.opts.adapter.readFile(plainPath);
     if (localExists && !localBytes) return true;
 
     const applied = await this.opts.applyRemote(fileId, plainPath, head, null, deviceName);
@@ -153,7 +157,13 @@ export class ConflictResolver {
     localExists: boolean,
     deviceName: string | null,
   ): Promise<boolean> {
-    if (!localExists) return await this.opts.applyRemote(fileId, plainPath, head, null, deviceName);
+    if (!localExists) {
+      // The caller's stat is a hint taken an await ago: ask the disk once more before
+      // applying a head that may delete a file the user just wrote back.
+      if (!(await this.opts.adapter.statFile(plainPath))) {
+        return await this.opts.applyRemote(fileId, plainPath, head, null, deviceName);
+      }
+    }
 
     let currentHead = head;
     for (let attempt = 0; attempt < 2; attempt++) {
