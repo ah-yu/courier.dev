@@ -33,6 +33,7 @@
     "db:studio": "bun run --filter @courier/server db:studio"
   },
   "devDependencies": {
+    "@courier/shared": "workspace:*",
     "@types/bun": "latest",
     "@vitest/coverage-v8": "5.0.5",
     "eslint": "^10.14.0",

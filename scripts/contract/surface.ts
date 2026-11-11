@@ -11,12 +11,12 @@
  * parse and nothing to exclude.
  */
 import { readFileSync } from "node:fs";
-import { CONTRACT_GENERATION, MIN_CLIENT_CONTRACT } from "../../packages/shared/src/contract";
+import { CONTRACT_GENERATION, MIN_CLIENT_CONTRACT } from "@courier/shared";
 import {
   formatSurface as formatRegistrySurface,
   readSurface as readRegistrySurface,
   type WireSurface,
-} from "../../packages/shared/src/wire/index";
+} from "@courier/shared/wire";
 
 /** The committed surface. */
 export type Surface = WireSurface;

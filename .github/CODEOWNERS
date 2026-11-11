@@ -1,0 +1,8 @@
+# A wire change is a decision, not a side effect: the owner reviews the surface diff and the
+# generation reason, not just the code diff. See AGENTS.md -> "Contract review".
+/packages/shared/src/contract.ts  @ah-yu
+/packages/shared/contract/        @ah-yu
+/packages/shared/src/wire/        @ah-yu
+/packages/server/src/             @ah-yu
+/scripts/contract/                @ah-yu
+/packages/engine/src/websocket.ts @ah-yu

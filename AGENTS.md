@@ -390,3 +390,22 @@ details and the full contract are in [testing.md](docs/testing.md#stub-fidelity)
   [docs/release.md](docs/release.md#snapshot-versions-for-test-builds). A _release version_ is not
   the wire identity: `packages/shared/src/contract.ts` carries the contract generation, and
   `bun run contract` keeps it in step with the API (invariant 14).
+
+## Contract review
+
+A wire change is a decision, not a side effect. Before committing anything under
+`packages/shared/src/contract.ts`, `packages/shared/contract/`, `packages/shared/src/wire/`,
+`packages/server/src/`, `scripts/contract/` or `packages/engine/src/websocket.ts`, run the review:
+
+1. `bun run contract` and read every `!` / `~` / `+`. Confirm the verdict, the side that upgrades,
+   and that `MIN_CLIENT_CONTRACT` moved only for a breaking change.
+2. If the numbers moved, they came from `bump --write --reason "..."`, never a hand edit; the
+   reason is the decision record and names the side that must upgrade.
+3. A semantic change with no surface diff needs an L1 test and the owning document — the gate
+   cannot see it.
+4. A server route or handler change needs its registry contract, an L1 test and a response-schema
+   check; a WebSocket or binary change needs both sides and its frame/round-trip test.
+5. Run `bun run verify` and L3; report the outcome.
+
+The agent review is a draft. The human approval is the `CODEOWNERS` review on the pull request,
+and the template's "Contract review" section is the record. `--reason` is not proof of review.
