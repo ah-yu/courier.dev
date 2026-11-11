@@ -956,12 +956,21 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
     );
     await vaultB.write(path, "new content");
     await reconcile(names.b);
+    // B's push is its own background job: the pass it just ran can return before the push
+    // lands, and then every pass below reads a server that does not hold B's chain yet and
+    // the loop expires on a correct engine. Wait for the chain the case is about (the old
+    // path now carries two of them) instead of assuming the push is already there.
+    await waitForAsync(
+      async () => (await filesAtPath(server, remote.id, material.key, path)).length === 2,
+      "vault B's new chain never reached the server",
+      30_000,
+    );
     // A's own passes, retried: this case is about what a restore does when the path is
     // taken, and the dialog's precondition is A's state, not a socket notification. Each
     // pass reads the index again, so a push that was still in flight when the previous pass
     // looked is picked up by the next one instead of costing the five-minute periodic pass.
     let pulledOnA = false;
-    for (let attempt = 0; attempt < 6 && !pulledOnA; attempt += 1) {
+    for (let attempt = 0; attempt < 10 && !pulledOnA; attempt += 1) {
       await reconcile(names.a);
       pulledOnA = await vaultStateHolds(
         async () => (await readVaultFile(names.a, path)) === "new content",

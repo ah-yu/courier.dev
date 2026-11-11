@@ -5,7 +5,7 @@ import type { FileStamp } from "./adapter";
 import type { PrefetchCandidate } from "./content-prefetch";
 import type { OpQueueLimits, OpWeight } from "./op-queue";
 import { weightForSize } from "./op-queue";
-import type { RemoteIndex } from "./remote-index";
+import { isNewerHead, type ChainRef, type RemoteIndex } from "./remote-index";
 import type { LocalVersionState } from "./state";
 
 /**
@@ -68,6 +68,44 @@ export function listedStampPath(
   if (plainPath !== null && localStamps.has(plainPath)) return plainPath;
   if (recordedPath !== null && localStamps.has(recordedPath)) return recordedPath;
   return null;
+}
+
+/**
+ * The chain that decides each path when two of them name it.
+ *
+ * Two live chains at one path is a state the engine accepts: two devices created the same
+ * note while out of touch, a peer's move landed beside a file this device created at the
+ * vacated path, or a create raced a rename. Exactly one of them may write the file, and
+ * every device has to pick the same one — otherwise each device applies the *other*
+ * chain's bytes, pushes them back onto its own chain, and the two trade the note's content
+ * on every pass (measured: two devices that created `note.md` independently flipped
+ * between each other's text forever, one conflict copy each).
+ *
+ * The winner is the chain whose head the **server** stamped latest: `createdAt` is the
+ * server's clock, so the answer is identical everywhere, unlike a local mtime or an
+ * arrival order. A chain with a `delete` head owns nothing (a tombstone lives at no path).
+ * The fileId breaks a tie, so two heads stamped in the same millisecond still agree
+ * everywhere.
+ *
+ * The loser may still **push** its local bytes (that is how its chain catches up with the
+ * winner); it never writes the file.
+ */
+export function pathOwners(view: PassView, state: LocalVersionState): Map<string, string> {
+  const newest = new Map<string, ChainRef>();
+  for (const [fileId, chain] of view.chainByFileId) {
+    const head = remoteHead(chain);
+    if (!head || head.action === "delete") continue;
+    const { plainPath, recordedPath } = chainPaths(fileId, view, state);
+    const path = recordedPath ?? plainPath;
+    if (path === null) continue;
+    const current = newest.get(path);
+    if (current === undefined || isNewerHead({ fileId, head }, current)) {
+      newest.set(path, { fileId, head });
+    }
+  }
+  const owners = new Map<string, string>();
+  for (const [path, entry] of newest) owners.set(path, entry.fileId);
+  return owners;
 }
 
 /**

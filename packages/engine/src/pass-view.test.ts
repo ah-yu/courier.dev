@@ -6,6 +6,7 @@ import {
   chainPaths,
   listedStampPath,
   orderedFileIds,
+  pathOwners,
   prefetchCandidatesForBurst,
   prefetchCandidatesForPass,
   weightOfFile,
@@ -419,5 +420,60 @@ describe("prefetchCandidatesForBurst", () => {
     expect(prefetchCandidatesForBurst(chains, applyPaths, {}, syncable)).toEqual([
       { contentHash: "h2", sizeBytes: 1 },
     ]);
+  });
+});
+
+describe("pathOwners", () => {
+  /** The chain a path's file belongs to when more than one chain names it. */
+  it("gives the path to the chain the server stamped latest", () => {
+    const view = passView({
+      older: {
+        recordedPath: "notes/a.md",
+        versions: [version("v1", "h1", { createdAt: "2026-06-01T00:00:00.000Z" })],
+      },
+      newer: {
+        recordedPath: "notes/a.md",
+        versions: [version("v2", "h2", { createdAt: "2026-06-02T00:00:00.000Z" })],
+      },
+    });
+
+    expect([...pathOwners(view, {})]).toEqual([["notes/a.md", "newer"]]);
+  });
+
+  it("breaks a same-millisecond tie by fileId, so every device picks the same one", () => {
+    const createdAt = "2026-06-01T12:00:00.000Z";
+    const view = passView({
+      b: { recordedPath: "notes/a.md", versions: [version("v1", "h1", { createdAt })] },
+      a: { recordedPath: "notes/a.md", versions: [version("v2", "h2", { createdAt })] },
+    });
+
+    expect(pathOwners(view, {}).get("notes/a.md")).toBe("a");
+  });
+
+  it("never gives a path to a tombstone", () => {
+    const view = passView({
+      deleted: {
+        recordedPath: "notes/a.md",
+        versions: [
+          version("v1", "h1"),
+          version("v2", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", {
+            action: "delete",
+            createdAt: "2026-06-03T00:00:00.000Z",
+          }),
+        ],
+      },
+      live: {
+        recordedPath: "notes/a.md",
+        versions: [version("v3", "h3", { createdAt: "2026-06-02T00:00:00.000Z" })],
+      },
+    });
+
+    expect(pathOwners(view, {}).get("notes/a.md")).toBe("live");
+  });
+
+  it("falls back to the state's path for a chain the index records nowhere", () => {
+    const view = passView({ f1: { recordedPath: null, versions: [version("v1", "h1")] } });
+
+    expect(pathOwners(view, { f1: trackedState("notes/a.md") }).get("notes/a.md")).toBe("f1");
   });
 });

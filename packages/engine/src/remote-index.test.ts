@@ -256,4 +256,61 @@ describe("RemoteIndex", () => {
     expect(index.fileIdForHash("same")).toBeNull();
     expect(index.size).toBe(0);
   });
+
+  it("keeps the head the server stamped latest at a path two chains name", () => {
+    const index = new RemoteIndex();
+    const older = { ...head("v1", "h1"), createdAt: "2020-01-01T00:00:00.000Z" };
+    const newer = { ...head("v2", "h2"), createdAt: "2027-01-01T00:00:00.000Z" };
+    index.remember("older", older, "notes/a.md");
+    index.remember("newer", newer, "notes/a.md");
+
+    // `fileIdAt` answers the last one recorded; `newestAt` answers the authority the
+    // owner rule reads.
+    expect(index.fileIdAt("notes/a.md")).toBe("newer");
+    expect(index.newestAt("notes/a.md")).toEqual({ fileId: "newer", head: newer });
+
+    // Recording the older chain last must not hand it the path.
+    index.remember("older", older, "notes/a.md");
+    expect(index.newestAt("notes/a.md")?.fileId).toBe("newer");
+  });
+
+  it("breaks a same-millisecond tie by fileId, and falls back when the newest is forgotten", () => {
+    const index = new RemoteIndex();
+    index.remember("b", head("v1", "h1"), "notes/a.md");
+    index.remember("a", head("v2", "h2"), "notes/a.md");
+
+    expect(index.newestAt("notes/a.md")?.fileId).toBe("a");
+
+    // Forgetting the newest chain must not answer "nobody owns this path": the other chain
+    // naming it is still live, and a notification for it has to see the real owner.
+    index.forget("a");
+    expect(index.newestAt("notes/a.md")?.fileId).toBe("b");
+  });
+
+  it("falls back when the newest chain moves to another path", () => {
+    const index = new RemoteIndex();
+    index.remember("a", head("v2", "h2"), "notes/a.md");
+    index.remember("b", head("v1", "h1"), "notes/a.md");
+
+    index.remember("a", head("v2", "h2"), "notes/b.md");
+
+    // `a` left `notes/a.md` for `notes/b.md`; the chain still recorded at the old path is
+    // the owner there, not nobody.
+    expect(index.newestAt("notes/a.md")?.fileId).toBe("b");
+    expect(index.newestAt("notes/b.md")?.fileId).toBe("a");
+  });
+
+  it("lists every chain recorded at a path, not only the newest", () => {
+    const index = new RemoteIndex();
+    index.remember("a", head("v2", "h2"), "notes/a.md");
+    index.remember("b", head("v1", "h1"), "notes/a.md");
+
+    expect(new Set(index.chainsAt("notes/a.md").map((ref) => ref.fileId))).toEqual(
+      new Set(["a", "b"]),
+    );
+
+    index.forget("b");
+    expect(index.chainsAt("notes/a.md").map((ref) => ref.fileId)).toEqual(["a"]);
+    expect(index.chainsAt("notes/nowhere.md")).toEqual([]);
+  });
 });

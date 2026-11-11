@@ -1,5 +1,26 @@
 import type { VersionChainEntry } from "@courier/shared";
 
+/** A chain and its live head: the pair the path-owner rule compares. */
+export interface ChainRef {
+  fileId: string;
+  head: VersionChainEntry;
+}
+
+/**
+ * Whether `left` is the newer of two chains that name one path.
+ *
+ * The **server's** `createdAt` decides, and a tie falls back to the fileId, so every
+ * device computes the same answer (a local mtime or an arrival order would not): that is
+ * what lets two devices converge on one content instead of trading the note back and
+ * forth (see `pathOwners` in `pass-view.ts`).
+ */
+export function isNewerHead(left: ChainRef, right: ChainRef): boolean {
+  if (left.head.createdAt !== right.head.createdAt) {
+    return left.head.createdAt > right.head.createdAt;
+  }
+  return left.fileId < right.fileId;
+}
+
 /**
  * What the server holds, as far as this device knows: which path each live chain lives
  * at, what its head is, and which content hash belongs to which chain.
@@ -28,6 +49,17 @@ export class RemoteIndex {
   private readonly fileIdToPath = new Map<string, string>();
   private readonly fileIdToHead = new Map<string, VersionChainEntry>();
   private readonly hashToFileId = new Map<string, string>();
+  /**
+   * The newest live chain recorded at each path, which is the one that decides the file
+   * when two chains name it (see {@link newestAt}).
+   *
+   * `pathToFileId` answers "which chain was recorded here last", which is order, not
+   * authority: a pass rebuilds it in server order, a notification overwrites it, and
+   * neither is a tie-break two devices would agree on. Every chain recorded at a path is
+   * kept here, so forgetting or moving the newest one falls back to the next.
+   */
+  private readonly newestByPath = new Map<string, Map<string, ChainRef>>();
+
   /**
    * Every chain whose live head holds a given content hash.
    *
@@ -59,11 +91,44 @@ export class RemoteIndex {
     this.hashToFileId.clear();
     this.hashToFileIds.clear();
     this.fileIdToHash.clear();
+    this.newestByPath.clear();
   }
 
   /** The fileId the server tracks at `path`, or null when it tracks none. */
   fileIdAt(path: string): string | null {
     return this.pathToFileId.get(path) ?? null;
+  }
+
+  /**
+   * The newest live chain recorded at `path`, or null.
+   *
+   * This is the authority for "which chain decides this file" when two chains name one
+   * path, in the pass and on a notification alike (`pathOwners` is the pass's whole-vault
+   * answer). Unlike {@link fileIdAt} it is not "the last one recorded": it keeps the head
+   * the server stamped latest, with the fileId breaking a tie, so every device agrees.
+   * When that chain is forgotten or moves away, the answer falls back to the next chain
+   * still recorded at the path — a removed newest must not look like an empty path.
+   */
+  newestAt(path: string): ChainRef | null {
+    const atPath = this.newestByPath.get(path);
+    if (atPath === undefined) return null;
+    let newest: ChainRef | null = null;
+    for (const ref of atPath.values()) {
+      if (newest === null || isNewerHead(ref, newest)) newest = ref;
+    }
+    return newest;
+  }
+
+  /**
+   * Every live chain recorded at `path`.
+   *
+   * The whole-vault view a pass builds has this answer from its chain map; an
+   * incremental apply only has the index, and needs to know whether the bytes at a path
+   * belong to *any* other chain — not just the newest one, which may be the chain making
+   * the decision (`holdsAnotherChainsBytes`).
+   */
+  chainsAt(path: string): ChainRef[] {
+    return [...(this.newestByPath.get(path)?.values() ?? [])];
   }
 
   /** The live path recorded for a chain, or null. */
@@ -109,6 +174,15 @@ export class RemoteIndex {
     this.fileIdToHead.set(fileId, head);
     this.fileIdToHash.set(fileId, head.contentHash);
     this.recordHash(fileId, head.contentHash);
+    // Two chains can name one path; only the newer head decides the file (see
+    // `newestAt`). Every chain recorded at the path is kept, so forgetting the newest one
+    // falls back to the next instead of answering "nobody owns it".
+    let atPath = this.newestByPath.get(path);
+    if (atPath === undefined) {
+      atPath = new Map();
+      this.newestByPath.set(path, atPath);
+    }
+    atPath.set(fileId, { fileId, head });
   }
 
   /**
@@ -127,11 +201,20 @@ export class RemoteIndex {
     if (path !== undefined && this.pathToFileId.get(path) === fileId) {
       this.pathToFileId.delete(path);
     }
+    if (path !== undefined) this.forgetAt(path, fileId);
     const hash = this.fileIdToHash.get(fileId);
     if (hash !== undefined) this.dropHash(fileId, hash);
     this.fileIdToPath.delete(fileId);
     this.fileIdToHead.delete(fileId);
     this.fileIdToHash.delete(fileId);
+  }
+
+  /** Drop one chain from a path's owner set, keeping the other chains recorded there. */
+  private forgetAt(path: string, fileId: string): void {
+    const atPath = this.newestByPath.get(path);
+    if (atPath === undefined) return;
+    atPath.delete(fileId);
+    if (atPath.size === 0) this.newestByPath.delete(path);
   }
 
   /** Record that `fileId`'s head now holds `hash`, as the most recent owner. */
@@ -181,6 +264,9 @@ export class RemoteIndex {
       this.pathToFileId.get(previousPath) === fileId
     ) {
       this.pathToFileId.delete(previousPath);
+    }
+    if (previousPath !== undefined && previousPath !== keepPath) {
+      this.forgetAt(previousPath, fileId);
     }
   }
 }
