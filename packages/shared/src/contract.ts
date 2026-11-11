@@ -48,10 +48,11 @@
  *
  * Generation 4 is the first surface serialized from the runtime registry. The wire did
  * not change meaning; the gate now sees request constraints, status codes, auth and the
- * WebSocket frames the declaration scan could not. `MIN_CLIENT_CONTRACT` stays at 1
- * because no older client is misread.
+ * WebSocket frames the declaration scan could not. Generation 5 records the 426 body's
+ * generation fields as their own schema; both are additive, so `MIN_CLIENT_CONTRACT`
+ * stays at 1 because no older client is misread.
  */
-export const CONTRACT_GENERATION = 4;
+export const CONTRACT_GENERATION = 5;
 
 /**
  * The oldest client generation this server still serves, published on `/api/health`.

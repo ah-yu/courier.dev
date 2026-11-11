@@ -1,0 +1,2855 @@
+{
+  "generation": 5,
+  "decision": {
+    "verdict": "additive",
+    "reason": "the 426 body's generation fields are recorded as their own schema; a new error-body schema is additive because no route starts returning it and an older peer never reads it. The floor stays 1"
+  },
+  "surface": {
+    "unknownKeys": "strip",
+    "http": {
+      "DELETE /api/users/:id": {
+        "auth": "host",
+        "scope": "users",
+        "contract": "exempt",
+        "status": [
+          204
+        ],
+        "body": {
+          "kind": "none"
+        },
+        "params": {
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "response": {
+          "kind": "none"
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "INSUFFICIENT_SCOPE",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR"
+        ]
+      },
+      "DELETE /api/vaults/:id": {
+        "auth": "user",
+        "contract": "required",
+        "status": [
+          204
+        ],
+        "body": {
+          "kind": "none"
+        },
+        "params": {
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "response": {
+          "kind": "none"
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "KEY_DISABLED",
+          "CONTRACT_MISMATCH",
+          "RATE_LIMITED",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR"
+        ]
+      },
+      "GET /api/admin/runtime": {
+        "auth": "host",
+        "scope": "status",
+        "contract": "exempt",
+        "status": [
+          200
+        ],
+        "body": {
+          "kind": "none"
+        },
+        "response": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "cpuCount": {
+                "type": "number"
+              },
+              "cpuMicros": {
+                "type": "number"
+              },
+              "cpuPercent": {
+                "type": [
+                  "null",
+                  "number"
+                ]
+              },
+              "freeMemoryBytes": {
+                "type": "number"
+              },
+              "loadAverage": {
+                "items": false,
+                "maxItems": 3,
+                "minItems": 3,
+                "prefixItems": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "number"
+                  }
+                ],
+                "type": "array"
+              },
+              "memoryBytes": {
+                "type": "number"
+              },
+              "onlineUsers": {
+                "type": "number"
+              },
+              "onlineVaults": {
+                "type": "number"
+              },
+              "pid": {
+                "type": "number"
+              },
+              "runtime": {
+                "type": "string"
+              },
+              "sampledAt": {
+                "type": "string"
+              },
+              "totalMemoryBytes": {
+                "type": "number"
+              },
+              "uptimeSeconds": {
+                "type": "number"
+              },
+              "version": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "cpuCount",
+              "cpuMicros",
+              "cpuPercent",
+              "freeMemoryBytes",
+              "loadAverage",
+              "memoryBytes",
+              "onlineUsers",
+              "onlineVaults",
+              "pid",
+              "runtime",
+              "sampledAt",
+              "totalMemoryBytes",
+              "uptimeSeconds",
+              "version"
+            ],
+            "type": "object"
+          }
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "INSUFFICIENT_SCOPE",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR"
+        ]
+      },
+      "GET /api/admin/status": {
+        "auth": "host",
+        "scope": "status",
+        "contract": "exempt",
+        "status": [
+          200
+        ],
+        "body": {
+          "kind": "none"
+        },
+        "response": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "binarySha256": {
+                "type": "string"
+              },
+              "binarySize": {
+                "type": "number"
+              },
+              "blobCount": {
+                "type": "number"
+              },
+              "dbBytes": {
+                "type": "number"
+              },
+              "devicesCount": {
+                "type": "number"
+              },
+              "diskFreeBytes": {
+                "type": "number"
+              },
+              "diskTotalBytes": {
+                "type": "number"
+              },
+              "diskUsedBytes": {
+                "type": "number"
+              },
+              "migrationsApplied": {
+                "type": "number"
+              },
+              "migrationsKnown": {
+                "type": "number"
+              },
+              "storageLimitBytes": {
+                "type": [
+                  "null",
+                  "number"
+                ]
+              },
+              "storageUsedBytes": {
+                "type": "number"
+              },
+              "usersCount": {
+                "type": "number"
+              },
+              "vaultsCount": {
+                "type": "number"
+              },
+              "version": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "binarySha256",
+              "binarySize",
+              "blobCount",
+              "dbBytes",
+              "devicesCount",
+              "diskFreeBytes",
+              "diskTotalBytes",
+              "diskUsedBytes",
+              "migrationsApplied",
+              "migrationsKnown",
+              "storageLimitBytes",
+              "storageUsedBytes",
+              "usersCount",
+              "vaultsCount",
+              "version"
+            ],
+            "type": "object"
+          }
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "INSUFFICIENT_SCOPE",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR"
+        ]
+      },
+      "GET /api/health": {
+        "auth": "none",
+        "contract": "exempt",
+        "status": [
+          200
+        ],
+        "body": {
+          "kind": "none"
+        },
+        "response": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "generation": {
+                "type": "number"
+              },
+              "minClient": {
+                "type": "number"
+              },
+              "status": {
+                "type": "string"
+              },
+              "timestamp": {
+                "type": "string"
+              },
+              "version": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "timestamp"
+            ],
+            "type": "object"
+          }
+        }
+      },
+      "GET /api/me": {
+        "auth": "user",
+        "contract": "required",
+        "status": [
+          200
+        ],
+        "body": {
+          "kind": "none"
+        },
+        "response": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "createdAt": {
+                "type": "string"
+              },
+              "disabled": {
+                "type": "boolean"
+              },
+              "expiresAt": {
+                "type": [
+                  "null",
+                  "string"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "maskedKey": {
+                "type": "string"
+              },
+              "maxFileBytes": {
+                "type": "number"
+              },
+              "maxVaults": {
+                "type": "number"
+              },
+              "name": {
+                "type": "string"
+              },
+              "retentionDays": {
+                "type": [
+                  "null",
+                  "number"
+                ]
+              },
+              "storageBytesLimit": {
+                "type": [
+                  "null",
+                  "number"
+                ]
+              },
+              "usedBytes": {
+                "type": "number"
+              },
+              "vaultsCount": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "createdAt",
+              "disabled",
+              "expiresAt",
+              "id",
+              "maskedKey",
+              "maxFileBytes",
+              "maxVaults",
+              "name",
+              "retentionDays",
+              "storageBytesLimit"
+            ],
+            "type": "object"
+          }
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "KEY_DISABLED",
+          "CONTRACT_MISMATCH",
+          "RATE_LIMITED",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR"
+        ]
+      },
+      "GET /api/users": {
+        "auth": "host",
+        "scope": "users",
+        "contract": "exempt",
+        "status": [
+          200
+        ],
+        "body": {
+          "kind": "none"
+        },
+        "response": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "users": {
+                "items": {
+                  "properties": {
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "disabled": {
+                      "type": "boolean"
+                    },
+                    "expiresAt": {
+                      "type": [
+                        "null",
+                        "string"
+                      ]
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "maskedKey": {
+                      "type": "string"
+                    },
+                    "maxFileBytes": {
+                      "type": "number"
+                    },
+                    "maxVaults": {
+                      "type": "number"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "retentionDays": {
+                      "type": [
+                        "null",
+                        "number"
+                      ]
+                    },
+                    "storageBytesLimit": {
+                      "type": [
+                        "null",
+                        "number"
+                      ]
+                    },
+                    "usedBytes": {
+                      "type": "number"
+                    },
+                    "vaultsCount": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "createdAt",
+                    "disabled",
+                    "expiresAt",
+                    "id",
+                    "maskedKey",
+                    "maxFileBytes",
+                    "maxVaults",
+                    "name",
+                    "retentionDays",
+                    "storageBytesLimit"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "users"
+            ],
+            "type": "object"
+          }
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "INSUFFICIENT_SCOPE",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR"
+        ]
+      },
+      "GET /api/users/:id/key": {
+        "auth": "host",
+        "scope": "users",
+        "contract": "exempt",
+        "status": [
+          200
+        ],
+        "body": {
+          "kind": "none"
+        },
+        "params": {
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "response": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "key": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "key"
+            ],
+            "type": "object"
+          }
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "INSUFFICIENT_SCOPE",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR"
+        ]
+      },
+      "GET /api/vaults": {
+        "auth": "user",
+        "contract": "required",
+        "status": [
+          200
+        ],
+        "body": {
+          "kind": "none"
+        },
+        "response": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "vaults": {
+                "items": {
+                  "properties": {
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "historyLimitAttachments": {
+                      "type": "number"
+                    },
+                    "historyLimitDocuments": {
+                      "type": "number"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "createdAt",
+                    "historyLimitAttachments",
+                    "historyLimitDocuments",
+                    "id",
+                    "name"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "vaults"
+            ],
+            "type": "object"
+          }
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "KEY_DISABLED",
+          "CONTRACT_MISMATCH",
+          "RATE_LIMITED",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR"
+        ]
+      },
+      "GET /api/vaults/:id/encryption-salt": {
+        "auth": "none",
+        "contract": "exempt",
+        "status": [
+          200
+        ],
+        "body": {
+          "kind": "none"
+        },
+        "params": {
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "response": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "encryptionSalt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "encryptionSalt"
+            ],
+            "type": "object"
+          }
+        },
+        "errors": [
+          "NOT_FOUND",
+          "INTERNAL_ERROR"
+        ]
+      },
+      "GET /api/vaults/:id/key-check": {
+        "auth": "none",
+        "contract": "exempt",
+        "status": [
+          200
+        ],
+        "body": {
+          "kind": "none"
+        },
+        "params": {
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "response": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "keyCheck": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "keyCheck"
+            ],
+            "type": "object"
+          }
+        },
+        "errors": [
+          "NOT_FOUND",
+          "INTERNAL_ERROR"
+        ]
+      },
+      "GET /api/vaults/:id/sync/blobs/:contentHash/status": {
+        "auth": "sync",
+        "contract": "required",
+        "status": [
+          200
+        ],
+        "body": {
+          "kind": "none"
+        },
+        "params": {
+          "properties": {
+            "contentHash": {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "contentHash",
+            "id"
+          ],
+          "type": "object"
+        },
+        "response": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "complete": {
+                "type": "boolean"
+              },
+              "received": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "complete",
+              "received"
+            ],
+            "type": "object"
+          }
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "KEY_DISABLED",
+          "CONTRACT_MISMATCH",
+          "RATE_LIMITED",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR",
+          "QUOTA_EXCEEDED",
+          "VAULT_LIMIT_REACHED",
+          "PAYLOAD_TOO_LARGE",
+          "RANGE_NOT_SATISFIABLE"
+        ]
+      },
+      "GET /api/vaults/:id/sync/deleted": {
+        "auth": "sync",
+        "contract": "required",
+        "status": [
+          200
+        ],
+        "body": {
+          "kind": "none"
+        },
+        "params": {
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "response": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "files": {
+                "items": {
+                  "properties": {
+                    "deletedAt": {
+                      "type": "string"
+                    },
+                    "deletedByDeviceName": {
+                      "type": [
+                        "null",
+                        "string"
+                      ]
+                    },
+                    "fileId": {
+                      "type": "string"
+                    },
+                    "lastEncryptedPath": {
+                      "type": [
+                        "null",
+                        "string"
+                      ]
+                    },
+                    "previousContentHash": {
+                      "type": [
+                        "null",
+                        "string"
+                      ]
+                    },
+                    "previousSizeBytes": {
+                      "type": [
+                        "null",
+                        "number"
+                      ]
+                    },
+                    "previousVersionId": {
+                      "type": [
+                        "null",
+                        "string"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "deletedAt",
+                    "deletedByDeviceName",
+                    "fileId",
+                    "lastEncryptedPath",
+                    "previousContentHash",
+                    "previousSizeBytes",
+                    "previousVersionId"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "files"
+            ],
+            "type": "object"
+          }
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "KEY_DISABLED",
+          "CONTRACT_MISMATCH",
+          "RATE_LIMITED",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR",
+          "QUOTA_EXCEEDED",
+          "VAULT_LIMIT_REACHED",
+          "PAYLOAD_TOO_LARGE",
+          "RANGE_NOT_SATISFIABLE"
+        ]
+      },
+      "GET /api/vaults/:id/sync/history": {
+        "auth": "sync",
+        "contract": "required",
+        "status": [
+          200
+        ],
+        "body": {
+          "kind": "none"
+        },
+        "params": {
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "response": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "files": {
+                "items": {
+                  "properties": {
+                    "currentContentHash": {
+                      "type": "string"
+                    },
+                    "currentVersionId": {
+                      "type": "string"
+                    },
+                    "encryptedPath": {
+                      "type": "string"
+                    },
+                    "fileId": {
+                      "type": "string"
+                    },
+                    "versions": {
+                      "items": {
+                        "properties": {
+                          "action": {
+                            "enum": [
+                              "create",
+                              "delete",
+                              "modify",
+                              "rename",
+                              "restore"
+                            ],
+                            "type": "string"
+                          },
+                          "contentHash": {
+                            "type": "string"
+                          },
+                          "createdAt": {
+                            "type": "string"
+                          },
+                          "deviceName": {
+                            "type": [
+                              "null",
+                              "string"
+                            ]
+                          },
+                          "encryptedPath": {
+                            "type": "string"
+                          },
+                          "mtimeMs": {
+                            "type": "number"
+                          },
+                          "sizeBytes": {
+                            "type": "number"
+                          },
+                          "versionId": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "action",
+                          "contentHash",
+                          "createdAt",
+                          "deviceName",
+                          "encryptedPath",
+                          "mtimeMs",
+                          "sizeBytes",
+                          "versionId"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "currentContentHash",
+                    "currentVersionId",
+                    "encryptedPath",
+                    "fileId",
+                    "versions"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "files"
+            ],
+            "type": "object"
+          }
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "KEY_DISABLED",
+          "CONTRACT_MISMATCH",
+          "RATE_LIMITED",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR",
+          "QUOTA_EXCEEDED",
+          "VAULT_LIMIT_REACHED",
+          "PAYLOAD_TOO_LARGE",
+          "RANGE_NOT_SATISFIABLE"
+        ]
+      },
+      "GET /api/vaults/:id/sync/index": {
+        "auth": "sync",
+        "contract": "required",
+        "status": [
+          200
+        ],
+        "body": {
+          "kind": "none"
+        },
+        "params": {
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "response": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "files": {
+                "items": {
+                  "properties": {
+                    "fileId": {
+                      "type": "string"
+                    },
+                    "head": {
+                      "properties": {
+                        "action": {
+                          "enum": [
+                            "create",
+                            "delete",
+                            "modify",
+                            "rename",
+                            "restore"
+                          ],
+                          "type": "string"
+                        },
+                        "contentHash": {
+                          "type": "string"
+                        },
+                        "createdAt": {
+                          "type": "string"
+                        },
+                        "encryptedPath": {
+                          "type": "string"
+                        },
+                        "mtimeMs": {
+                          "type": "number"
+                        },
+                        "sizeBytes": {
+                          "type": "number"
+                        },
+                        "versionId": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "action",
+                        "contentHash",
+                        "createdAt",
+                        "encryptedPath",
+                        "mtimeMs",
+                        "sizeBytes",
+                        "versionId"
+                      ],
+                      "type": "object"
+                    },
+                    "previousLive": {
+                      "anyOf": [
+                        {
+                          "properties": {
+                            "action": {
+                              "enum": [
+                                "create",
+                                "delete",
+                                "modify",
+                                "rename",
+                                "restore"
+                              ],
+                              "type": "string"
+                            },
+                            "contentHash": {
+                              "type": "string"
+                            },
+                            "createdAt": {
+                              "type": "string"
+                            },
+                            "encryptedPath": {
+                              "type": "string"
+                            },
+                            "mtimeMs": {
+                              "type": "number"
+                            },
+                            "sizeBytes": {
+                              "type": "number"
+                            },
+                            "versionId": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "action",
+                            "contentHash",
+                            "createdAt",
+                            "encryptedPath",
+                            "mtimeMs",
+                            "sizeBytes",
+                            "versionId"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "fileId",
+                    "head",
+                    "previousLive"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "files"
+            ],
+            "type": "object"
+          }
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "KEY_DISABLED",
+          "CONTRACT_MISMATCH",
+          "RATE_LIMITED",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR",
+          "QUOTA_EXCEEDED",
+          "VAULT_LIMIT_REACHED",
+          "PAYLOAD_TOO_LARGE",
+          "RANGE_NOT_SATISFIABLE"
+        ]
+      },
+      "GET /api/vaults/:id/sync/versions": {
+        "auth": "sync",
+        "contract": "required",
+        "status": [
+          200
+        ],
+        "body": {
+          "kind": "none"
+        },
+        "query": {
+          "properties": {
+            "fileId": {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "fileId"
+          ],
+          "type": "object"
+        },
+        "params": {
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "response": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "versions": {
+                "items": {
+                  "properties": {
+                    "action": {
+                      "enum": [
+                        "create",
+                        "delete",
+                        "modify",
+                        "rename",
+                        "restore"
+                      ],
+                      "type": "string"
+                    },
+                    "contentHash": {
+                      "type": "string"
+                    },
+                    "createdAt": {
+                      "type": "string"
+                    },
+                    "deviceName": {
+                      "type": [
+                        "null",
+                        "string"
+                      ]
+                    },
+                    "encryptedPath": {
+                      "type": "string"
+                    },
+                    "mtimeMs": {
+                      "type": "number"
+                    },
+                    "sizeBytes": {
+                      "type": "number"
+                    },
+                    "versionId": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "contentHash",
+                    "createdAt",
+                    "deviceName",
+                    "encryptedPath",
+                    "mtimeMs",
+                    "sizeBytes",
+                    "versionId"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "versions"
+            ],
+            "type": "object"
+          }
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "KEY_DISABLED",
+          "CONTRACT_MISMATCH",
+          "RATE_LIMITED",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR",
+          "QUOTA_EXCEEDED",
+          "VAULT_LIMIT_REACHED",
+          "PAYLOAD_TOO_LARGE",
+          "RANGE_NOT_SATISFIABLE"
+        ]
+      },
+      "GET /api/vaults/:id/sync/versions/:contentHash/content": {
+        "auth": "sync",
+        "contract": "required",
+        "status": [
+          200,
+          206
+        ],
+        "body": {
+          "kind": "none"
+        },
+        "params": {
+          "properties": {
+            "contentHash": {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "contentHash",
+            "id"
+          ],
+          "type": "object"
+        },
+        "paramFailure": "not-found",
+        "response": {
+          "kind": "stream",
+          "contentType": "application/octet-stream",
+          "headers": [
+            "Content-Type",
+            "Content-Length",
+            "Content-Range",
+            "Accept-Ranges"
+          ]
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "KEY_DISABLED",
+          "CONTRACT_MISMATCH",
+          "RATE_LIMITED",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR",
+          "QUOTA_EXCEEDED",
+          "VAULT_LIMIT_REACHED",
+          "PAYLOAD_TOO_LARGE",
+          "RANGE_NOT_SATISFIABLE"
+        ],
+        "headers": {
+          "request": [
+            "Range"
+          ]
+        }
+      },
+      "HEAD /api/vaults/:id/sync/versions/:contentHash/content": {
+        "auth": "sync",
+        "contract": "required",
+        "status": [
+          200,
+          206
+        ],
+        "body": {
+          "kind": "none"
+        },
+        "params": {
+          "properties": {
+            "contentHash": {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "contentHash",
+            "id"
+          ],
+          "type": "object"
+        },
+        "paramFailure": "not-found",
+        "response": {
+          "kind": "stream",
+          "contentType": "application/octet-stream",
+          "headers": [
+            "Content-Type",
+            "Content-Length",
+            "Content-Range",
+            "Accept-Ranges"
+          ]
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "KEY_DISABLED",
+          "CONTRACT_MISMATCH",
+          "RATE_LIMITED",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR",
+          "QUOTA_EXCEEDED",
+          "VAULT_LIMIT_REACHED",
+          "PAYLOAD_TOO_LARGE",
+          "RANGE_NOT_SATISFIABLE"
+        ],
+        "headers": {
+          "request": [
+            "Range"
+          ]
+        }
+      },
+      "PATCH /api/users/:id": {
+        "auth": "host",
+        "scope": "users",
+        "contract": "exempt",
+        "status": [
+          200
+        ],
+        "body": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "disabled": {
+                "type": "boolean"
+              },
+              "expiresAt": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "maxFileBytes": {
+                "maximum": 9007199254740991,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "maxVaults": {
+                "maximum": 9007199254740991,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "name": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "retentionDays": {
+                "anyOf": [
+                  {
+                    "maximum": 9007199254740991,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "storageBytesLimit": {
+                "anyOf": [
+                  {
+                    "maximum": 9007199254740991,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "type": "object"
+          }
+        },
+        "params": {
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "response": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "createdAt": {
+                "type": "string"
+              },
+              "disabled": {
+                "type": "boolean"
+              },
+              "expiresAt": {
+                "type": [
+                  "null",
+                  "string"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "maskedKey": {
+                "type": "string"
+              },
+              "maxFileBytes": {
+                "type": "number"
+              },
+              "maxVaults": {
+                "type": "number"
+              },
+              "name": {
+                "type": "string"
+              },
+              "retentionDays": {
+                "type": [
+                  "null",
+                  "number"
+                ]
+              },
+              "storageBytesLimit": {
+                "type": [
+                  "null",
+                  "number"
+                ]
+              },
+              "usedBytes": {
+                "type": "number"
+              },
+              "vaultsCount": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "createdAt",
+              "disabled",
+              "expiresAt",
+              "id",
+              "maskedKey",
+              "maxFileBytes",
+              "maxVaults",
+              "name",
+              "retentionDays",
+              "storageBytesLimit"
+            ],
+            "type": "object"
+          }
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "INSUFFICIENT_SCOPE",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR"
+        ]
+      },
+      "PATCH /api/vaults/:id": {
+        "auth": "user",
+        "contract": "required",
+        "status": [
+          200
+        ],
+        "body": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "historyLimitAttachments": {
+                "maximum": 10000,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "historyLimitDocuments": {
+                "maximum": 10000,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "name": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        "params": {
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "response": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "historyLimitAttachments": {
+                "type": "number"
+              },
+              "historyLimitDocuments": {
+                "type": "number"
+              },
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "historyLimitAttachments",
+              "historyLimitDocuments",
+              "id",
+              "name"
+            ],
+            "type": "object"
+          }
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "KEY_DISABLED",
+          "CONTRACT_MISMATCH",
+          "RATE_LIMITED",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR"
+        ]
+      },
+      "POST /api/users": {
+        "auth": "host",
+        "scope": "users",
+        "contract": "exempt",
+        "status": [
+          201
+        ],
+        "body": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "disabled": {
+                "type": "boolean"
+              },
+              "expiresAt": {
+                "anyOf": [
+                  {
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "maxFileBytes": {
+                "maximum": 9007199254740991,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "maxVaults": {
+                "maximum": 9007199254740991,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "name": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "retentionDays": {
+                "anyOf": [
+                  {
+                    "maximum": 9007199254740991,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "storageBytesLimit": {
+                "anyOf": [
+                  {
+                    "maximum": 9007199254740991,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          }
+        },
+        "response": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "createdAt": {
+                "type": "string"
+              },
+              "disabled": {
+                "type": "boolean"
+              },
+              "expiresAt": {
+                "type": [
+                  "null",
+                  "string"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "key": {
+                "type": "string"
+              },
+              "maskedKey": {
+                "type": "string"
+              },
+              "maxFileBytes": {
+                "type": "number"
+              },
+              "maxVaults": {
+                "type": "number"
+              },
+              "name": {
+                "type": "string"
+              },
+              "retentionDays": {
+                "type": [
+                  "null",
+                  "number"
+                ]
+              },
+              "storageBytesLimit": {
+                "type": [
+                  "null",
+                  "number"
+                ]
+              },
+              "usedBytes": {
+                "type": "number"
+              },
+              "vaultsCount": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "createdAt",
+              "disabled",
+              "expiresAt",
+              "id",
+              "key",
+              "maskedKey",
+              "maxFileBytes",
+              "maxVaults",
+              "name",
+              "retentionDays",
+              "storageBytesLimit"
+            ],
+            "type": "object"
+          }
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "INSUFFICIENT_SCOPE",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR"
+        ]
+      },
+      "POST /api/vaults": {
+        "auth": "user",
+        "contract": "required",
+        "status": [
+          201
+        ],
+        "body": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "encryptionSalt": {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              "keyCheck": {
+                "maxLength": 256,
+                "minLength": 1,
+                "type": "string"
+              },
+              "name": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "encryptionSalt",
+              "keyCheck",
+              "name"
+            ],
+            "type": "object"
+          }
+        },
+        "response": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "createdAt": {
+                "type": "string"
+              },
+              "historyLimitAttachments": {
+                "type": "number"
+              },
+              "historyLimitDocuments": {
+                "type": "number"
+              },
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "createdAt",
+              "historyLimitAttachments",
+              "historyLimitDocuments",
+              "id",
+              "name"
+            ],
+            "type": "object"
+          }
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "KEY_DISABLED",
+          "CONTRACT_MISMATCH",
+          "RATE_LIMITED",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR",
+          "VAULT_LIMIT_REACHED"
+        ]
+      },
+      "POST /api/vaults/:id/sync/contents": {
+        "auth": "sync",
+        "contract": "required",
+        "status": [
+          200
+        ],
+        "body": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "hashes": {
+                "items": {
+                  "pattern": "^[a-f0-9]{64}$",
+                  "type": "string"
+                },
+                "maxItems": 64,
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "hashes"
+            ],
+            "type": "object"
+          }
+        },
+        "params": {
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "response": {
+          "kind": "binary",
+          "contentType": "application/octet-stream"
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "KEY_DISABLED",
+          "CONTRACT_MISMATCH",
+          "RATE_LIMITED",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR",
+          "QUOTA_EXCEEDED",
+          "VAULT_LIMIT_REACHED",
+          "PAYLOAD_TOO_LARGE",
+          "RANGE_NOT_SATISFIABLE"
+        ]
+      },
+      "POST /api/vaults/:id/sync/deleted/clear": {
+        "auth": "sync",
+        "contract": "required",
+        "status": [
+          200
+        ],
+        "body": {
+          "kind": "none"
+        },
+        "params": {
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "response": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "deletedBlobs": {
+                "type": "number"
+              },
+              "deletedFiles": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "deletedBlobs",
+              "deletedFiles"
+            ],
+            "type": "object"
+          }
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "KEY_DISABLED",
+          "CONTRACT_MISMATCH",
+          "RATE_LIMITED",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR",
+          "QUOTA_EXCEEDED",
+          "VAULT_LIMIT_REACHED",
+          "PAYLOAD_TOO_LARGE",
+          "RANGE_NOT_SATISFIABLE"
+        ]
+      },
+      "POST /api/vaults/:id/sync/pull": {
+        "auth": "sync",
+        "contract": "required",
+        "status": [
+          200
+        ],
+        "body": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "files": {
+                "items": {
+                  "properties": {
+                    "fileId": {
+                      "maxLength": 64,
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "fileId"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 200,
+                "type": "array"
+              }
+            },
+            "required": [
+              "files"
+            ],
+            "type": "object"
+          }
+        },
+        "params": {
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "response": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "files": {
+                "items": {
+                  "properties": {
+                    "encryptedPath": {
+                      "type": "string"
+                    },
+                    "fileId": {
+                      "type": "string"
+                    },
+                    "versions": {
+                      "items": {
+                        "properties": {
+                          "action": {
+                            "enum": [
+                              "create",
+                              "delete",
+                              "modify",
+                              "rename",
+                              "restore"
+                            ],
+                            "type": "string"
+                          },
+                          "contentHash": {
+                            "type": "string"
+                          },
+                          "createdAt": {
+                            "type": "string"
+                          },
+                          "encryptedPath": {
+                            "type": "string"
+                          },
+                          "mtimeMs": {
+                            "type": "number"
+                          },
+                          "sizeBytes": {
+                            "type": "number"
+                          },
+                          "versionId": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "action",
+                          "contentHash",
+                          "createdAt",
+                          "encryptedPath",
+                          "mtimeMs",
+                          "sizeBytes",
+                          "versionId"
+                        ],
+                        "type": "object"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "encryptedPath",
+                    "fileId",
+                    "versions"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "files"
+            ],
+            "type": "object"
+          }
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "KEY_DISABLED",
+          "CONTRACT_MISMATCH",
+          "RATE_LIMITED",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR",
+          "QUOTA_EXCEEDED",
+          "VAULT_LIMIT_REACHED",
+          "PAYLOAD_TOO_LARGE",
+          "RANGE_NOT_SATISFIABLE"
+        ]
+      },
+      "POST /api/vaults/:id/sync/push": {
+        "auth": "sync",
+        "contract": "required",
+        "status": [
+          200
+        ],
+        "body": {
+          "kind": "push",
+          "schema": {
+            "properties": {
+              "deviceName": {
+                "anyOf": [
+                  {
+                    "maxLength": 100,
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "files": {
+                "items": {
+                  "properties": {
+                    "action": {
+                      "enum": [
+                        "create",
+                        "delete",
+                        "modify",
+                        "rename",
+                        "restore"
+                      ],
+                      "type": "string"
+                    },
+                    "baseVersionId": {
+                      "anyOf": [
+                        {
+                          "maxLength": 64,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "contentChunks": {
+                      "maximum": 1048576,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "contentHash": {
+                      "pattern": "^[a-f0-9]{64}$",
+                      "type": "string"
+                    },
+                    "contentLength": {
+                      "maximum": 9007199254740991,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "encryptedPath": {
+                      "maxLength": 512,
+                      "type": "string"
+                    },
+                    "fileId": {
+                      "maxLength": 64,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "historyKind": {
+                      "enum": [
+                        "attachments",
+                        "documents"
+                      ],
+                      "type": "string"
+                    },
+                    "mtimeMs": {
+                      "maximum": 9007199254740991,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "sizeBytes": {
+                      "maximum": 9007199254740991,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "versionId": {
+                      "maxLength": 64,
+                      "minLength": 1,
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "action",
+                    "baseVersionId",
+                    "contentHash",
+                    "contentLength",
+                    "encryptedPath",
+                    "fileId",
+                    "historyKind",
+                    "mtimeMs",
+                    "sizeBytes",
+                    "versionId"
+                  ],
+                  "type": "object"
+                },
+                "maxItems": 100,
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "files"
+            ],
+            "type": "object"
+          }
+        },
+        "params": {
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        "response": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "results": {
+                "items": {
+                  "properties": {
+                    "contentHash": {
+                      "type": "string"
+                    },
+                    "currentVersionId": {
+                      "type": "string"
+                    },
+                    "error": {
+                      "type": "string"
+                    },
+                    "fileId": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "enum": [
+                        "content_missing",
+                        "error",
+                        "ok",
+                        "stale_base"
+                      ],
+                      "type": "string"
+                    },
+                    "versionId": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "fileId",
+                    "status"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "results"
+            ],
+            "type": "object"
+          }
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "KEY_DISABLED",
+          "CONTRACT_MISMATCH",
+          "RATE_LIMITED",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR",
+          "QUOTA_EXCEEDED",
+          "VAULT_LIMIT_REACHED",
+          "PAYLOAD_TOO_LARGE",
+          "RANGE_NOT_SATISFIABLE"
+        ],
+        "headers": {
+          "request": [
+            "x-courier-session-id"
+          ]
+        }
+      },
+      "PUT /api/vaults/:id/sync/blobs/:contentHash/chunks/:index": {
+        "auth": "sync",
+        "contract": "required",
+        "status": [
+          200
+        ],
+        "body": {
+          "kind": "bytes",
+          "limit": "chunk"
+        },
+        "query": {
+          "properties": {
+            "chunkCount": {
+              "maximum": 1048576,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "plaintextSize": {
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "chunkCount",
+            "plaintextSize"
+          ],
+          "type": "object"
+        },
+        "params": {
+          "properties": {
+            "contentHash": {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "index": {
+              "pattern": "^\\d+$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "contentHash",
+            "id",
+            "index"
+          ],
+          "type": "object"
+        },
+        "response": {
+          "kind": "json",
+          "schema": {
+            "properties": {
+              "received": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "received"
+            ],
+            "type": "object"
+          }
+        },
+        "errors": [
+          "UNAUTHORIZED",
+          "KEY_EXPIRED",
+          "KEY_DISABLED",
+          "CONTRACT_MISMATCH",
+          "RATE_LIMITED",
+          "VALIDATION_ERROR",
+          "NOT_FOUND",
+          "INTERNAL_ERROR",
+          "QUOTA_EXCEEDED",
+          "VAULT_LIMIT_REACHED",
+          "PAYLOAD_TOO_LARGE",
+          "RANGE_NOT_SATISFIABLE"
+        ]
+      }
+    },
+    "ws": {
+      "upgrade": {
+        "path": "/",
+        "anyPath": true,
+        "contract": "exempt",
+        "headers": [
+          "upgrade"
+        ]
+      },
+      "client": {
+        "oneOf": [
+          {
+            "properties": {
+              "deviceName": {
+                "maxLength": 100,
+                "type": "string"
+              },
+              "type": {
+                "const": "subscribe",
+                "type": "string"
+              },
+              "userKey": {
+                "type": "string"
+              },
+              "vaultId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "userKey",
+              "vaultId"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "pong",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "unsubscribe",
+                "type": "string"
+              },
+              "vaultId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "vaultId"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "server": {
+        "oneOf": [
+          {
+            "properties": {
+              "code": {
+                "enum": [
+                  "CONTRACT_MISMATCH",
+                  "INSUFFICIENT_SCOPE",
+                  "INTERNAL_ERROR",
+                  "KEY_DISABLED",
+                  "KEY_EXPIRED",
+                  "NOT_FOUND",
+                  "PAYLOAD_TOO_LARGE",
+                  "QUOTA_EXCEEDED",
+                  "RANGE_NOT_SATISFIABLE",
+                  "RATE_LIMITED",
+                  "UNAUTHORIZED",
+                  "UNKNOWN_ERROR",
+                  "VALIDATION_ERROR",
+                  "VAULT_LIMIT_REACHED"
+                ],
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "type": {
+                "const": "subscribe_error",
+                "type": "string"
+              },
+              "vaultId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "message",
+              "type",
+              "vaultId"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "files": {
+                "items": {
+                  "properties": {
+                    "deviceName": {
+                      "type": [
+                        "null",
+                        "string"
+                      ]
+                    },
+                    "fileId": {
+                      "type": "string"
+                    },
+                    "versionId": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "fileId",
+                    "versionId"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "type": {
+                "const": "files_pushed",
+                "type": "string"
+              },
+              "vaultId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "files",
+              "type",
+              "vaultId"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "historyLimits": {
+                "properties": {
+                  "attachments": {
+                    "type": "number"
+                  },
+                  "documents": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "attachments",
+                  "documents"
+                ],
+                "type": "object"
+              },
+              "type": {
+                "const": "vault_settings",
+                "type": "string"
+              },
+              "vaultId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "historyLimits",
+              "type",
+              "vaultId"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "sessionId": {
+                "type": "string"
+              },
+              "type": {
+                "const": "subscribe_success",
+                "type": "string"
+              },
+              "vaultId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "sessionId",
+              "type",
+              "vaultId"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "api_key_disabled",
+                "type": "string"
+              },
+              "vaultId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "vaultId"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "api_key_revoked",
+                "type": "string"
+              },
+              "vaultId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "vaultId"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "ping",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "unsubscribed",
+                "type": "string"
+              },
+              "vaultId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "vaultId"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "vault_deleted",
+                "type": "string"
+              },
+              "vaultId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "vaultId"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "binary": {
+      "pushBody": {
+        "headerLengthBytes": 4,
+        "maxHeaderBytes": 1048576,
+        "header": {
+          "properties": {
+            "deviceName": {
+              "anyOf": [
+                {
+                  "maxLength": 100,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "files": {
+              "items": {
+                "properties": {
+                  "action": {
+                    "enum": [
+                      "create",
+                      "delete",
+                      "modify",
+                      "rename",
+                      "restore"
+                    ],
+                    "type": "string"
+                  },
+                  "baseVersionId": {
+                    "anyOf": [
+                      {
+                        "maxLength": 64,
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "contentChunks": {
+                    "maximum": 1048576,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "contentHash": {
+                    "pattern": "^[a-f0-9]{64}$",
+                    "type": "string"
+                  },
+                  "contentLength": {
+                    "maximum": 9007199254740991,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "encryptedPath": {
+                    "maxLength": 512,
+                    "type": "string"
+                  },
+                  "fileId": {
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "historyKind": {
+                    "enum": [
+                      "attachments",
+                      "documents"
+                    ],
+                    "type": "string"
+                  },
+                  "mtimeMs": {
+                    "maximum": 9007199254740991,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "sizeBytes": {
+                    "maximum": 9007199254740991,
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "versionId": {
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "action",
+                  "baseVersionId",
+                  "contentHash",
+                  "contentLength",
+                  "encryptedPath",
+                  "fileId",
+                  "historyKind",
+                  "mtimeMs",
+                  "sizeBytes",
+                  "versionId"
+                ],
+                "type": "object"
+              },
+              "maxItems": 100,
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "files"
+          ],
+          "type": "object"
+        },
+        "content": "per-file ciphertext, in header order, each contentLength bytes"
+      },
+      "contentBatch": {
+        "magic": "CBC1",
+        "headerBytes": 8,
+        "maxFiles": 64,
+        "maxBytes": 16777216
+      },
+      "blob": {
+        "magic": "CBR2",
+        "headerBytes": 24,
+        "chunkPlaintextBytes": 4194304,
+        "chunkStoredBytes": 4194332,
+        "chunkedTransferThreshold": 8388608,
+        "maxChunks": 1048576,
+        "chunkAadFlag": 1
+      }
+    },
+    "error": {
+      "properties": {
+        "details": {
+          "items": {
+            "properties": {
+              "field": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "field",
+              "message"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "error": {
+          "enum": [
+            "CONTRACT_MISMATCH",
+            "INSUFFICIENT_SCOPE",
+            "INTERNAL_ERROR",
+            "KEY_DISABLED",
+            "KEY_EXPIRED",
+            "NOT_FOUND",
+            "PAYLOAD_TOO_LARGE",
+            "QUOTA_EXCEEDED",
+            "RANGE_NOT_SATISFIABLE",
+            "RATE_LIMITED",
+            "UNAUTHORIZED",
+            "UNKNOWN_ERROR",
+            "VALIDATION_ERROR",
+            "VAULT_LIMIT_REACHED"
+          ],
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "error",
+        "message"
+      ],
+      "type": "object"
+    },
+    "contractMismatch": {
+      "properties": {
+        "clientContract": {
+          "type": "number"
+        },
+        "error": {
+          "const": "CONTRACT_MISMATCH",
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "minClient": {
+          "type": "number"
+        },
+        "serverContract": {
+          "type": "number"
+        },
+        "serverVersion": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "clientContract",
+        "error",
+        "message",
+        "minClient",
+        "serverContract",
+        "serverVersion"
+      ],
+      "type": "object"
+    },
+    "constants": {
+      "API_ERROR_CODES": [
+        "VALIDATION_ERROR",
+        "UNAUTHORIZED",
+        "NOT_FOUND",
+        "KEY_EXPIRED",
+        "KEY_DISABLED",
+        "INSUFFICIENT_SCOPE",
+        "CONTRACT_MISMATCH",
+        "RATE_LIMITED",
+        "QUOTA_EXCEEDED",
+        "VAULT_LIMIT_REACHED",
+        "PAYLOAD_TOO_LARGE",
+        "RANGE_NOT_SATISFIABLE",
+        "INTERNAL_ERROR"
+      ],
+      "API_KEY_SCOPES": [
+        "admin",
+        "status",
+        "users"
+      ],
+      "BLOB_FLAG_CHUNK_AAD": 1,
+      "BLOB_HEADER_BYTES": 24,
+      "BLOB_MAGIC": "CBR2",
+      "CHUNKED_TRANSFER_THRESHOLD": 8388608,
+      "CHUNK_PLAINTEXT_BYTES": 4194304,
+      "CHUNK_STORED_BYTES": 4194332,
+      "CONTENT_BATCH_HEADER_BYTES": 8,
+      "CONTENT_BATCH_MAGIC": "CBC1",
+      "CONTENT_HASH_PATTERN": {
+        "regex": "^[a-f0-9]{64}$",
+        "flags": ""
+      },
+      "CONTRACT_HEADER": "X-Courier-Contract",
+      "HISTORY_KINDS": [
+        "documents",
+        "attachments"
+      ],
+      "KEY_CHECK_VALUE": "courier-key-check",
+      "MAX_CHUNKS": 1048576,
+      "MAX_CONTENT_BATCH_BYTES": 16777216,
+      "MAX_CONTENT_BATCH_FILES": 64,
+      "MAX_DEVICE_NAME_LENGTH": 100,
+      "MAX_ENCRYPTED_PATH_LENGTH": 512,
+      "MAX_HISTORY_LIMIT": 10000,
+      "MAX_ID_LENGTH": 64,
+      "MAX_PULL_BATCH_FILES": 200,
+      "MAX_PUSH_BATCH_FILES": 100,
+      "MAX_PUSH_HEADER_BYTES": 1048576,
+      "PUSH_HEADER_LENGTH_BYTES": 4,
+      "SYNC_ACTIONS": [
+        "create",
+        "modify",
+        "rename",
+        "delete",
+        "restore"
+      ]
+    }
+  }
+}
