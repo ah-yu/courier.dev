@@ -54,6 +54,15 @@ export function classify(previous: Surface, current: Surface): Classification {
       detail: "the rule for unknown JSON keys changed",
     });
   }
+  // Fail closed: a serialized field the classifier does not model must not pass as
+  // "unchanged" just because no rule read it.
+  if (changes.length === 0 && JSON.stringify(previous) !== JSON.stringify(current)) {
+    changes.push({
+      verdict: "breaking",
+      path: "surface",
+      detail: "the surface changed in a field the classifier does not model",
+    });
+  }
 
   const sorted = [...changes].toSorted((left, right) => byCodeUnits(left.path, right.path));
   return { changes: sorted, verdict: verdictOf(sorted) };
@@ -193,6 +202,13 @@ function diffBody(path: string, before: unknown, after: unknown, changes: Change
   }
   if (oldKind === "json" || oldKind === "push") {
     diffSchema(oldBody.schema, newBody.schema, `${path}.body`, "request", changes);
+  }
+  if (oldKind === "bytes" && oldBody.limit !== newBody.limit) {
+    changes.push({
+      verdict: "breaking",
+      path: `${path}.body.limit`,
+      detail: `body limit changed from ${string(oldBody.limit) ?? "absent"} to ${string(newBody.limit) ?? "absent"}`,
+    });
   }
 }
 

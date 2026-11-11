@@ -47,15 +47,10 @@ export async function readPushBody(request: RouteRequest): Promise<PushBody> {
     throw new ValidationError("Validation failed", validationDetails(parsed.error.issues));
   }
 
-  // The header's label is display text: trim it and refuse a whitespace-only one, exactly
-  // as the old push schema's `.trim().min(1)` did. The socket path normalizes it the same
-  // way (`trimDeviceName`).
+  // The header's label is display text: `parsePushBody` already normalises an absent,
+  // empty or whitespace-only one to `null`; trim again so a padded label is stored the
+  // same way the socket path stores it (`trimDeviceName`).
   const deviceName = trimDeviceName(parsedBody.deviceName);
-  if (parsedBody.deviceName !== null && deviceName === null) {
-    throw new ValidationError("Validation failed", [
-      { field: "deviceName", message: "deviceName must not be blank" },
-    ]);
-  }
 
   // Cross-field rules: a version travels either as a whole payload or as staged chunks,
   // and the size decides which.

@@ -399,8 +399,9 @@ A wire change is a decision, not a side effect. Before committing anything under
 
 1. `bun run contract` and read every `!` / `~` / `+`. Confirm the verdict, the side that upgrades,
    and that `MIN_CLIENT_CONTRACT` moved only for a breaking change.
-2. If the numbers moved, they came from `bump --write --reason "..."`, never a hand edit; the
-   reason is the decision record and names the side that must upgrade.
+2. If the numbers moved, they came from `bump --write --reason "..."` (or, for a surface-format
+   break, `bump --write --format-change --reason "..."`), never a hand edit; the reason is the
+   decision record and names the side that must upgrade.
 3. A semantic change with no surface diff needs an L1 test and the owning document — the gate
    cannot see it.
 4. A server route or handler change needs its registry contract, an L1 test and a response-schema

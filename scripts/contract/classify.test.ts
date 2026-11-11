@@ -141,6 +141,18 @@ describe("the classifier", () => {
     expect(routeVerdict(before, after)).toBe("breaking");
   });
 
+  it("reads a changed bytes-body limit as breaking", () => {
+    const chunk = route({ body: { kind: "bytes", limit: "chunk" } });
+    const other = route({ body: { kind: "bytes", limit: "other" } });
+    expect(routeVerdict(chunk, other)).toBe("breaking");
+  });
+
+  it("fails closed on a surface field the classifier does not model", () => {
+    const before = withRoute(surface(), "POST /x", route());
+    const after = withRoute(surface(), "POST /x", route({ extra: true }));
+    expect(verdict(before, after)).toBe("breaking");
+  });
+
   it("reads a changed unknown-key rule as breaking", () => {
     const after = { ...surface(), unknownKeys: "reject" } as unknown as Surface;
     expect(verdict(surface(), after)).toBe("breaking");

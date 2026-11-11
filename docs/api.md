@@ -124,8 +124,12 @@ what it means:
 ```
 bun run contract                              # check the code against its generation's surface file
 bun run contract bump --write --reason "..."  # classify, then write the numbers and the next surface
+bun run contract bump --write --format-change --reason "..."  # a format break: no diff; the floor stays
 bun run contract write --reason "..."         # only when a generation has no file yet
 ```
+
+`--format-change` is for a **surface-format break**: the previous file is not comparable, so the
+tool writes the next generation without classifying it and keeps `MIN_CLIENT_CONTRACT`.
 
 The classifier is direction-aware: a new required **request** field breaks an old sender, while a
 new required **response** field is ignored by an old reader. It has three moving verdicts —

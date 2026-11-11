@@ -158,6 +158,8 @@ const SYNC_ERRORS: readonly ApiErrorCode[] = [
   "RANGE_NOT_SATISFIABLE",
 ];
 
+const VAULT_ERRORS: readonly ApiErrorCode[] = [...USER_ERRORS, "VAULT_LIMIT_REACHED"];
+
 const HOST_ERRORS: readonly ApiErrorCode[] = [
   "UNAUTHORIZED",
   "KEY_EXPIRED",
@@ -279,7 +281,7 @@ export const HTTP = [
     body: { kind: "json", schema: CreateVaultRequestSchema },
     response: { kind: "json", schema: CreateVaultResponseSchema },
     status: [201],
-    errors: USER_ERRORS,
+    errors: VAULT_ERRORS,
   },
   {
     id: "vaults.update",

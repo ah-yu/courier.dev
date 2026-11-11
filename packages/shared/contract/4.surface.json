@@ -1781,7 +1781,8 @@
           "RATE_LIMITED",
           "VALIDATION_ERROR",
           "NOT_FOUND",
-          "INTERNAL_ERROR"
+          "INTERNAL_ERROR",
+          "VAULT_LIMIT_REACHED"
         ]
       },
       "POST /api/vaults/:id/sync/contents": {
@@ -2042,7 +2043,6 @@
                 "anyOf": [
                   {
                     "maxLength": 100,
-                    "minLength": 1,
                     "type": "string"
                   },
                   {
@@ -2141,7 +2141,6 @@
               }
             },
             "required": [
-              "deviceName",
               "files"
             ],
             "type": "object"
@@ -2593,7 +2592,6 @@
               "anyOf": [
                 {
                   "maxLength": 100,
-                  "minLength": 1,
                   "type": "string"
                 },
                 {
@@ -2692,7 +2690,6 @@
             }
           },
           "required": [
-            "deviceName",
             "files"
           ],
           "type": "object"

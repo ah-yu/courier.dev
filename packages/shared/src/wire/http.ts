@@ -213,7 +213,9 @@ export const PushBodySchema = z.object({
 });
 
 export const PushBodyHeaderSchema = z.object({
-  deviceName: z.nullable(text({ min: 1, max: MAX_DEVICE_NAME_LENGTH })),
+  // The header may omit the label; the parser also normalises an empty or whitespace-only
+  // one to `null` (`readDeviceName`), so the raw field allows it.
+  deviceName: z.optional(z.nullable(text({ max: MAX_DEVICE_NAME_LENGTH }))),
   files: list(PushFileHeaderSchema, { min: 1, max: MAX_PUSH_BATCH_FILES }),
 });
 
