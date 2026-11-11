@@ -2,7 +2,7 @@
   "generation": 4,
   "decision": {
     "verdict": "format-change",
-    "reason": "generation 3's declaration surface is not comparable with the registry; generation 4 records request constraints, auth, status, the error body and WebSocket frames for the first time. The wire is not misread, so the floor stays 1"
+    "reason": "generation 3's declaration surface is not comparable with the registry; generation 4 records request constraints, auth, status, headers, the error body and WebSocket frames for the first time. The wire is not misread, so the floor stays 1"
   },
   "surface": {
     "unknownKeys": "strip",
@@ -2218,7 +2218,12 @@
           "VAULT_LIMIT_REACHED",
           "PAYLOAD_TOO_LARGE",
           "RANGE_NOT_SATISFIABLE"
-        ]
+        ],
+        "headers": {
+          "request": [
+            "x-courier-session-id"
+          ]
+        }
       },
       "PUT /api/vaults/:id/sync/blobs/:contentHash/chunks/:index": {
         "auth": "sync",

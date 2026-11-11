@@ -36,6 +36,7 @@ const apply = process.argv.includes("--write");
 const assumeClientUsage = process.argv.includes("--server");
 const denyClientUsage = process.argv.includes("--no-server");
 const keepFloor = process.argv.includes("--keep-floor");
+const formatChange = process.argv.includes("--format-change");
 const reason = argument("--reason");
 const fileVerdict = argument("--verdict") ?? "initial";
 
@@ -59,7 +60,7 @@ switch (command) {
   default:
     console.error(`Unknown command: ${command}`);
     console.error(
-      "Usage: bun run contract [check | review --since <tag> | bump [--write] [--reason <text>] [--keep-floor] | write --reason <text> [--verdict initial|format-change]]",
+      "Usage: bun run contract [check | review --since <tag> | bump [--write] [--reason <text>] [--keep-floor] [--format-change] | write --reason <text> [--verdict initial|format-change]]",
     );
     process.exit(2);
 }
@@ -207,8 +208,42 @@ function readGenerationMeta(file: string): { verdict: string; reason: string } |
   }
 }
 
+/**
+ * Start a new generation from a **format break**: the previous surface file is not
+ * comparable, so there is no diff to classify. The generation moves, the floor stays —
+ * a format change does not make an older client misread the wire.
+ */
+function bumpFormatChange(): void {
+  if (!apply) {
+    console.error(
+      "\ncontract: nothing was written. Re-run with --write to apply the format change.\n",
+    );
+    process.exit(1);
+  }
+  if (reason === undefined) {
+    console.error('\ncontract: --write --format-change needs --reason "why the format broke".\n');
+    process.exit(1);
+  }
+  const next = generations.contract + 1;
+  const target = join(contractDirectory, `${next}.surface.json`);
+  if (existsSync(target)) {
+    console.error(`contract: ${relative(target)} already exists; generations only move forward.`);
+    process.exit(1);
+  }
+  writeGenerations({ contract: next, minClient: generations.minClient });
+  writeFileSync(target, generationFileText(next, "format-change", reason, surface), "utf8");
+  console.log(
+    `\ncontract: generation ${generations.contract} → ${next} (format change); wrote ${relative(target)} and ${relative(contractSource)}.`,
+  );
+  console.log("contract: the previous surface is not comparable; the floor stays.\n");
+}
+
 /** Classify the diff against the current generation and (with `--write`) apply it. */
 function bump(): void {
+  if (formatChange) {
+    bumpFormatChange();
+    return;
+  }
   if (!existsSync(generationFile)) {
     console.error(
       `contract: generation ${generations.contract} has no surface file to compare against.\n` +

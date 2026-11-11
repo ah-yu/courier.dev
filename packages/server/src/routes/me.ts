@@ -10,8 +10,8 @@ import type { RouteHandlers } from "../http/contract-routes";
  * every user. This answers for the presented key only, and never returns the key
  * itself, so it is also the cheapest way to prove the key still works.
  *
- * The adapter's `withUserAuth` runs the contract check and the key check; the handler
- * only builds the answer.
+ * The adapter applies the contract check from the registry; `withUserAuth` then checks
+ * the key, and the handler only builds the answer.
  */
 export function meHandlers(): Pick<RouteHandlers, "me.get"> {
   return {

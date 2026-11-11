@@ -364,6 +364,9 @@ export const HTTP = [
     body: { kind: "push", schema: PushBodySchema },
     response: { kind: "json", schema: SyncPushResponseSchema },
     status: [200],
+    // The pusher's own session id: the server excludes it from the `files_pushed`
+    // broadcast, so a rename here silently disables echo suppression.
+    headers: { request: ["x-courier-session-id"] },
     errors: SYNC_ERRORS,
   },
   {

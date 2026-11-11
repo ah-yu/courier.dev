@@ -49,6 +49,19 @@ function frame(type: string): Record<string, unknown> {
   };
 }
 
+function tupleSchema(first: string): Record<string, unknown> {
+  return {
+    type: "object",
+    properties: {
+      loadAverage: {
+        type: "array",
+        prefixItems: [{ type: first }, { type: "number" }, { type: "number" }],
+      },
+    },
+    required: ["loadAverage"],
+  };
+}
+
 function surface(overrides: Partial<Surface> = {}): Surface {
   return {
     unknownKeys: "strip",
@@ -120,6 +133,17 @@ describe("the classifier", () => {
     const wider = route({ body: jsonBody({ name: { type: "string", maxLength: 300 } }, ["name"]) });
     expect(routeVerdict(wide, narrow)).toBe("breaking");
     expect(routeVerdict(wide, wider)).toBe("additive");
+  });
+
+  it("reads a retyped tuple member as breaking", () => {
+    const before = route({ response: { kind: "json", schema: tupleSchema("number") } });
+    const after = route({ response: { kind: "json", schema: tupleSchema("string") } });
+    expect(routeVerdict(before, after)).toBe("breaking");
+  });
+
+  it("reads a changed unknown-key rule as breaking", () => {
+    const after = { ...surface(), unknownKeys: "reject" } as unknown as Surface;
+    expect(verdict(surface(), after)).toBe("breaking");
   });
 
   it("reads a removed status as breaking and an added one as additive", () => {

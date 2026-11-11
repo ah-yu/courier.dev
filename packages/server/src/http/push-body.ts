@@ -3,6 +3,7 @@ import {
   WireFormatError,
   chunkCountFor,
   parsePushBody,
+  trimDeviceName,
   type PushBody,
 } from "@courier/shared";
 import { PushBodySchema } from "@courier/shared/wire";
@@ -46,6 +47,16 @@ export async function readPushBody(request: RouteRequest): Promise<PushBody> {
     throw new ValidationError("Validation failed", validationDetails(parsed.error.issues));
   }
 
+  // The header's label is display text: trim it and refuse a whitespace-only one, exactly
+  // as the old push schema's `.trim().min(1)` did. The socket path normalizes it the same
+  // way (`trimDeviceName`).
+  const deviceName = trimDeviceName(parsedBody.deviceName);
+  if (parsedBody.deviceName !== null && deviceName === null) {
+    throw new ValidationError("Validation failed", [
+      { field: "deviceName", message: "deviceName must not be blank" },
+    ]);
+  }
+
   // Cross-field rules: a version travels either as a whole payload or as staged chunks,
   // and the size decides which.
   for (const file of parsedBody.files) {
@@ -73,5 +84,5 @@ export async function readPushBody(request: RouteRequest): Promise<PushBody> {
     }
   }
 
-  return parsedBody;
+  return { deviceName, files: parsedBody.files };
 }

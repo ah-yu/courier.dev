@@ -179,5 +179,5 @@ Content is addressed by its plaintext hash, and the store holds the ciphertext.
 
 ## Errors and validation
 
-- **Errors**: custom `AppError` hierarchy in `src/lib/errors.ts`, whose `code` is the shared `ApiErrorCode` and whose `statusCode` is `Bun.serve`'s `ContentfulStatusCode`; global `errorHandler` returns `{ error, message, details? }`. `lib/validator.ts` owns the one `validationDetails` mapper, used by `createValidator` and by the push route's binary-body validation. Expiry is one rule for both credentials (`lib/expiry.ts`): an unparseable `expires_at` counts as **expired**, the answer `users` and `api_keys` used to disagree about.
-- **Validation**: Zod through `withJson` / `parseJson` (`http/guards.ts`), which answer the same 422 with `details`.
+- **Errors**: custom `AppError` hierarchy in `src/lib/errors.ts`, whose `code` is the shared `ApiErrorCode` and whose `statusCode` is `Bun.serve`'s `ContentfulStatusCode`; global `errorHandler` returns `{ error, message, details? }`. `lib/validator.ts` owns the one `validationDetails` mapper, used by the contract adapter and by the push route's binary-body validation. Expiry is one rule for both credentials (`lib/expiry.ts`): an unparseable `expires_at` counts as **expired**, the answer `users` and `api_keys` used to disagree about.
+- **Validation**: the shared wire schema through `parseJsonBody` (`http/contract-routes.ts`), which answers the same 422 with `details`; the push route validates its binary header in `http/push-body.ts`.
