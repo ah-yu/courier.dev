@@ -3,7 +3,7 @@ import crypto from "crypto";
 import type { WsServerMessage } from "@courier/shared";
 import { HTTP, WsClientMessageSchema } from "@courier/shared/wire";
 import { createServerApp } from "../index";
-import { notFound } from "../http/router";
+import { notFound, requestPath } from "../http/router";
 import { toErrorResponse } from "../http/auth";
 import { toRouteTable, type RouteHandlers } from "../http/contract-routes";
 import { healthHandlers } from "../routes/health";
@@ -420,7 +420,7 @@ export function createChallengeListener(
       port,
       fetch(request) {
         const match = /^\/\.well-known\/acme-challenge\/([A-Za-z0-9_-]+)$/.exec(
-          new URL(request.url).pathname,
+          requestPath(request),
         );
         const body = request.method === "GET" && match ? response(match[1]) : null;
         if (body === null) return new Response(null, { status: 404 });

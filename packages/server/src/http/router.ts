@@ -47,6 +47,32 @@ export function jsonError(code: string, message: string, status: number): Respon
 }
 
 /**
+ * The parsed request URL, or null when Bun could not build one.
+ *
+ * `Bun.serve` composes `request.url` from the `Host` header, so a scan that sends
+ * none (an HTTP/1.0 probe) arrives as a bare path (`/health`), and a malformed one
+ * (`Host: [`) as an origin that is not a URL (`http://[/health`). Both are somebody
+ * else's traffic, and `new URL` refusing them must not turn a 404 — or the access
+ * line that records it — into a 500 with a stack.
+ */
+export function requestUrl(request: Request): URL | null {
+  try {
+    return new URL(request.url);
+  } catch {
+    return null;
+  }
+}
+
+/** A request's path, falling back to what the peer sent when there is no parsed URL. */
+export function requestPath(request: Request): string {
+  const url = requestUrl(request);
+  if (url !== null) return url.pathname;
+  // The raw string is the only thing left to log; keep its query out of the path field.
+  const [raw] = request.url.split("?");
+  return raw === undefined || raw === "" ? "/" : raw;
+}
+
+/**
  * Wrap a route handler with the access log.
  *
  * `Bun.serve` has no middleware chain, so a route table entry would otherwise lose its
@@ -67,7 +93,7 @@ export function withAccessLog(
     const started = performance.now();
     const response = await handler(request);
     const ms = Math.round(performance.now() - started);
-    const path = new URL(request.url).pathname;
+    const path = requestPath(request);
     const level = requestLevel({
       method: request.method,
       path,
@@ -91,7 +117,7 @@ export function withAccessLog(
  * day), so it stays at `debug` however slow the probe was.
  */
 export function notFound(request: Request, logger: Logger, slowMs = 500): Response {
-  const path = new URL(request.url).pathname;
+  const path = requestPath(request);
   const level = requestLevel({
     method: request.method,
     path,

@@ -1,8 +1,9 @@
 import { spawn } from "child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
-import { createServer as createNetServer } from "net";
+import { connect, createServer as createNetServer } from "net";
 import { tmpdir } from "os";
 import { join } from "path";
+import { connect as tlsConnect } from "tls";
 import { fileURLToPath } from "url";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
@@ -108,6 +109,36 @@ async function httpsGet(
 }
 
 /**
+ * One raw HTTP/1.0 request — what a port scanner sends, and the one shape whose
+ * missing `Host` header makes Bun hand the listener a relative URL. `secure`
+ * reaches a TLS listener, the way the deployed service port is reached.
+ */
+function hostlessStatus(port: number, path: string, secure = false): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const socket = secure
+      ? tlsConnect({ port, host: "127.0.0.1", rejectUnauthorized: false })
+      : connect(port, "127.0.0.1");
+    let data = "";
+    socket.setTimeout(2000, () => {
+      socket.destroy();
+      reject(new Error("the listener did not answer"));
+    });
+    socket.on("data", (chunk) => {
+      data += chunk.toString();
+      const match = /^HTTP\/1\.[01] (\d{3})/.exec(data);
+      if (match?.[1] !== undefined) {
+        socket.destroy();
+        resolve(Number(match[1]));
+      }
+    });
+    socket.on("error", reject);
+    socket.on(secure ? "secureConnect" : "connect", () =>
+      socket.write(`GET ${path} HTTP/1.0\r\n\r\n`),
+    );
+  });
+}
+
+/**
  * The client half of the "unmodified client" case, run by Bun itself: the
  * global `fetch` and the global `WebSocket` are the transports the Obsidian
  * plugin and `courier-cli` use, and neither takes a per-request trust argument.
@@ -196,6 +227,20 @@ describe("startServer with TLS_NAME set", () => {
     // ...and one that does not is refused by the handshake.
     await expect(httpsGetUntrusted(port)).rejects.toThrow(/self.signed|unable to verify/i);
 
+    // The deployed port is the one scanners hit, and a hostless HTTP/1.0 probe is
+    // the shape whose `new URL(request.url)` used to turn an answered 404 into a
+    // 500. An unmatched path stays a 404, a real route still answers, and neither
+    // writes an error line at the default level.
+    const probeLog = vi.spyOn(process.stderr, "write");
+    expect(await hostlessStatus(port, "/", true)).toBe(404);
+    expect(await hostlessStatus(port, "/api/health", true)).toBe(200);
+    const probeLines = probeLog.mock.calls.map((call) => String(call[0])).join("");
+    probeLog.mockRestore();
+    expect(probeLines).not.toContain("Unhandled error");
+    // A route miss and a successful read are both debug lines, so `info` keeps them out.
+    expect(probeLines).not.toContain("404 0ms");
+    expect(probeLines).not.toContain("/api/health 200");
+
     // The WebSocket upgrade rides the same TLS listener. Bun's client cannot take a
     // per-connection CA, so this goes through the same child-process client the
     // "own trust store" case uses — which is also how a deployed client behaves.
@@ -272,6 +317,12 @@ describe("startServer with TLS_NAME set", () => {
       404,
     );
     expect((await fetch(`http://127.0.0.1:${port}/`)).status).toBe(404);
+
+    // The challenge port is as public as the service port, and a hostless probe
+    // reaches this listener as a relative URL. It used to throw before answering;
+    // now the path is still read, so the registered token answers and the rest 404s.
+    expect(await hostlessStatus(port, "/")).toBe(404);
+    expect(await hostlessStatus(port, "/.well-known/acme-challenge/tok")).toBe(200);
 
     await listener.close();
   });

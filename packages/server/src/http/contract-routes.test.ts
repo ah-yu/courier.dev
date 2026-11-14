@@ -52,6 +52,16 @@ async function call(table: RouteTable, path = "/api/test"): Promise<Response> {
   return await route(request as RouteRequest);
 }
 
+/**
+ * A request as `Bun.serve` hands it to `fetch` when the `Host` header is missing or
+ * not a host: `url` is the raw string Bun built, which `new Request()` cannot express.
+ */
+function requestWithRawUrl(rawUrl: string): RouteRequest {
+  const request = new Request("http://placeholder/");
+  Object.defineProperty(request, "url", { value: rawUrl });
+  return Object.assign(request, { params: {} }) as RouteRequest;
+}
+
 describe("toRouteTable", () => {
   it("refuses a contract without a handler", () => {
     expect(() => toRouteTable([contract()], {}, logger, deps)).toThrow(/no handler/);
@@ -124,5 +134,24 @@ describe("toRouteTable", () => {
       deps,
     );
     expect((await call(table)).status).toBe(500);
+  });
+
+  it("refuses a routed request whose URL Bun could not build", async () => {
+    // A malformed Host still matches a route — Bun routes by path — so the query
+    // parser is where such a request used to become an unhandled `Invalid URL` 500.
+    const table = toRouteTable(
+      [contract({ query: z.object({ limit: z.string() }) })],
+      { "test.get": ok },
+      logger,
+      deps,
+    );
+    const route = table["/api/test"]?.GET;
+    if (route === undefined) throw new Error("no route for /api/test");
+    const response = await route(requestWithRawUrl("http://[/api/test?limit=1"));
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({
+      error: "VALIDATION_ERROR",
+      message: "Malformed request URL",
+    });
   });
 });

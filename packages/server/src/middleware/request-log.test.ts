@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { requestLevel, requestMessage, type RequestFacts } from "./request-log";
-import { notFound, withAccessLog } from "../http/router";
+import { notFound, requestPath, withAccessLog } from "../http/router";
 import type { Logger, LogLevel } from "../lib/logger";
 
 /**
@@ -37,6 +37,19 @@ function facts(overrides: Partial<RequestFacts> = {}): RequestFacts {
     hasAuthorization: true,
     ...overrides,
   };
+}
+
+/**
+ * A request shaped the way `Bun.serve` hands a missing or malformed `Host` to
+ * `fetch`: `url` is the raw relative or unparseable string, which `new Request()`
+ * itself refuses to build. Checked against Bun 1.4.4 — a hostless HTTP/1.0 probe
+ * arrives as `/path`, and `Host: [` as `http://[/path` — and only `.url`, `.method`
+ * and `.headers` are read by the code under test.
+ */
+function requestWithRawUrl(rawUrl: string, init?: RequestInit): Request {
+  const request = new Request("http://placeholder/", init);
+  Object.defineProperty(request, "url", { value: rawUrl });
+  return request;
 }
 
 describe("requestLevel", () => {
@@ -124,6 +137,22 @@ describe("requestLevel", () => {
   });
 });
 
+describe("requestPath", () => {
+  it("returns the pathname of a parsed URL", () => {
+    expect(requestPath(new Request("http://x/api/health?full=1"))).toBe("/api/health");
+  });
+
+  it("keeps what the peer sent when Bun could not build a URL", () => {
+    // A relative URL from a hostless probe still has its path in it; a malformed
+    // Host leaves only the raw string, and that is what the log should name.
+    expect(requestPath(requestWithRawUrl("/api/health?full=1"))).toBe("/api/health");
+    expect(requestPath(requestWithRawUrl("http://[/api/health?full=1"))).toBe(
+      "http://[/api/health",
+    );
+    expect(requestPath(requestWithRawUrl(""))).toBe("/");
+  });
+});
+
 /**
  * The Bun route table's access log.
  *
@@ -173,6 +202,17 @@ describe("withAccessLog", () => {
     expect(records).toHaveLength(1);
     expect(records[0]!.level).toBe("info");
   });
+
+  it("logs a request whose URL Bun could not build instead of failing it", async () => {
+    // The access line used to be the one place a scan could turn an answered request
+    // into a 500: `new URL` threw after the handler had already produced a response.
+    const { logger, records } = recordingLogger("debug");
+    const handler = withAccessLog(logger, () => new Response(null, { status: 200 }));
+    const response = await handler(Object.assign(requestWithRawUrl("/api/health"), { params: {} }));
+    expect(response.status).toBe(200);
+    expect(records).toHaveLength(1);
+    expect(records[0]!.message).toBe("GET /api/health 200 0ms");
+  });
 });
 
 describe("notFound", () => {
@@ -188,5 +228,22 @@ describe("notFound", () => {
     expect(loud.records).toHaveLength(1);
     expect(loud.records[0]!.level).toBe("debug");
     expect(loud.records[0]!.message).toContain("GET /api/nope 404");
+  });
+
+  it("answers a request whose URL Bun could not build instead of throwing", () => {
+    // Port scanners send HTTP/1.0 with no Host header (a relative URL) and,
+    // occasionally, a Host that is not a host. The 404 fallback sees both, and it
+    // must answer them as the 404 they are rather than logging an internal error.
+    const loud = recordingLogger("debug");
+
+    const relative = notFound(requestWithRawUrl("/api/nope"), loud.logger);
+    expect(relative.status).toBe(404);
+    expect(loud.records[0]!.level).toBe("debug");
+    expect(loud.records[0]!.message).toContain("GET /api/nope 404");
+
+    loud.records.length = 0;
+    const malformed = notFound(requestWithRawUrl("http://[/api/nope"), loud.logger);
+    expect(malformed.status).toBe(404);
+    expect(loud.records[0]!.message).toContain("GET http://[/api/nope 404");
   });
 });

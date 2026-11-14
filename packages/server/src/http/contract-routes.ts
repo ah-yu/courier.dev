@@ -34,6 +34,7 @@ import { readPushBody } from "./push-body";
 import {
   json,
   readJson,
+  requestUrl,
   withAccessLog,
   type RouteHandler,
   type RouteRequest,
@@ -202,7 +203,12 @@ function parseParams(contract: HttpContract, request: RouteRequest): Record<stri
 }
 
 function parseQuery(schema: WireSchema, request: RouteRequest): unknown {
-  const raw = Object.fromEntries(new URL(request.url).searchParams);
+  const url = requestUrl(request);
+  // A request whose URL Bun could not build (a missing or malformed `Host`) is not
+  // a client request; refusing it as a validation failure keeps it from reaching a
+  // handler with query parameters nobody sent.
+  if (url === null) throw new ValidationError("Malformed request URL");
+  const raw = Object.fromEntries(url.searchParams);
   const parsed = schema.safeParse(raw);
   if (!parsed.success) {
     throw new ValidationError("Validation failed", validationDetails(parsed.error.issues));
