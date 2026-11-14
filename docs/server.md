@@ -158,9 +158,19 @@ Content is addressed by its plaintext hash, and the store holds the ciphertext.
   for the successful sync push, and for a request **no route answered**. The deployed port listens on
   the public internet and is scanned continuously (`GET /`, `GET /.git/HEAD`, `GET /mcp`,
   `POST /sdk`); those paths are somebody else's traffic, so they stay in the full access log a
-  deployment turns on with `LOG_LEVEL=debug` and never reach the default view. `info` is a 4xx **a
-  route produced** (an unknown vault or version, a bad body) and a **successful mutation** (creating
-  or deleting an account, emptying the recycle bin — the acts an operator asks about afterwards);
+  deployment turns on with `LOG_LEVEL=debug` and never reach the default view. A probe may also
+  send no `Host` header at all (HTTP/1.0) or one Bun cannot parse, which leaves `request.url`
+  relative or unparseable; the access log and the 404 fallback take the path from the raw string
+  (`requestPath` / `requestUrl` in `src/http/router.ts`) instead of failing the request, so such a
+  probe is logged like the traffic it is and never becomes a 500. Bun still routes by path, so a
+  hostless request to a route that reads no query is served or refused exactly like a well-formed
+  one; only `GET …/sync/versions` and `PUT …/sync/blobs/:hash/chunks/:index` parse the URL, and
+  after the generation and credential checks they refuse an unparseable one with 422
+  `VALIDATION_ERROR` (a 4xx a route produced, so `info`); an anonymous probe stops at its 401
+  (debug) first, and a generation mismatch at its 426 (info). `info` is
+  a 4xx **a route produced** (an unknown vault or version, a bad body) and a **successful
+  mutation** (creating or deleting an account, emptying the recycle bin — the acts an operator asks
+  about afterwards);
   `warn` is a **rejected credential** (a 401/403 whose request carried an `Authorization` header)
   and a request that took `LOG_SLOW_MS` (default 500 ms) or more; `error` is a 5xx. A rejected
   credential is the one client error that means something on this side is wrong — an operator's own
