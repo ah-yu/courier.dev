@@ -41,7 +41,7 @@ On Windows, skip the `chmod` and run `.\courier-server-win-x64.exe migrate`, the
   arrives (see [`server.md`](server.md#tls-and-acme)). Binding port 80 needs root or
   `cap_net_bind_service`.
 
-## 2. Create a user key
+## 2. Create a host key, then a user account
 
 The server has no sign-up page: the host creates accounts. First mint a host key (`ak_...`), which
 is the administrator credential — keep it on the server and never paste it into a client:
