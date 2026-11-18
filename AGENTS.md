@@ -55,9 +55,9 @@ Obsidian plugin by writing its **publishing mirror** (see `docs/release.md`). `a
 repository the community directory points at — is a generated artifact: `scripts/mirror-plugin.ts`
 writes it from `packages/plugin`, `packages/engine` and `packages/shared` on every tag, so the scan
 the directory runs sees the plugin's own source instead of this repository's server and CLI. The root
-here still carries `manifest.json` (a verbatim mirror of `packages/plugin/manifest.json`),
-`README.md` and `LICENSE` as that generation's input; `scripts/check-release.ts` fails when the two
-manifests differ.
+here still carries `manifest.json` (a verbatim mirror of `packages/plugin/manifest.json`) and
+`LICENSE`; the mirror's `README.md` is generated from `packages/plugin/README.md`, and
+`scripts/check-release.ts` fails when the two manifests differ.
 
 **Truth, by subject.** This table is the routing rule; `docs/README.md` registers every document
 and its status.
