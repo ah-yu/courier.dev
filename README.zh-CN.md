@@ -27,6 +27,9 @@ Courier 是面向 Obsidian 的开源同步方案：桌面端与移动端插件�
 
 ## 快速开始
 
+> 💡 更喜欢图形界面而不是命令行？[Courier 桌面端](https://couriersync.dev/) 替你部署服务器：填入一个
+> 地址和一个密码，它就会安装 Courier、配置 HTTPS 并启动服务。更新、备份和密钥管理也在同一个窗口里。
+
 五步即可完成；[快速开始指南](docs/quick-start.md) 走的是同一个流程，并附上 Obsidian 中会看到的界面
 文字。
 
