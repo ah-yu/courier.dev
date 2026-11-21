@@ -39,11 +39,12 @@ export interface ReleaseTarget {
 }
 
 /**
- * Every target the release compiles, in the order `build:exe` logs them and
- * `checksums.txt` lists the assets. This table is the single source of the platform ids:
- * both manifest generators derive their `assets` keys from it, and
- * `scripts/release-assets.test.ts` pins `install.sh` and the release workflow's expected
- * asset list against it, so adding a platform cannot leave a consumer behind.
+ * Every target the release compiles, in the order `build:exe` logs them. (`checksums.txt`
+ * is not in this order: it sorts `<sha256>  <asset>` lines, so it is hash order.) This
+ * table is the single source of the platform ids: both manifest generators derive their
+ * `assets` keys from it, and `scripts/release-assets.test.ts` pins `install.sh` and the
+ * release workflow's expected asset list against it, so adding a platform cannot leave a
+ * consumer behind.
  */
 export const RELEASE_TARGETS = [
   { target: "bun-linux-x64", platform: "linux-x64", ext: "" },
