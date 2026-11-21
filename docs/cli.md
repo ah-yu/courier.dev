@@ -161,6 +161,9 @@ one release now serves two deployment targets, and an installer reads its own en
 ```json
 {
   "version": "0.2.0",
+  "asset": "courier-server-linux-x64",
+  "sha256": "…",
+  "size": 135266304,
   "publishedAt": "…",
   "notes": "…",
   "assets": {
@@ -169,6 +172,15 @@ one release now serves two deployment targets, and an installer reads its own en
   }
 }
 ```
+
+The top-level `asset` / `sha256` / `size` are the **same linux-x64 entry** repeated outside the
+map, and they are not decoration: installers and update checks released before the map existed read
+exactly those three fields, and a published manifest is parsed by software that is already on
+someone's machine. 0.1.12 shipped the map without them, so every 0.1.11 install's "check for
+updates" failed instead of offering 0.1.12 — a released parser cannot be retracted by a repository
+policy, and the fix is a later release whose manifest carries both shapes. Emit both until no 0.1.x
+client is in use; then the trio can go, in a release whose notes say so. A hand build that produced
+only the arm64 binary has no x64 asset to name and omits the trio.
 
 The checksum decides "is this the same build", while the version number only decides "which is
 newer" — these are the two criteria for an upgrade, and neither can be
