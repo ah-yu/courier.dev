@@ -32,6 +32,10 @@ CLI for machines that never open Obsidian, and one server that you run yourself.
 
 ## Quick start
 
+> 💡 Prefer a GUI to the command line? [Courier desktop app](https://couriersync.dev/) deploys the
+> server for you: enter an address and a password, and it installs Courier, sets up HTTPS and
+> starts the service. The same window handles updates, backups and keys.
+
 Five steps; the [quick start guide](docs/quick-start.md) shows the same flow with the labels you
 will see in Obsidian.
 
