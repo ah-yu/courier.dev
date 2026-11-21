@@ -1,5 +1,6 @@
 import assert from "assert/strict";
-import { readFileSync } from "fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { test } from "vitest";
@@ -70,5 +71,47 @@ test("the release job verifies every asset it publishes", () => {
         `${asset}.sha256 is published without being verified`,
       );
     }
+  }
+});
+
+/**
+ * A published manifest is read by software that is already installed, so a shape change is
+ * a compatibility decision, not a formatting one: 0.1.11's desktop update check reads the
+ * top-level `asset` / `sha256` / `size`, and 0.1.12 shipped a map-only file, which broke
+ * "check for updates" for every 0.1.11 install. The generator keeps both shapes until no
+ * such client is in use; this pins it, because nothing else in `bun run verify` ever
+ * executes the generator.
+ */
+test("the server manifest keeps the top-level x64 fields beside the platform map", () => {
+  const dir = mkdtempSync(join(tmpdir(), "courier-manifest-"));
+  try {
+    writeFileSync(join(dir, "courier-server-linux-x64"), "x64 bytes");
+    writeFileSync(join(dir, "courier-server-linux-arm64"), "arm64 bytes");
+    const out = join(dir, "courier-server-manifest.json");
+    const proc = Bun.spawnSync(
+      [process.execPath, "packages/server/scripts/build-manifest.ts", "--dir", dir, "--out", out],
+      { cwd: root, stdout: "ignore", stderr: "pipe" },
+    );
+    assert.equal(proc.exitCode, 0, proc.stderr.toString());
+
+    const manifest = JSON.parse(readFileSync(out, "utf-8")) as {
+      asset?: string;
+      sha256?: string;
+      size?: number;
+      assets: Record<string, { asset: string; sha256: string; size: number }>;
+    };
+    const x64 = manifest.assets["linux-x64"];
+    const expected = new Bun.CryptoHasher("sha256").update("x64 bytes").digest("hex");
+
+    // What a 0.1.x client parses: three top-level fields and no knowledge of the map.
+    assert.equal(manifest.asset, "courier-server-linux-x64");
+    assert.equal(manifest.sha256, expected);
+    assert.equal(manifest.size, "x64 bytes".length);
+    assert.equal(manifest.sha256, x64.sha256);
+
+    // What a newer installer parses.
+    assert.deepEqual(Object.keys(manifest.assets).toSorted(), ["linux-arm64", "linux-x64"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

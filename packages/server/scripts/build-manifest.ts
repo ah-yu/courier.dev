@@ -16,7 +16,9 @@
  * One manifest serves every published deployment target, keyed by the platform id the
  * asset name uses — the same shape as `courier-cli-manifest.json`, because one release now
  * carries a linux-arm64 binary beside the linux-x64 one. A deployment reads its own entry
- * instead of the manifest describing a single architecture.
+ * instead of the manifest describing a single architecture. The linux-x64 entry is *also*
+ * repeated as the top-level `asset` / `sha256` / `size`, because clients released before
+ * the map existed read exactly those three fields (see the comment on `legacy` below).
  *
  * Usage:
  *   bun run --filter @courier/server manifest
@@ -97,8 +99,23 @@ if (Object.keys(assets).length === 0) {
   throw new Error(`no server binaries found in ${dir}; run build:exe first`);
 }
 
+/**
+ * The linux-x64 entry as the top-level `asset` / `sha256` / `size` too.
+ *
+ * Every 0.1.x deployment installer and the desktop app's update check read those three
+ * fields directly; only `assets` readers know about the map. The pair that has to keep
+ * working is "a client built before the map existed" × "the manifest a later release
+ * publishes", and no repository-side policy can retract a parser that is already installed.
+ * So both shapes are emitted: the trio names the x64 deployment asset until no 0.1.x client
+ * is in use, and `assets` is what everything newer reads (`docs/cli.md`,
+ * `docs/release.md`). A hand build that produced only the arm64 binary has no x64 asset to
+ * name, and omits the trio rather than pointing an old client at the wrong file.
+ */
+const legacy = assets["linux-x64"];
+
 const manifest = {
   version: pkg.version,
+  ...(legacy ? { asset: legacy.asset, sha256: legacy.sha256, size: legacy.size } : {}),
   publishedAt: new Date().toISOString(),
   ...(args.notes ? { notes: args.notes } : {}),
   assets,

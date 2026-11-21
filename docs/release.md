@@ -344,6 +344,14 @@ reason the CLI manifest always was: one release now serves two deployment target
 reads its own entry. The generator's `--asset` option is gone with the single-asset shape — it
 writes an entry for every published Linux deployment target, and only for a binary that exists.
 
+It **also repeats the linux-x64 entry as top-level `asset` / `sha256` / `size`**, and that is a
+compatibility rule rather than redundancy: installers and update checks released before the map
+existed parse only those three fields, and a published manifest is read by software already
+installed. 0.1.12 emitted the map alone, so every 0.1.11 desktop install failed to see 0.1.12;
+`scripts/release-assets.test.ts` now pins both shapes. The trio stays until no 0.1.x client is in
+use and can leave in a release whose notes say so — the same discipline the wire contract applies,
+because release artifacts are versioned consumers this repository does not control.
+
 ### Linux binaries need nothing extra
 
 Both binaries embed the Bun runtime, and Bun's Linux build is self-contained: it links glibc and
