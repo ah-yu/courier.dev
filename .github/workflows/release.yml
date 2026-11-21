@@ -96,43 +96,31 @@ jobs:
       - uses: ./.github/actions/setup
 
       # `bun build --compile` cross-compiles: it downloads the target's Bun
-      # runtime and embeds it. The three assets are the published convention.
+      # runtime and embeds it. `RELEASE_TARGETS` in `@courier/build` is the table of assets
+      # this job builds; the x64 and arm64 Linux ones are executed by the smoke jobs below.
       - name: Build compiled binaries
         run: bun run --filter @courier/server build:exe
 
       - name: Generate release manifest
         run: bun run --filter @courier/server manifest -- --notes "Release $GITHUB_REF_NAME"
 
-      - name: Smoke-test and checksum
+      - name: Checksum the assets
         env:
           VERSION: ${{ needs.preflight.outputs.version }}
         run: |
           set -euo pipefail
           cd packages/server/build
-          for asset in courier-server-linux-x64 courier-server-darwin-arm64 courier-server-win-x64.exe; do
+          for asset in courier-server-linux-x64 courier-server-linux-arm64 courier-server-darwin-arm64 courier-server-win-x64.exe; do
             test -s "$asset"
             sha256sum "$asset" > "$asset.sha256"
           done
-          chmod +x courier-server-linux-x64
-          version="$(./courier-server-linux-x64 version --json | bun -e 'console.log(JSON.parse(require("fs").readFileSync(0, "utf8")).version)')"
-          test "$version" = "$VERSION"
           bun -e 'const m = require("./courier-server-manifest.json"); if (m.version !== process.env.VERSION) process.exit(1)'
 
-          # The only artifact that can prove the generated migration chain made it
-          # into the compiled bundle: the test suite runs the source, never this
-          # file. A build that lost the chain would still answer "up to date".
-          tmpdir="$(mktemp -d)"
-          SQLITE_PATH="$tmpdir/courier.db" ./courier-server-linux-x64 migrate
-          bun -e '
-            const { Database } = require("bun:sqlite");
-            const db = new Database(process.argv[1]);
-            const applied = db.query("SELECT COUNT(*) AS n FROM courier_migrations").get().n;
-            const core = db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = ? AND name = ?").get("table", "api_keys").n;
-            if (applied < 1 || core !== 1) process.exit(1);
-          ' "$tmpdir/courier.db"
-          second="$(SQLITE_PATH="$tmpdir/courier.db" ./courier-server-linux-x64 migrate 2>&1)"
-          printf '%s\n' "$second" | grep -q "All migrations up to date"
-          SQLITE_PATH="$tmpdir/dry.db" ./courier-server-linux-x64 migrate --dry-run > /dev/null 2>&1
+      - name: Smoke-test the x64 binary
+        uses: ./.github/actions/smoke-server
+        with:
+          binary: packages/server/build/courier-server-linux-x64
+          version: ${{ needs.preflight.outputs.version }}
 
       - uses: actions/upload-artifact@v4
         with:
@@ -143,11 +131,37 @@ jobs:
           path: |
             packages/server/build/courier-server-linux-x64
             packages/server/build/courier-server-linux-x64.sha256
+            packages/server/build/courier-server-linux-arm64
+            packages/server/build/courier-server-linux-arm64.sha256
             packages/server/build/courier-server-darwin-arm64
             packages/server/build/courier-server-darwin-arm64.sha256
             packages/server/build/courier-server-win-x64.exe
             packages/server/build/courier-server-win-x64.exe.sha256
             packages/server/build/courier-server-manifest.json
+
+  # The build job runs on x64 and cross-compiles, so "the file exists" is the only thing it
+  # can say about the arm64 asset. This job runs it on the architecture it is published for:
+  # a binary that does not start, or lost the migration chain, fails the release here instead
+  # of on a user's machine. `ubuntu-24.04-arm` is GitHub's arm64 hosted runner (free for
+  # public repositories; see `docs/release.md`).
+  server-arm-smoke:
+    name: Smoke-test the server on linux-arm64
+    needs: [preflight, server]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: server
+          path: packages/server/build
+
+      - name: Smoke-test the arm64 binary
+        uses: ./.github/actions/smoke-server
+        with:
+          binary: packages/server/build/courier-server-linux-arm64
+          version: ${{ needs.preflight.outputs.version }}
 
   cli:
     name: Build CLI binaries
@@ -166,12 +180,15 @@ jobs:
         run: |
           set -euo pipefail
           cd packages/cli/build
-          for asset in courier-cli-linux-x64 courier-cli-darwin-arm64 courier-cli-win-x64.exe; do
+          for asset in courier-cli-linux-x64 courier-cli-linux-arm64 courier-cli-darwin-arm64 courier-cli-win-x64.exe; do
             test -s "$asset"
             sha256sum "$asset" > "$asset.sha256"
           done
-          chmod +x courier-cli-linux-x64
-          ./courier-cli-linux-x64 --help > /dev/null
+
+      - name: Smoke-test the x64 binary
+        uses: ./.github/actions/smoke-cli
+        with:
+          binary: packages/cli/build/courier-cli-linux-x64
 
       - name: Generate release manifest
         run: bun run --filter @courier/cli manifest -- --notes "Release $GITHUB_REF_NAME"
@@ -185,11 +202,32 @@ jobs:
           path: |
             packages/cli/build/courier-cli-linux-x64
             packages/cli/build/courier-cli-linux-x64.sha256
+            packages/cli/build/courier-cli-linux-arm64
+            packages/cli/build/courier-cli-linux-arm64.sha256
             packages/cli/build/courier-cli-darwin-arm64
             packages/cli/build/courier-cli-darwin-arm64.sha256
             packages/cli/build/courier-cli-win-x64.exe
             packages/cli/build/courier-cli-win-x64.exe.sha256
             packages/cli/build/courier-cli-manifest.json
+
+  # See `server-arm-smoke`: the x64 build host cannot execute what it cross-compiled.
+  cli-arm-smoke:
+    name: Smoke-test the CLI on linux-arm64
+    needs: [preflight, cli]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli
+          path: packages/cli/build
+
+      - name: Smoke-test the arm64 binary
+        uses: ./.github/actions/smoke-cli
+        with:
+          binary: packages/cli/build/courier-cli-linux-arm64
 
   plugin:
     name: Build Obsidian plugin
@@ -250,7 +288,7 @@ jobs:
   # download is not always reachable from where the users are.
   mirror:
     name: Publish the plugin mirror
-    needs: [preflight, server, cli, plugin]
+    needs: [preflight, server, cli, plugin, server-arm-smoke, cli-arm-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -309,7 +347,7 @@ jobs:
 
   release:
     name: Publish GitHub release
-    needs: [preflight, server, cli, plugin, mirror]
+    needs: [preflight, server, cli, plugin, mirror, server-arm-smoke, cli-arm-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -330,10 +368,12 @@ jobs:
           set -euo pipefail
           for asset in \
             courier-server-linux-x64 courier-server-linux-x64.sha256 \
+            courier-server-linux-arm64 courier-server-linux-arm64.sha256 \
             courier-server-darwin-arm64 courier-server-darwin-arm64.sha256 \
             courier-server-win-x64.exe courier-server-win-x64.exe.sha256 \
             courier-server-manifest.json \
             courier-cli-linux-x64 courier-cli-linux-x64.sha256 \
+            courier-cli-linux-arm64 courier-cli-linux-arm64.sha256 \
             courier-cli-darwin-arm64 courier-cli-darwin-arm64.sha256 \
             courier-cli-win-x64.exe courier-cli-win-x64.exe.sha256 \
             courier-cli-manifest.json \

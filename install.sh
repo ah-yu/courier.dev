@@ -27,9 +27,12 @@ arch=$(uname -m 2>/dev/null || echo unknown)
 
 case "$os:$arch" in
   Linux:x86_64) asset=courier-cli-linux-x64; platform=linux-x64 ;;
+  # A 64-bit ARM kernel reports either name; a 32-bit userland reports armv7l/armv6l and
+  # has no Bun runtime to embed, so it is refused rather than mis-detected.
+  Linux:aarch64|Linux:arm64) asset=courier-cli-linux-arm64; platform=linux-arm64 ;;
   Darwin:arm64) asset=courier-cli-darwin-arm64; platform=darwin-arm64 ;;
   Darwin:x86_64) die "this Mac is Intel; only Apple Silicon builds are published" ;;
-  Linux:*) die "Linux on $arch is not supported (x64 only)" ;;
+  Linux:*) die "Linux on $arch is not supported (x64 and arm64 only)" ;;
   *) die "$os on $arch is not supported by this installer" ;;
 esac
 

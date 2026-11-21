@@ -3,10 +3,10 @@
  *
  * `bun build --compile` embeds the Bun runtime and the bundled entry point in one
  * executable per target, so a release asset is "download one file and run it" with no
- * runtime to install on the host. The three targets, the asset naming and the build
- * identity (`COURIER_VERSION`, `COURIER_GIT_SHA`, `COURIER_BUILD_TIME`) and
- * `COURIER_ENV=production` defines are the same for every binary this repository ships,
- * so they live here rather than in each package: the packages differ only in their entry
+ * runtime to install on the host. `RELEASE_TARGETS` is the one table of targets, asset
+ * names and build identity (`COURIER_VERSION`, `COURIER_GIT_SHA`, `COURIER_BUILD_TIME`,
+ * and the `COURIER_ENV=production` define) every binary this repository ships shares, so
+ * they live here rather than in each package: the packages differ only in their entry
  * point and asset prefix, and those are passed in.
  *
  * This package is build tooling. It is private and never imported by shipped code, which
@@ -24,20 +24,41 @@ export interface ExecutableSpec {
   packageDir: string;
   /** Entry point, relative to `packageDir`. */
   entry: string;
-  /** Release asset prefix: the asset is `<prefix>-<suffix><ext>`. */
+  /** Release asset prefix: the asset is `<prefix>-<platform><ext>`. */
   prefix: string;
 }
 
 /**
- * Release asset names are the published convention (`docs/release.md`): `suffix` is
- * the platform in the asset name, `target` the Bun target, `ext` what the platform
- * expects.
+ * One published binary: the Bun compile target, the `platform` id (the asset-name suffix,
+ * and the key both release manifests use), and the extension the platform expects.
  */
-const TARGETS = [
-  { target: "bun-linux-x64", suffix: "linux-x64", ext: "" },
-  { target: "bun-darwin-arm64", suffix: "darwin-arm64", ext: "" },
-  { target: "bun-windows-x64", suffix: "win-x64", ext: ".exe" },
-];
+export interface ReleaseTarget {
+  target: string;
+  platform: string;
+  ext: string;
+}
+
+/**
+ * Every target the release compiles, in the order `build:exe` logs them. (`checksums.txt`
+ * is not in this order: it sorts `<sha256>  <asset>` lines, so it is hash order.) This
+ * table is the single source of the platform ids: both manifest generators derive their
+ * `assets` keys from it, and `scripts/release-assets.test.ts` pins `install.sh` and the
+ * release workflow's expected asset list against it, so adding a platform cannot leave a
+ * consumer behind.
+ */
+export const RELEASE_TARGETS = [
+  { target: "bun-linux-x64", platform: "linux-x64", ext: "" },
+  // Bun's Linux arm64 runtime is glibc-only like the x64 one; a 32-bit (armhf) host has no
+  // runtime at all, and a musl host is unsupported — see `docs/release.md`.
+  { target: "bun-linux-arm64", platform: "linux-arm64", ext: "" },
+  { target: "bun-darwin-arm64", platform: "darwin-arm64", ext: "" },
+  { target: "bun-windows-x64", platform: "win-x64", ext: ".exe" },
+] as const satisfies readonly ReleaseTarget[];
+
+/** The release asset name for `prefix` on `target`, e.g. `courier-cli-linux-arm64`. */
+export function assetName(prefix: string, target: ReleaseTarget): string {
+  return `${prefix}-${target.platform}${target.ext}`;
+}
 
 /**
  * Compile every target into `<packageDir>/build/`.
@@ -68,15 +89,15 @@ export async function buildExecutables(spec: ExecutableSpec): Promise<void> {
     "process.env.COURIER_BUILD_TIME": new Date().toISOString(),
   };
 
-  for (const { target, suffix, ext } of TARGETS) {
-    const outfile = join(outDir, `${prefix}-${suffix}${ext}`);
-    console.log(`[build-exe] ${prefix} ${target} -> ${outfile}`);
+  for (const target of RELEASE_TARGETS) {
+    const outfile = join(outDir, assetName(prefix, target));
+    console.log(`[build-exe] ${prefix} ${target.target} -> ${outfile}`);
     const proc = Bun.spawn(
       [
         process.execPath,
         "build",
         "--compile",
-        `--target=${target}`,
+        `--target=${target.target}`,
         "--minify",
         ...Object.entries(defines).flatMap(([key, value]) => [
           "--define",
@@ -92,7 +113,7 @@ export async function buildExecutables(spec: ExecutableSpec): Promise<void> {
     if (code !== 0) {
       // Throwing instead of exiting: this is a library function, and the caller owns the
       // process (the package entry script runs at top level, so Bun still exits non-zero).
-      throw new Error(`[build-exe] ${target} failed with exit code ${code}`);
+      throw new Error(`[build-exe] ${target.target} failed with exit code ${code}`);
     }
   }
 }

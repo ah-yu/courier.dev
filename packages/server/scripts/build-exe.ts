@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Build the service's three release binaries into `build/`.
+ * Build the service's release binaries into `build/` — one per target in `@courier/build`.
  *
  * Run it as `bun run --filter @courier/server build:exe` (that script also refuses a stale
  * generated migration chain first). The compile itself lives in `@courier/build`: the

@@ -1,0 +1,24 @@
+name: Smoke-test a CLI binary
+description: >-
+  Run a compiled CLI binary on the architecture it was built for. The build job cross-compiles
+  every target on one host, so only a native runner can answer "this asset starts".
+
+inputs:
+  binary:
+    description: Path to the compiled CLI binary, relative to the workspace root.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Run the binary
+      shell: bash
+      env:
+        BINARY: ${{ inputs.binary }}
+      run: |
+        set -euo pipefail
+        binary="$GITHUB_WORKSPACE/$BINARY"
+        test -s "$binary"
+        chmod +x "$binary"
+        "$binary" --help > /dev/null
+        test -n "$("$binary" version)"

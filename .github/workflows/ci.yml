@@ -14,12 +14,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # The product ships for Linux, macOS and Windows, and the sync engine runs on each
-  # host's own filesystem: path case rules, rename semantics, file watching and the
-  # adapter's error codes differ per OS. A green Ubuntu run therefore says nothing about
-  # the Windows adapter, so every platform runs the same gates — the suite, not a smoke
-  # subset. A platform that cannot pass the suite is a platform the product does not
-  # support, and the fix belongs in the code, not in a skip list.
+  # The product ships for Linux x64, Linux arm64, macOS (Apple Silicon) and Windows x64, and
+  # the sync engine runs on each host's own filesystem: path case rules, rename semantics,
+  # file watching and the adapter's error codes differ per OS. A green Ubuntu run therefore
+  # says nothing about the Windows adapter, so every platform runs the same gates — the
+  # suite, not a smoke subset. A platform that cannot pass the suite is a platform the
+  # product does not support, and the fix belongs in the code, not in a skip list.
+  #
+  # Linux arm64 is its own row because it is its own release asset: an x64 runner cannot
+  # execute the binary it compiles, and the arm64 runtime is a different build of Bun.
   verify:
     name: Verify (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -33,7 +36,9 @@ jobs:
       matrix:
         # `macos-latest` is arm64, the architecture of the published darwin asset, so the
         # suite runs where that build runs rather than on an Intel image nobody ships.
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # `ubuntu-24.04-arm` is GitHub's arm64 hosted runner (free for public repositories),
+        # which is what runs the published `linux-arm64` assets.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 

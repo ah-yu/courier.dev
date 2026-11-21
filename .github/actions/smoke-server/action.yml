@@ -1,0 +1,52 @@
+name: Smoke-test a server binary
+description: >-
+  Run a compiled server binary's version and migration checks on the architecture it was
+  built for. A cross-compiled asset can exist and still fail to start, so the release runs
+  this on the target machine instead of trusting the build host.
+
+inputs:
+  binary:
+    description: Path to the compiled server binary, relative to the workspace root.
+    required: true
+  version:
+    description: The release version the binary must report.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # `version --json` is parsed and `courier_migrations` is read with bun, so only the
+    # runtime is installed here — not the workspace, which the smoke does not need.
+    - name: Install Bun
+      uses: oven-sh/setup-bun@v2
+      with:
+        bun-version-file: .bun-version
+
+    - name: Run the binary
+      shell: bash
+      env:
+        BINARY: ${{ inputs.binary }}
+        EXPECTED: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        binary="$GITHUB_WORKSPACE/$BINARY"
+        test -s "$binary"
+        chmod +x "$binary"
+        version="$("$binary" version --json | bun -e 'console.log(JSON.parse(require("fs").readFileSync(0, "utf8")).version)')"
+        test "$version" = "$EXPECTED"
+
+        # The only artifact that can prove the generated migration chain made it into the
+        # compiled bundle: the test suite runs the source, never this file. A build that
+        # lost the chain would still answer "up to date".
+        tmpdir="$(mktemp -d)"
+        SQLITE_PATH="$tmpdir/courier.db" "$binary" migrate
+        bun -e '
+          const { Database } = require("bun:sqlite");
+          const db = new Database(process.argv[1]);
+          const applied = db.query("SELECT COUNT(*) AS n FROM courier_migrations").get().n;
+          const core = db.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = ? AND name = ?").get("table", "api_keys").n;
+          if (applied < 1 || core !== 1) process.exit(1);
+        ' "$tmpdir/courier.db"
+        second="$(SQLITE_PATH="$tmpdir/courier.db" "$binary" migrate 2>&1)"
+        printf '%s\n' "$second" | grep -q "All migrations up to date"
+        SQLITE_PATH="$tmpdir/dry.db" "$binary" migrate --dry-run > /dev/null 2>&1

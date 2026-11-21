@@ -2,7 +2,7 @@
   "name": "@courier/build",
   "private": true,
   "type": "module",
-  "description": "Shared build tooling: turns a package entry point into the three release binaries.",
+  "description": "Shared build tooling: turns a package entry point into the four release binaries.",
   "exports": {
     ".": "./src/index.ts"
   },

@@ -41,6 +41,14 @@ Courier 是面向 Obsidian 的开源同步方案：桌面端与移动端插件�
    ./courier-server-linux-x64 start --port 3002
    ```
 
+   Linux（arm64）：
+
+   ```bash
+   chmod +x courier-server-linux-arm64
+   ./courier-server-linux-arm64 migrate
+   ./courier-server-linux-arm64 start --port 3002
+   ```
+
    macOS（Apple Silicon）：
 
    ```bash
