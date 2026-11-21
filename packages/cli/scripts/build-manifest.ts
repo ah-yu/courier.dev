@@ -5,8 +5,9 @@
  *
  * The installer must know three things before replacing a binary: which asset belongs to
  * this machine, which checksum identifies it, and which version it is. The first two are
- * per platform, so unlike the server manifest (Linux x64 is the only deployment target)
- * this one carries an `assets` map keyed by the release's platform id.
+ * per platform, so this manifest carries an `assets` map keyed by the release's platform
+ * id — the same shape `courier-server-manifest.json` uses since the server also ships more
+ * than one Linux target.
  *
  * Usage:
  *   bun run --filter @courier/cli manifest
@@ -15,15 +16,15 @@
  */
 import { existsSync, readFileSync, statSync, writeFileSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
+import { assetName, RELEASE_TARGETS } from "@courier/build";
 
 const packageDir = dirname(import.meta.dir);
 /** Published beside the binaries; never `manifest.json`, which belongs to the plugin. */
 const MANIFEST_NAME = "courier-cli-manifest.json";
-const TARGETS = {
-  "linux-x64": "courier-cli-linux-x64",
-  "darwin-arm64": "courier-cli-darwin-arm64",
-  "win-x64": "courier-cli-win-x64.exe",
-};
+/** Platform id → asset name, derived from the build table so the two cannot drift. */
+const TARGETS: Record<string, string> = Object.fromEntries(
+  RELEASE_TARGETS.map((target) => [target.platform, assetName("courier-cli", target)]),
+);
 
 /** Parse `--key value` pairs; anything unknown is an error rather than silence. */
 interface ManifestOptions {

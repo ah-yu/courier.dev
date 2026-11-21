@@ -7,18 +7,21 @@
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every push to `main` and `dev`, on every pull request, and on
-manual dispatch. Its `verify` job runs the same gates on **Ubuntu, macOS and Windows**, each with
-the Bun version pinned by `.bun-version` (also named by `packageManager` in the root
-`package.json`); `.github/actions/setup` installs it and runs `bun install --frozen-lockfile`.
+manual dispatch. Its `verify` job runs the same gates on **Ubuntu x64, Ubuntu arm64, macOS (arm64)
+and Windows x64**, each with the Bun version pinned by `.bun-version` (also named by
+`packageManager` in the root `package.json`); `.github/actions/setup` installs it and runs
+`bun install --frozen-lockfile`.
 
-The three-platform matrix is the point, not redundancy: the engine runs on each host's own
+The four-platform matrix is the point, not redundancy: the engine runs on each host's own
 filesystem, and path case rules, rename semantics, file watching and the adapter's error codes
 differ per OS. A green Ubuntu run says nothing about the Windows adapter, so every platform runs
 the **whole** suite rather than a smoke subset — a platform that cannot pass it is a platform the
 product does not support, and the fix belongs in the code, not in a skip list. `macos-latest` is
-arm64, which is also the architecture of the published darwin asset. The matrix is the most
-expensive part of CI — three runners execute the whole suite instead of one — and it runs on every
-pull request because the alternative is discovering a platform break at release time.
+arm64, which is also the architecture of the published darwin asset. Linux arm64 is its own row
+because it is its own release asset: an x64 runner cannot execute that binary, and the arm64 Bun
+runtime is a different built artifact rather than the same one on another image. The matrix is the
+most expensive part of CI — four runners execute the whole suite instead of one — and it runs on
+every pull request because the alternative is discovering a platform break at release time.
 
 `l3-obsidian.yml` is the real-Obsidian layer: it runs on pull requests and pushes to `main` whose
 `paths` touch the sync path, plus manual dispatch, so a docs-only change never spends a run.
@@ -37,11 +40,11 @@ and on manual dispatch (one run per scenario, head only); it is **not** a gate �
 benchmark's correctness invariants can fail it. The scenarios, the comparison rules and the cost
 are in [ci-sync-benchmarks.md](ci-sync-benchmarks.md).
 
-| Job           | Runner                              | What it runs                                                                             |
-| ------------- | ----------------------------------- | ---------------------------------------------------------------------------------------- |
-| `verify`      | Ubuntu, macOS, Windows              | `bun scripts/check-release.ts`, `bun run verify`, `bun run build`                        |
-| `boundary`    | Ubuntu                              | `bun run verify coverage`, `bun run verify format`                                       |
-| `l3-obsidian` | Ubuntu, Windows (macOS on dispatch) | real Obsidian through its CLI: `bun run e2e:obsidian`, then `bun run verify obsidian-ci` |
+| Job           | Runner                                   | What it runs                                                                             |
+| ------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `verify`      | Ubuntu x64, Ubuntu arm64, macOS, Windows | `bun scripts/check-release.ts`, `bun run verify`, `bun run build`                        |
+| `boundary`    | Ubuntu                                   | `bun run verify coverage`, `bun run verify format`                                       |
+| `l3-obsidian` | Ubuntu, Windows (macOS on dispatch)      | real Obsidian through its CLI: `bun run e2e:obsidian`, then `bun run verify obsidian-ci` |
 
 `bun run verify` covers the docs index, the generated migration chain, lint, the community
 directory's scan, typecheck and the test suite (L0–L2, including the in-memory end-to-end suites) on
@@ -62,12 +65,14 @@ to. CI **does not** run:
   measurements;
 - the compiled binary builds: the release workflow builds those.
 
-The binary build jobs run `bun build --compile` (see `@courier/build`, shared by both binaries) for each target. Bun
-downloads the target's runtime and embeds it, so a Linux runner can produce the darwin-arm64 and
-win-x64 assets too, and no host runtime has to match anything: the version is pinned once in
-`.bun-version`, which `.github/actions/setup` installs. There is no blob-assembly step, no separate
-build host and no cross-architecture cache to seed — the same command produces all three assets.
-What the produced binaries need from the machine that _runs_ them is in
+The binary build jobs run `bun build --compile` (see `@courier/build`, shared by both binaries) for
+each of the four targets. Bun downloads the target's runtime and embeds it, so a Linux runner can
+produce the darwin-arm64 and win-x64 assets too, and no host runtime has to match anything: the
+version is pinned once in `.bun-version`, which `.github/actions/setup` installs. There is no
+blob-assembly step, no separate build host and no cross-architecture cache to seed — the same
+command produces all four assets. The build host cannot execute what it cross-compiled, so the
+arm64 assets are smoke-tested on `ubuntu-24.04-arm`, the same runner the CI matrix uses. What the
+produced binaries need from the machine that _runs_ them is in
 [Linux binaries need nothing extra](#linux-binaries-need-nothing-extra).
 
 ### Snapshot versions for test builds
@@ -166,7 +171,10 @@ The tag push starts `.github/workflows/release.yml`, which:
 2. `verify` runs the same `bun run verify` and `bun run verify format` gates as CI;
 3. `contract-report` prints the contract delta since the previous tag; `contract-review` waits for
    the protected `release` environment's approver, who reads that report;
-4. `server`, `cli` and `plugin` build in parallel;
+4. `server`, `cli` and `plugin` build in parallel, then `server-arm-smoke` and `cli-arm-smoke` run
+   the arm64 binaries on `ubuntu-24.04-arm`, after those builds and before publication — the build
+   host cannot execute what it cross-compiled, and both `mirror` and `release` need the smoke jobs,
+   so a broken arm64 asset blocks publication;
 5. `release` downloads the three artifacts, checks every expected file, writes `checksums.txt`,
    attests every asset with `actions/attest-build-provenance` (SLSA provenance, which the community
    directory recommends and anyone can verify with `gh attestation verify`), creates a **draft**
@@ -307,35 +315,42 @@ assertion, reference platform only) or a plain bug — not a note that "it looke
 
 ## Published assets
 
-| Asset                                                                                                      | Consumer                                                          |
-| ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| `courier-server-linux-x64`, `courier-server-darwin-arm64`, `courier-server-win-x64.exe` and each `.sha256` | the server deployment                                             |
-| `courier-server-manifest.json`                                                                             | the server update check                                           |
-| `courier-cli-linux-x64`, `courier-cli-darwin-arm64`, `courier-cli-win-x64.exe` and each `.sha256`          | headless `courier-cli`                                            |
-| `courier-cli-manifest.json`                                                                                | the CLI install/upgrade check                                     |
-| `main.js`, `manifest.json`, `styles.css`                                                                   | Obsidian plugin (manual install or BRAT)                          |
-| `courier-plugin-X.Y.Z.zip`                                                                                 | manual install; contains a `courier/` folder with the three files |
-| `checksums.txt`                                                                                            | verifying any binary before running it                            |
+| Asset                                                                                                                                    | Consumer                                                          |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `courier-server-linux-x64`, `courier-server-linux-arm64`, `courier-server-darwin-arm64`, `courier-server-win-x64.exe` and each `.sha256` | the server deployment                                             |
+| `courier-server-manifest.json`                                                                                                           | the server update check                                           |
+| `courier-cli-linux-x64`, `courier-cli-linux-arm64`, `courier-cli-darwin-arm64`, `courier-cli-win-x64.exe` and each `.sha256`             | headless `courier-cli`                                            |
+| `courier-cli-manifest.json`                                                                                                              | the CLI install/upgrade check                                     |
+| `main.js`, `manifest.json`, `styles.css`                                                                                                 | Obsidian plugin (manual install or BRAT)                          |
+| `courier-plugin-X.Y.Z.zip`                                                                                                               | manual install; contains a `courier/` folder with the three files |
+| `checksums.txt`                                                                                                                          | verifying any binary before running it                            |
 
 One release carries everything: the binaries, the plugin zip and the three files the Obsidian
 directory reads (`main.js`, `manifest.json`, `styles.css`). Its tag is the bare version (`0.1.0`,
 no `v`) — the tag the directory looks up — and it is `releases/latest`, so the install scripts and
 the directory read the same release.
 
-### The CLI manifest carries one asset per platform
+### The manifests carry one asset per platform
 
 `courier-cli-manifest.json` is generated by `bun run --filter @courier/cli manifest` after the
-three compiled binaries exist. Its `assets` map is keyed by `win-x64`, `linux-x64` and
-`darwin-arm64`; each entry carries the asset name, checksum and size. An installer
+four compiled binaries exist. Its `assets` map is keyed by `linux-x64`, `linux-arm64`,
+`darwin-arm64` and `win-x64`; each entry carries the asset name, checksum and size. An installer
 downloads this small file, picks its own platform, and verifies the binary's SHA-256 before
-replacing anything. The server manifest cannot be reused because it describes exactly one
-Linux x64 asset, which is the only target a deployment has.
+replacing anything.
+
+`courier-server-manifest.json` has the same `assets` shape, keyed `linux-x64` and `linux-arm64`
+(`bun run --filter @courier/server manifest`). The server manifest is platform-keyed for the same
+reason the CLI manifest always was: one release now serves two deployment targets, and an installer
+reads its own entry. The generator's `--asset` option is gone with the single-asset shape — it
+writes an entry for every published Linux deployment target, and only for a binary that exists.
 
 ### Linux binaries need nothing extra
 
 Both binaries embed the Bun runtime, and Bun's Linux build is self-contained: it links glibc and
-nothing else. The install table in [`docs/cli.md`](cli.md) therefore has no system-package step,
-and an installer has no library probe or package install of its own.
+nothing else. Bun's Linux arm64 build links glibc and nothing else, like the x64 one; a 64-bit
+userland is required and a 32-bit (armhf) host has no Bun runtime at all, so the installer refuses
+it rather than mis-detecting it. The install table in [`docs/cli.md`](cli.md) therefore has no
+system-package step, and an installer has no library probe or package install of its own.
 
 ### Why the server manifest is not `manifest.json`
 
@@ -348,8 +363,8 @@ The release address is built in: `https://github.com/ah-yu/courier.dev/releases/
 installer appends `/courier-server-manifest.json` itself. A deployment's address field and
 `COURIER_SERVER_RELEASE_URL` / `COURIER_CLI_RELEASE_URL` override it for a mirror or a pinned
 prerelease; the CLI install has no address field, so it always uses the built-in address (or that
-environment override). The manifest describes the Linux x64 asset, which is the deployment target;
-the macOS and Windows binaries are published with their own `.sha256` files.
+environment override). The manifest lists the two Linux deployment assets (`linux-x64` and
+`linux-arm64`); the macOS and Windows binaries are published with their own `.sha256` files.
 
 ### Moving the repository
 
@@ -389,26 +404,28 @@ Every binary is published with a `<asset>.sha256` file in the shape `sha256sum` 
 
 ```bash
 sha256sum -c courier-server-linux-x64.sha256
+sha256sum -c courier-server-linux-arm64.sha256
 sha256sum -c checksums.txt
 ```
 
-The server manifest also carries the Linux x64 binary's `sha256` and `size`; an installer
-uses that pair to decide whether the published build is the same one it already runs. The CLI
-manifest does the same per platform.
+The server manifest also carries each asset's `sha256` and `size` under its platform key; an
+installer uses its own entry's pair to decide whether the published build is the same one it
+already runs. The CLI manifest does the same per platform.
 
 ## Failure modes
 
-| Failure                                       | Result                                                                                       |
-| --------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| tag does not match the four version files     | `preflight` fails; nothing is built or published                                             |
-| the root manifest differs from the plugin one | `check-release` fails in CI and in `preflight`; nothing is built                             |
-| a gate fails (`bun run verify`, formatting)   | no build jobs start                                                                          |
-| a binary, manifest, bundle or zip is missing  | the artifact upload or the release job fails; no publication                                 |
-| an upload fails midway                        | the release stays a draft; re-run the workflow to finish it                                  |
-| the repository token cannot write releases    | the `release` job fails; allow `contents: write` for Actions or use a PAT                    |
-| the generated mirror keeps a stale manifest   | the `mirror` job's version assertion fails; nothing is published until it is re-run          |
-| the CNB mirror fails (outage, token, quota)   | the `cnb` job is marked failed but allowed; the GitHub release is unaffected; re-run the job |
-| an older release's CNB job is re-run          | only that version's release is updated; `latest` and CNB's latest flag stay with the newest  |
+| Failure                                              | Result                                                                                       |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| tag does not match the four version files            | `preflight` fails; nothing is built or published                                             |
+| the root manifest differs from the plugin one        | `check-release` fails in CI and in `preflight`; nothing is built                             |
+| a gate fails (`bun run verify`, formatting)          | no build jobs start                                                                          |
+| a binary, manifest, bundle or zip is missing         | the artifact upload or the release job fails; no publication                                 |
+| the arm64 asset does not start on `ubuntu-24.04-arm` | `server-arm-smoke` / `cli-arm-smoke` fails; no publication                                   |
+| an upload fails midway                               | the release stays a draft; re-run the workflow to finish it                                  |
+| the repository token cannot write releases           | the `release` job fails; allow `contents: write` for Actions or use a PAT                    |
+| the generated mirror keeps a stale manifest          | the `mirror` job's version assertion fails; nothing is published until it is re-run          |
+| the CNB mirror fails (outage, token, quota)          | the `cnb` job is marked failed but allowed; the GitHub release is unaffected; re-run the job |
+| an older release's CNB job is re-run                 | only that version's release is updated; `latest` and CNB's latest flag stay with the newest  |
 
 No extra secrets are required for the GitHub release itself; the `release` job uses the automatic
 `GITHUB_TOKEN` and requests `contents: write` only there. The optional CNB mirror uses the

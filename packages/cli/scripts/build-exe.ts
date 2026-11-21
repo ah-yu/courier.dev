@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Build the CLI's three release binaries into `build/`.
+ * Build the CLI's release binaries into `build/` — one per target in `@courier/build`.
  *
  * Run it as `bun run --filter @courier/cli build:exe`. The compile itself lives in
  * `@courier/build`: the targets, the asset naming and the baked-in build identity are the

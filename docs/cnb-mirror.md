@@ -14,10 +14,10 @@ so the CNB manifests could not be used to verify a GitHub download or the other 
 also spends CNB build CPU (160 core-hours/month free) and still fetches Bun and npm from the
 internet. If the goal is a faster download, building again is the expensive way to get it.
 
-**Can only the GitHub release assets be mirrored 鈥?does the code have to move?**
+**Can only the GitHub release assets be mirrored — does the code have to move?**
 The assets do not need the source tree, but a CNB release is attached to a Git tag, and a tag is
 a ref in a CNB repository. The minimum is therefore a repository that holds the tag's commit. If
-that commit is the real release commit, its tree is on CNB too 鈥?pushing a tag publishes the
+that commit is the real release commit, its tree is on CNB too — pushing a tag publishes the
 source at that tag whether or not `main` is mirrored. Avoiding source entirely means creating the
 tag at a placeholder commit, which throws away the provenance between the binary and the commit
 it was built from.
@@ -32,15 +32,15 @@ Only a **stable** release is mirrored; a tag containing a hyphen is a prerelease
 For a stable release, `release.yml` publishes these assets and the mirror uploads every one of them
 unchanged:
 
-| Asset                                                                                                       | Consumer                             |
-| ----------------------------------------------------------------------------------------------------------- | ------------------------------------ |
-| `courier-server-linux-x64`, `courier-server-darwin-arm64`, `courier-server-win-x64.exe` and their `.sha256` | the server deployment                |
-| `courier-server-manifest.json`                                                                              | the server update check              |
-| `courier-cli-linux-x64`, `courier-cli-darwin-arm64`, `courier-cli-win-x64.exe` and their `.sha256`          | `courier-cli`                        |
-| `courier-cli-manifest.json`                                                                                 | the CLI install/upgrade check        |
-| `main.js`, `manifest.json`, `styles.css`                                                                    | the Obsidian plugin (manual install) |
-| `courier-plugin-X.Y.Z.zip`                                                                                  | manual plugin install                |
-| `checksums.txt`                                                                                             | verifying any binary                 |
+| Asset                                                                                                                                     | Consumer                             |
+| ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| `courier-server-linux-x64`, `courier-server-linux-arm64`, `courier-server-darwin-arm64`, `courier-server-win-x64.exe` and their `.sha256` | the server deployment                |
+| `courier-server-manifest.json`                                                                                                            | the server update check              |
+| `courier-cli-linux-x64`, `courier-cli-linux-arm64`, `courier-cli-darwin-arm64`, `courier-cli-win-x64.exe` and their `.sha256`             | `courier-cli`                        |
+| `courier-cli-manifest.json`                                                                                                               | the CLI install/upgrade check        |
+| `main.js`, `manifest.json`, `styles.css`                                                                                                  | the Obsidian plugin (manual install) |
+| `courier-plugin-X.Y.Z.zip`                                                                                                                | manual plugin install                |
+| `checksums.txt`                                                                                                                           | verifying any binary                 |
 
 The files keep their names. The server manifest is still `courier-server-manifest.json`: one CNB
 release also carries the plugin's `manifest.json`, so the two cannot share a name there either.
@@ -113,8 +113,8 @@ the alias is being updated its release is briefly a draft, so a reader sees the 
 previous one; older zips are deleted from the alias.
 
 The alias doubles the stored copy of each release. The free object-storage allowance is 100 GiB
-for artifacts, LFS objects, images and attachments. A release is roughly 600 MiB (six compiled
-binaries plus the plugin), so the allowance covers about 80 mirrored stable releases with the
+for artifacts, LFS objects, images and attachments. A release is roughly 900 MiB (eight compiled
+binaries plus the plugin), so the allowance covers about 50 mirrored stable releases with the
 alias, or twice that without it.
 
 ## Setup
@@ -122,13 +122,13 @@ alias, or twice that without it.
 1. Create a **public** repository at `https://cnb.cool/<group>/<repo>` (an empty repository is
    fine). Public visibility is required: the download route is anonymous.
 2. Create an access token at `https://cnb.cool/profile/token`:
-   - `repo-code: write` 鈥?Git client credentials, branches and commits (needed by the tag and
+   - `repo-code: write` — Git client credentials, branches and commits (needed by the tag and
      `main` pushes; `write` already includes read, and `default` is not enough);
-   - `repo-release: write` 鈥?create/update releases and upload attachments;
+   - `repo-release: write` — create/update releases and upload attachments;
    - scope it to that repository and set an expiry.
 3. In the GitHub repository settings, add:
-   - secret `CNB_TOKEN` 鈥?the token above, used by both workflows;
-   - variable `CNB_REPO` 鈥?`<group>/<repo>` without the `.git` suffix.
+   - secret `CNB_TOKEN` — the token above, used by both workflows;
+   - variable `CNB_REPO` — `<group>/<repo>` without the `.git` suffix.
 
    The workflows read the variable; with it unset they are skipped rather than failing.
 
@@ -226,5 +226,5 @@ currently reports as latest, use `--make-latest --latest-tag latest`.
 
 ## Related
 
-- [release.md](release.md) 鈥?the GitHub release procedure, assets and checksums.
-- [cli.md](cli.md) 鈥?the install scripts and the `COURIER_CLI_RELEASE_URL` override.
+- [release.md](release.md) — the GitHub release procedure, assets and checksums.
+- [cli.md](cli.md) — the install scripts and the `COURIER_CLI_RELEASE_URL` override.

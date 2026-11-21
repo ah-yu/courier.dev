@@ -47,6 +47,14 @@ will see in Obsidian.
    ./courier-server-linux-x64 start --port 3002
    ```
 
+   Linux (arm64):
+
+   ```bash
+   chmod +x courier-server-linux-arm64
+   ./courier-server-linux-arm64 migrate
+   ./courier-server-linux-arm64 start --port 3002
+   ```
+
    macOS (Apple Silicon):
 
    ```bash
