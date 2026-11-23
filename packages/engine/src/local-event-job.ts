@@ -1,4 +1,5 @@
 import type { FileStamp } from "./adapter";
+import { sameStamp } from "./stamp";
 import { PushBatch } from "./push-batch";
 import type { BatchPushResult, BatchVersion } from "./push-batch";
 
@@ -107,8 +108,15 @@ interface Tombstone<T extends JobVersion> {
 
 /** The ledger a new-file decision can ask about and take a tombstone back from. */
 export interface TombstoneLedger {
-  /** The chain this job already prepared a delete for, when its bytes match. */
-  deletedForHash(contentHash: string): { fileId: string; versionId: string | null } | null;
+  /**
+   * The chain this job already prepared a delete for, when the candidate at **another**
+   * path carries that file's bytes and stamp (see `SelfEventLog.matchDeletedFile`).
+   */
+  deletedForHash(
+    contentHash: string,
+    stamp: FileStamp | null,
+    path: string,
+  ): { fileId: string; versionId: string | null; path: string } | null;
   /** The tombstone this job prepared for `fileId`, if it still holds one. */
   takeBackTombstone(fileId: string): void;
 }
@@ -151,8 +159,14 @@ export class LocalEventJob<T extends JobVersion> implements TombstoneLedger {
    * Content hash → the delete this same job prepared, so its create finds it without the
    * self-event log's time window: the window is sized for one event, and the tail of a
    * 600-event job (hashing and preparing every file) can outlive it.
+   *
+   * The stamp and the deleted path travel with the chain: a shared hash alone (every empty
+   * note has one) cannot say which file those bytes belonged to.
    */
-  private readonly pendingRenames = new Map<string, string>();
+  private readonly pendingRenames = new Map<
+    string,
+    { fileId: string; stamp: FileStamp | null; path: string }
+  >();
   /**
    * A prepared tombstone, by the path it deletes.
    *
@@ -255,10 +269,12 @@ export class LocalEventJob<T extends JobVersion> implements TombstoneLedger {
   }
 
   /** Remember a prepared tombstone until every change has had its chance to take it back. */
-  noteTombstone(path: string, prepared: T, contentHash: string): void {
+  noteTombstone(path: string, prepared: T, contentHash: string, stamp: FileStamp | null): void {
     const entry: JobEntry<T> = { prepared, kind: "delete" };
     this.pendingDeletes.set(prepared.fileId, entry);
-    if (contentHash !== "") this.pendingRenames.set(contentHash, prepared.fileId);
+    if (contentHash !== "") {
+      this.pendingRenames.set(contentHash, { fileId: prepared.fileId, stamp, path });
+    }
     this.pendingDeleteByPath.set(path, { entry, contentHash });
   }
 
@@ -274,17 +290,34 @@ export class LocalEventJob<T extends JobVersion> implements TombstoneLedger {
   }
 
   /**
-   * The tombstone this job prepared whose content hash matches, if it still holds one.
-   * The self-event log cannot answer this once a burst's tail outlives its window.
+   * The tombstone this job prepared whose content hash **and stamp** match, if it still
+   * holds one. The self-event log cannot answer this once a burst's tail outlives its
+   * window.
    *
    * `versionId` is the version that tombstone pushes, or null once its answer settled it
    * (sent, applied or taken back): a refused create half compares it with the fresh head
    * to tell this device's own tombstone from a peer's deletion.
+   *
+   * The stamp is required for the same reason as `SelfEventLog.matchDeletedFile`: a burst
+   * can hold a delete and an unrelated new file with the same bytes (a trash-and-create, a
+   * template), and only the file's own size and mtime prove a move.
    */
-  deletedForHash(contentHash: string): { fileId: string; versionId: string | null } | null {
-    const fileId = this.pendingRenames.get(contentHash);
-    if (fileId === undefined) return null;
-    return { fileId, versionId: this.pendingDeletes.get(fileId)?.prepared.versionId ?? null };
+  deletedForHash(
+    contentHash: string,
+    stamp: FileStamp | null,
+    path: string,
+  ): { fileId: string; versionId: string | null; path: string } | null {
+    const candidate = this.pendingRenames.get(contentHash);
+    if (candidate === undefined) return null;
+    // A file at the deleted path is a new file, not the move this ledger exists for;
+    // another path needs the deleted file's stamp (see `SelfEventLog.matchDeletedFile`).
+    if (candidate.path === path) return null;
+    if (!sameStamp(candidate.stamp, stamp)) return null;
+    return {
+      fileId: candidate.fileId,
+      versionId: this.pendingDeletes.get(candidate.fileId)?.prepared.versionId ?? null,
+      path: candidate.path,
+    };
   }
 
   /**
@@ -294,7 +327,7 @@ export class LocalEventJob<T extends JobVersion> implements TombstoneLedger {
   takeBackTombstone(fileId: string): void {
     this.pendingDeletes.delete(fileId);
     for (const [hash, owner] of this.pendingRenames) {
-      if (owner === fileId) this.pendingRenames.delete(hash);
+      if (owner.fileId === fileId) this.pendingRenames.delete(hash);
     }
     for (const [path, tombstone] of this.pendingDeleteByPath) {
       if (tombstone.entry.prepared.fileId === fileId) this.pendingDeleteByPath.delete(path);

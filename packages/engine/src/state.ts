@@ -33,5 +33,20 @@ export interface LocalVersionState {
      * sync point is then rewritten to the delete version).
      */
     deletedAtMs?: number;
+    /**
+     * The version and source path of this chain's **accepted** deletion, while
+     * `lastKnownVersionId` is still that version.
+     *
+     * A tombstone is the one sync point a live file can sit on top of, and the engine has
+     * to tell "this path is this device's delete point, and the file here is new" from
+     * "this is a move of a live chain" — after a restart too, where the self-event records
+     * are gone. Recording the delete version **with the path it deleted** beside the sync
+     * point makes that proof durable and self-checking: a live version written afterwards
+     * replaces both fields together, so a stale marker cannot outlive the point it
+     * describes, and a move's create half that adopted the tombstone at another path is
+     * not mistaken for a new file there.
+     */
+    deleteVersionId?: string;
+    deletePath?: string;
   };
 }

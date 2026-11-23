@@ -193,45 +193,51 @@ The rules below are the ones the e2e suites exist to protect.
     two are out of step and the engine resolves a **conflict** — the remote deletion stands and the local
     content is parked (see the rule above).
   - A tombstone that is **this device's own sync point** is neither: the device deleted the file and the
-    server accepted it, so a file on disk under that point can only be one the user just made — a
-    **recreate**, pushed as `restore` on the same chain. Without that rule "delete a note, then write it
-    again" would delete the new note and leave it as a conflict file.
+    server accepted it, so a file on disk under that point is one the user wrote after the deletion —
+    a **new file**. It gets a chain of its own, and the deleted chain stays deleted (the recycle bin
+    still offers it). Writing a file back at the deleted path does **not** continue the old history;
+    an explicit restore (the recycle bin or the version-history view) is the operation that does.
+    That includes a file the OS recycle bin put back, or one recovered by hand after a permanent
+    delete: it reaches the engine as a create at the path. The app's **own** trash folder is
+    different — a hidden `.trash/` is outside this device's scope, so a deletion there is a move out
+    of scope and moving the file back re-points the same chain.
+    Without the "new file" answer the note just typed would be resolved away as "the remote deletion
+    won" and only survive as a conflict file.
   - Either way the comparison is against a live version, never a tombstone, because a delete version's
     content hash is the hash of an **empty string** — an empty local note would otherwise look "synced"
     and the deletion would never surface. A file that converges on content it already had
     is still **recorded** (state + path → fileId) so the host can look up its identity — otherwise a
     converged note had no version history to open.
-  - **A tracked tombstone whose path another chain has taken is retired.** The state entry
-    that makes a recreate a `restore` is kept across binds, so **ownership** decides which
-    chain a local file at the path belongs to: once another chain claims it — a peer
-    recreated the note, or this device did and the event gave it its own chain — the pass
-    drops the tombstone's state entry instead of pushing a `restore` over the occupant.
-    Without that, a scheduled pass read the new note as the file under this device's delete
-    point and put the deleted note back on top of it, leaving two live chains at one path.
-    Covered by the `does not revive its deleted chain over a peer's new file at the same path`
-    case in `engine.conflicts.test.ts`.
-  - **A recreate event checks the server before it restores.** A vault event decides from the tracked
-    chain alone, and the in-memory remote index can be stale: a peer's `files_pushed` never arrived
-    (the socket was down) and no pass has run since, so the server may already hold a new chain at
-    the path. A `restore` is the event push that resurrects a chain this device deleted, and that is
-    the one this check covers: before pushing it the engine reads the vault index once and applies the
-    pass rule straight away when a live chain records the path — the tombstone entry is retired, the
-    owner's head is adopted when the bytes are identical, and a diverged copy is parked as a conflict.
-    A failed index read fails the event, and the next pass retries. The read costs one index request
-    plus the decryption of every live chain's path (the work a pass starts with), paid only on a
-    recreate, not on ordinary edits. An **untracked create** at a path the stale index does not know
-    is not covered: the engine cannot afford this read on every new note, so two devices that create
-    the same path while out of touch (or before the notification arrives) can still leave two live
-    chains until one of them wins a conflict — the same limit the conflict rule already accepts.
-    Covered by the `does not restore on a recreate event…` / `adopts the owner…` cases in
-    `engine.conflicts.test.ts` and the `5d` case in `path-sync.e2e.test.ts`.
+  - **A tracked tombstone whose path holds a file is retired.** The state entry is kept
+    across binds so the delete is remembered, but the file now at the path is not the
+    deleted chain's: a `recreate` decision drops the tombstone's entry and the create
+    phase gives the file a chain of its own. **Ownership** decides the rest — when another
+    chain claims the path (a peer created a note there, or this device did and the event
+    gave it its own chain), that chain keeps it; the tombstone is never pushed over the
+    occupant, which would leave two live chains at one path. Covered by the
+    `does not revive its deleted chain over a peer's new file at the same path` case in
+    `engine.conflicts.test.ts`.
+  - **A file written at a deleted path is checked against the server before it gets a chain.** A vault
+    event decides from the tracked chain alone, and the in-memory remote index can be stale: a peer's
+    `files_pushed` never arrived (the socket was down) and no pass has run since, so the server may
+    already hold a new chain at the path. The engine reads the vault index once before creating the
+    chain and applies the pass rule straight away when a live chain records the path — the tombstone
+    entry is retired, the owner's head is adopted when the bytes are identical, and a diverged copy is
+    parked as a conflict. A failed index read fails the event, and the next pass retries. The read
+    costs one index request plus the decryption of every live chain's path (the work a pass starts
+    with), paid only on a recreate, not on ordinary edits. An **untracked create** at a path the stale
+    index does not know is not covered: the engine cannot afford this read on every new note, so two
+    devices that create the same path while out of touch (or before the notification arrives) can
+    still leave two live chains until one of them wins a conflict — the same limit the conflict rule
+    already accepts. Covered by the `does not restore on a recreate event…` / `adopts the owner…`
+    cases in `engine.conflicts.test.ts` and the `5d` case in `path-sync.e2e.test.ts`.
   - **A tracked chain whose head is a `delete` and whose file is gone is retired too**, unless its
-    sync point is the tombstone itself (the recreate case, which keeps the entry). The deletion has
-    already happened on this device — the file was removed while nothing watched, or the peer deleted
-    it before it was ever materialised — so keeping the pre-delete sync point would leave the state
-    naming a path with no file, and the next note written at the freed path would be decided against
-    the dead chain (deleted and parked) instead of becoming a new chain. Covered by the
-    `retires a peer-deleted chain whose local file was already gone` case in `engine.conflicts.test.ts`.
+    sync point is the tombstone itself (the entry is kept so the delete is remembered, and a file
+    later written at the path becomes a new chain). The deletion has already happened on this device
+    — the file was removed while nothing watched, or the peer deleted it before it was ever
+    materialised — so keeping the pre-delete sync point would leave the state naming a path with no
+    file. Covered by the `retires a peer-deleted chain whose local file was already gone` case in
+    `engine.conflicts.test.ts`.
   - **Applying a deletion drops the chain from the identity index** (`RemoteIndex.forget`). A chain whose
     head is a `delete` lives at no path, and the index's previous **live** head is not an identity a file
     at that path can adopt: leaving it there made the file adopt a chain whose content it does not have,
@@ -322,20 +328,31 @@ file now lives at.
     path the peer had moved away from, leaving **both** files on disk.
   - `handleLocalChange` looks the path up in the remote index (`RemoteIndex.fileIdAt`) before treating an
     unknown local file as new, and falls back to a content-hash match (`RemoteIndex.fileIdForHash`) only
-    when the chain's previous path no longer holds a local file — so two genuinely separate files that
-    merely share content still get their own chains.
+    when the chain's previous path no longer holds a local file **and** the candidate carries that
+    chain's stamp (size and mtime) — so two genuinely separate files that merely share content still get
+    their own chains. Bytes alone are not identity: every new note is empty, so every untitled note
+    shares `sha256("")`, and a match on the hash alone handed a fresh note the version history of a note
+    the user had renamed and deleted.
   - `handleFilePushed` and `pushFile` keep the index current, and the pushed version is recorded
     **before** the push request goes out (`SelfEventLog.rememberPushedVersion`), because the server's
     `files_pushed` echo can beat the HTTP response back.
   - **A pass adopts a move whose two halves it sees separately.** `createUntrackedFiles` asks
     `SelfEventLog.matchDeletedFile` for the bytes it is about to give a new chain to: when a tombstone
-    this device just published deleted exactly those bytes, the chain is re-pointed to the new path and
-    a content-less `rename` is pushed — the same rule the event path applies (stamp-proved: the hash and
-    size travel, the payload does not), and the pass also records a tombstone it publishes
-    (`prepareTombstone`) so that rule can fire. Without it, a scheduled pass that listed the vault
-    between the halves of a bulk rename gave every note a second chain: the deletions landed, the creates
-    found no chain to adopt, and the vault was left with one tombstone and one duplicate per note
-    (measured with 200 renamed notes and a one-second pass interval). The memory is bounded on purpose:
+    this device just published deleted exactly those bytes **at the candidate's stamp**, the chain is
+    re-pointed to the new path and a content-less `rename` is pushed — the same rule the event path
+    applies (stamp-proved: the hash and size travel, the payload does not), and the pass also records a
+    tombstone it publishes (`prepareTombstone`) so that rule can fire. Without it, a scheduled pass that
+    listed the vault between the halves of a bulk rename gave every note a second chain: the deletions
+    landed, the creates found no chain to adopt, and the vault was left with one tombstone and one
+    duplicate per note (measured with 200 renamed notes and a one-second pass interval).
+    A file whose bytes match but whose stamp differs is a new file: a move carries the file's size and
+    modification time to its new path, a new note or a copy does not. A file at the **deleted path**
+    is never a move: it is a new file too (the delete record matches only another path), and the
+    stamp is what keeps a genuine move apart from a copy. The same proof gates `repairMovedFile`
+    and the content-identity net, so the scan cannot hand a chain to a file that merely copied
+    its bytes; the excluded-folder fallback still matches by name, size and content, because
+    its destination is a file this device does not list (and the record it re-points is this
+    chain's own). The memory is bounded on purpose:
     the newest 20 000 deletes for at most one pass interval, so a move larger than that keeps the chains
     of its newest files and the earliest ones fork.
 
@@ -453,7 +470,8 @@ file now lives at.
     recognises the head when it is the version the create half **carried** (on the prepared version,
     `ownDeleteVersion` — the record itself is consumed by the decision) or one of the (newest eight)
     tombstone versions the chain's record still holds, which covers a newer mint prepared while the
-    create half was deciding. It then adopts the head and decides again: a recreate, not a peer's
+    create half was deciding. It then adopts the head and decides again: a `restore` on the
+    chain — the delete record's source path is not the destination — not a peer's
     deletion (`settleRefusedMove`; a peer's tombstone is in neither place). That peer rule is also
     what a refused tombstone obeys: only the version this device pushed counts as its deletion having
     landed (`settleStaleBase`), so a peer's tombstone is never adopted as this device's sync point.
@@ -740,8 +758,8 @@ file now lives at.
     after the event (trash and undo), a peer's pull wrote the path, or a move landed on it — the batch
     cannot see those events in order, so the absence is checked on disk at decision time. That is also
     what makes holding a deletion safe (see the delete-sequence bullet below); a tool replacing a file in
-    place reports both halves, and publishing the tombstone only to follow it with a restore tells every
-    peer to delete a note that never went away;
+    place reports both halves, and publishing the tombstone only to follow it with a second chain tells
+    every peer to delete a note that never went away;
   - this is **not a pass**, so it costs the burst, not the vault: there is no vault walk and no
     per-file listing. One listing is read per job (only when it has changes), where the single-event
     path reads one listing per new file for its identity fallback; a restore in the job reads the chain
@@ -794,8 +812,9 @@ file now lives at.
     the sync point first. That is what the delete half's own `applyPushedVersion` would have done, and
     it can be later than this refusal because the two halves are separate jobs: the state is then a
     version behind, and reading it alone would take our own delete for a peer's, apply it, and delete
-    the file the move carried in — bytes that exist nowhere else. With the head adopted, the recreate
-    rule fires and the create travels as a `restore`; a later tombstone whose base the chain has since
+    the file the move carried in — bytes that exist nowhere else. With the head adopted, the create
+    half is decided again: its path differs from the delete record's, so it continues the chain as a
+    `restore` (a file at the deleted path would be a new chain); a later tombstone whose base the chain has since
     passed is dropped by `applyPushedVersion`, so the held answer cannot make the chain deleted again.
     The bound is safe because a newer mint moved the state point past the earlier version, so an
     evicted version cannot be the head of the refusal being settled. A **peer's** tombstone is not

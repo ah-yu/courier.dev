@@ -68,10 +68,11 @@ describe("SyncEngine conflicts", () => {
    * A local delete followed by a local recreate is not a divergence: the tombstone
    * is **this device's own sync point**, so a file on disk under it can only be one
    * the user just created, and the remote side holds no content to compete with.
-   * The recreate is pushed as a `restore` on the same chain — under the "remote
-   * wins" rule the alternative would be deleting the note the user is typing.
+   * The file gets a chain of its own and the deleted chain keeps its tombstone —
+   * under the "remote wins" rule the alternative would be deleting the note the user
+   * is typing.
    */
-  it("pushes a restore for a file recreated after this device deleted it", async () => {
+  it("gives a file recreated after this device deleted it a chain of its own", async () => {
     const { engine, adapter, api } = await makeEngine();
     adapter.files.set("reborn.md", encoder.encode("first life"));
     await engine.initialSync();
@@ -81,15 +82,22 @@ describe("SyncEngine conflicts", () => {
     adapter.files.set("reborn.md", encoder.encode("second life"));
     await engine.handleLocalChange("reborn.md");
 
-    expect(api.pushed.at(-1)?.action).toBe("restore");
-    expect(engine.fileIdForPath("reborn.md")).toBe(fileId);
+    // The path was freed by this device's own delete, so the file written there is a new
+    // file: its own chain, and the deleted one stays exactly as it was (the recycle bin
+    // still offers the version it removed).
+    const rebornId = engine.fileIdForPath("reborn.md")!;
+    expect(rebornId).not.toBe(fileId);
+    expect(api.pushed.at(-1)?.action).toBe("create");
     expect(adapter.files.has(conflictFilePath("reborn.md"))).toBe(false);
+    expect(api.chains.get(fileId)!.map((v) => v.action)).toEqual(["create", "delete"]);
+    expect(api.chains.get(rebornId)!.map((v) => v.action)).toEqual(["create"]);
 
-    // The scheduled pass leaves it alone: it is a normal synced file again.
+    // The scheduled pass leaves the new chain alone: it is a normal synced file again.
     await engine.initialSync();
 
     expect(new TextDecoder().decode(adapter.files.get("reborn.md"))).toBe("second life");
-    expect(api.chains.get(fileId)!.map((v) => v.action)).toEqual(["create", "delete", "restore"]);
+    expect(engine.fileIdForPath("reborn.md")).toBe(rebornId);
+    expect(api.chains.get(rebornId)!.map((v) => v.action)).toEqual(["create"]);
   });
 
   it("takes the peer's deletion for an edit made offline, parking that edit", async () => {
@@ -254,11 +262,12 @@ describe("SyncEngine conflicts", () => {
    * recreate — but a local file at the path is **not** a recreate once another chain
    * claims it.
    *
-   * Without that, the next pass read the peer's new note as the file under this device's
-   * delete point and pushed a `restore` on the dead chain: two live chains at one path,
-   * and the note the user deleted back on top of the peer's new one. The state entry is
-   * what the bind pass now keeps across a restart, so the pass itself has to retire it
-   * when the path changes hands.
+   * Without that, the tombstone entry lingered and the pass read the peer's new note as the
+   * file under this device's delete point. Since the `recreate` branch retires the entry and
+   * the create phase skips any path a chain already claims, the retirement here is a fast
+   * path rather than the only defence: the peer chain's own conflict decision parks the
+   * diverged copy either way. The state entry is what the bind pass keeps across a restart,
+   * so the pass retires it when the path changes hands.
    */
   it("does not revive its deleted chain over a peer's new file at the same path", async () => {
     const { engine, adapter, api, key } = await makeEngine();
@@ -355,9 +364,9 @@ describe("SyncEngine conflicts", () => {
    * peer's push).
    *
    * The event's decision is taken from the tracked chain alone, so without a server check it
-   * answers "recreate" and pushes a `restore` onto the dead chain beside the peer's chain —
-   * two live chains at one path. The pass-level rule has to reach the event path too: the
-   * peer's chain owns the path, so the local copy is parked and the peer's head is applied.
+   * creates a second chain beside the peer's chain — two live chains at one path. The
+   * pass-level rule has to reach the event path too: the peer's chain owns the path, so the
+   * local copy is parked and the peer's head is applied.
    */
   it("does not restore on a recreate event when a peer's chain already owns the path", async () => {
     const { engine, adapter, api, key } = await makeEngine();

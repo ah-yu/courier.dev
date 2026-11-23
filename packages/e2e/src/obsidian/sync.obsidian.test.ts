@@ -686,6 +686,77 @@ describe.skipIf(!enabled)("obsidian e2e — two real vaults through the CLI", ()
     await closeOpenModals(names.b);
   });
 
+  it("starts a new note's history at its own create after a renamed note was deleted", async () => {
+    // The report's cycle, in the real app: an empty note, its history read, a rename, a
+    // delete, then another empty note under the original name. Every empty note shares
+    // `sha256("")`, and a move is proved by the file's stamp — so the second note must get
+    // a chain of its own instead of the deleted one's create/rename/delete rows. Only the
+    // real adapter's `statFile` and the app's own rename/delete events can prove that; the
+    // L2 stub says nothing about whether a real rename carries its mtime.
+    const original = `${PROBE_PREFIX}untitled.md`;
+    const renamed = `${PROBE_PREFIX}untitled-renamed.md`;
+
+    await vaultA.write(original, "");
+    await waitForVaultState(
+      async () => (await fileIdForPath(names.a, original)) !== null,
+      "the note was never indexed by the running plugin",
+      30_000,
+    );
+    const firstId = (await fileIdForPath(names.a, original))!;
+    await waitForVaultState(
+      async () => (await fileVersions(server, remote.id, firstId)).length === 1,
+      "the first note's create never reached the server",
+      30_000,
+    );
+    // The report had the history open; reading it is a server read and must change nothing.
+    expect((await fileVersions(server, remote.id, firstId)).map((v) => v.action)).toEqual([
+      "create",
+    ]);
+
+    await vaultA.rename(original, renamed);
+    await waitForVaultState(
+      async () => (await fileVersions(server, remote.id, firstId)).at(-1)?.action === "rename",
+      "the rename never reached the server",
+      30_000,
+    );
+    await vaultA.remove(renamed);
+    await waitForAsync(
+      async () => (await deletedFiles(server, remote.id)).some((file) => file.fileId === firstId),
+      "the delete never reached the recycle bin",
+      60_000,
+    );
+
+    // The next new note is empty as well: the same bytes, a different file.
+    await vaultA.write(original, "");
+    await waitForVaultState(
+      async () => {
+        const id = await fileIdForPath(names.a, original);
+        return id !== null && id !== firstId;
+      },
+      "the recreated note kept the deleted chain",
+      30_000,
+    );
+    const secondId = (await fileIdForPath(names.a, original))!;
+    await waitForVaultState(
+      async () => (await fileVersions(server, remote.id, secondId)).length === 1,
+      "the recreated note's chain never reached the server",
+      30_000,
+    );
+
+    expect((await fileVersions(server, remote.id, secondId)).map((v) => v.action)).toEqual([
+      "create",
+    ]);
+    // The deleted note keeps its own history, and the recycle bin still offers it.
+    expect((await fileVersions(server, remote.id, firstId)).map((v) => v.action)).toEqual([
+      "create",
+      "rename",
+      "delete",
+    ]);
+    expect((await deletedFiles(server, remote.id)).some((file) => file.fileId === firstId)).toBe(
+      true,
+    );
+  });
+
   it("re-reads the real recycle bin in place, without tearing its list down", async () => {
     // The refresh control used to put the dialog back through its loading state: the rows
     // and the footer went away, a skeleton took their place, and the list then refilled row

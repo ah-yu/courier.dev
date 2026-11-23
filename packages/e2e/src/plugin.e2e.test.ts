@@ -2348,6 +2348,75 @@ describe("plugin e2e — the real plugin against a real server", () => {
       );
     });
 
+    /**
+     * The untitled-note cycle users actually perform: create `未命名`, rename it, trash it,
+     * create another one. The second note starts empty too, and an empty note's hash is not
+     * an identity — matching it to the deleted chain showed that note's create, rename and
+     * delete under the new file's history. A move is proved by the file's stamp, not its
+     * bytes.
+     */
+    it("starts the new note's history at its own create, not the deleted note's chain", async () => {
+      const { plugin, vault, remote } = await startHostedPlugin("Untitled Cycle");
+
+      /** The actions of one chain, or null while the server has not accepted it yet. */
+      const actionsOf = async (fileId: string): Promise<string[] | null> => {
+        const file = (await vaultHistory(server, remote.id)).find(
+          (candidate) => candidate.fileId === fileId,
+        );
+        return file ? file.versions.map((version) => version.action) : null;
+      };
+
+      await vault.create("未命名.md", "");
+      await vault.settle();
+      const firstId = await trackedFileId(plugin, "未命名.md");
+      await waitForAsync(
+        async () => (await actionsOf(firstId))?.length === 1,
+        "the first note's create never landed",
+      );
+
+      // The user looks at the history, then renames and deletes the note.
+      await openVersionHistory(plugin, "未命名.md");
+      await vault.move("未命名.md", "named.md");
+      await vault.settle();
+      await waitForAsync(
+        async () => (await actionsOf(firstId))?.at(-1) === "rename",
+        "the rename never reached the server",
+      );
+      await vault.remove("named.md");
+      await vault.settle();
+      await waitForAsync(
+        async () => (await actionsOf(firstId))?.at(-1) === "delete",
+        "the delete never reached the server",
+      );
+
+      // The next new note is empty as well: the same bytes, a different file.
+      await vault.create("未命名.md", "");
+      await vault.settle();
+      const secondId = await trackedFileId(plugin, "未命名.md");
+      expect(secondId).not.toBe(firstId);
+
+      // The create can still be on the wire (`settle()` drains the vault's queue, not the
+      // push), and the versions route answers 404 for a chain the server does not hold yet —
+      // so the view's own read waits until the chain is there, then renders its one row.
+      await waitForAsync(
+        async () =>
+          (await vaultHistory(server, remote.id)).some((file) => file.fileId === secondId),
+        "the new note's chain never reached the server",
+      );
+
+      const view = await openVersionHistory(plugin, "未命名.md");
+      expect(versionActions(view)).toEqual(["创建"]);
+      expect((await fileVersions(server, remote.id, secondId)).map((v) => v.action)).toEqual([
+        "create",
+      ]);
+      // The deleted note keeps its own history in the recycle bin.
+      expect((await fileVersions(server, remote.id, firstId)).map((v) => v.action)).toEqual([
+        "create",
+        "rename",
+        "delete",
+      ]);
+    });
+
     it("shows a version's decrypted content when its row is clicked", async () => {
       const { plugin } = await startRenamedNote();
       const view = await openVersionHistory(plugin, "moved.md");
@@ -3070,7 +3139,7 @@ describe("plugin e2e — the real plugin against a real server", () => {
       expect(notices.filter((message) => message.includes("恢复失败"))).toHaveLength(0);
     });
 
-    it("pushes a note recreated at a deleted path as a restore, not a conflict", async () => {
+    it("gives a note recreated at a deleted path a chain of its own", async () => {
       const { plugin, vault, remote } = await startHostedPlugin(
         "Recycle Bin Recreated",
         async (v) => {
@@ -3079,9 +3148,9 @@ describe("plugin e2e — the real plugin against a real server", () => {
       );
       const fileId = await trackedFileId(plugin, "hero.md");
 
-      // Delete it, then write a new note at the same path while the host runs. The
-      // tombstone is this device's own sync point, so a file under it can only be one
-      // the user just made: a recreate, pushed as a `restore` on the same chain.
+      // Delete it, then write a new note at the same path while the host runs. The path
+      // was freed by this device's own delete, so the note written there is a new file:
+      // the deleted chain stays exactly as it was and the new note starts its own history.
       await vault.remove("hero.md");
       await vault.settle();
       await waitForAsync(
@@ -3092,16 +3161,31 @@ describe("plugin e2e — the real plugin against a real server", () => {
       await vault.settle();
 
       await waitForAsync(
-        async () => (await fileVersions(server, remote.id, fileId)).at(-1)?.action === "restore",
-        "the recreated note never became a restore",
+        async () => plugin.engine?.fileIdForPath("hero.md") !== fileId,
+        "the recreated note kept the deleted chain",
       );
-      expect(vault.read("hero.md")).toBe("new content");
-      expect(plugin.engine!.fileIdForPath("hero.md")).toBe(fileId);
-      expect(vault.paths().filter((path) => isConflictFile(path))).toEqual([]);
-      // The chain is a restore now, so the note is no longer a deletion.
+      const rebornId = plugin.engine!.fileIdForPath("hero.md")!;
+      // `settle()` only drains the vault's own event queue, so the create can still be on
+      // the wire here — and the versions route answers 404 for a chain the server has not
+      // received yet. Poll the vault list, which has no such answer for a missing chain.
       await waitForAsync(
-        async () => !(await deletedFiles(server, remote.id)).some((file) => file.fileId === fileId),
-        "the recreated note is still listed as deleted",
+        async () =>
+          (await vaultHistory(server, remote.id)).some((file) => file.fileId === rebornId),
+        "the recreated note's chain never reached the server",
+      );
+
+      expect(vault.read("hero.md")).toBe("new content");
+      expect((await fileVersions(server, remote.id, rebornId)).map((v) => v.action)).toEqual([
+        "create",
+      ]);
+      expect((await fileVersions(server, remote.id, fileId)).map((v) => v.action)).toEqual([
+        "create",
+        "delete",
+      ]);
+      expect(vault.paths().filter((path) => isConflictFile(path))).toEqual([]);
+      // The deleted chain is still the recycle bin's to offer.
+      expect((await deletedFiles(server, remote.id)).some((file) => file.fileId === fileId)).toBe(
+        true,
       );
     });
 

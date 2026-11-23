@@ -8,6 +8,16 @@ import type { SyncAction, VersionChainEntry } from "@courier/shared";
 export type FileDecision =
   | { action: "synced" }
   | { action: "push"; pushAction: SyncAction }
+  /**
+   * A local file written at the path of a tombstone this device itself pushed.
+   *
+   * It is a **new** file, not the deleted one coming back: the old chain stays a
+   * tombstone (the recycle bin still offers it), and the file gets a chain of its own.
+   * The engine retires the tombstone's state entry and creates the new chain. An explicit
+   * restore (`restoreFile`) is a different path: it writes the version and pushes a
+   * `restore` on the chain it names.
+   */
+  | { action: "recreate" }
   | { action: "pull" }
   | { action: "conflict" }
   | { action: "none" };
@@ -167,13 +177,14 @@ export function decideFile(input: DecideInput): FileDecision {
       return { action: "push", pushAction: "create" };
     }
     if (input.locallyTracked && input.lastKnown.versionId === head.versionId) {
-      // The tombstone *is* this device's sync point, so this device already knows
-      // the file is deleted — it deleted it. A file on disk under that point can
-      // only be one the user created afterwards, and the remote side holds no
-      // content to compete with: that is a **recreate**, not a conflict. Without
-      // this the note just typed would be resolved away as "the remote deletion
-      // won" and only survive as a conflict file.
-      return { action: "push", pushAction: "restore" };
+      // The tombstone *is* this device's sync point, so this device already knows the
+      // file is deleted — it deleted it. A file on disk under that point is one the user
+      // created afterwards, and it is a **new file**: the path's old chain stays deleted
+      // and the new file gets a chain of its own. A `restore` here would fold a new note
+      // into the deleted note's history (the "version history shows another file's rows"
+      // defect); an explicit restore from the recycle bin or the history view is a
+      // different path and still continues the chain it names.
+      return { action: "recreate" };
     }
     // Running client (or a bind over state we already have): apply the deletion
     // unless the local file diverged from the version the tombstone removed, in
@@ -335,8 +346,9 @@ export function decideRefusedPush(attempt: number): RefusedPushStep {
  * A move's create half takes the delete half's record back and re-points the chain; when
  * that tombstone's push answered first, the `rename` is refused `stale_base` with the
  * tombstone as the head. Adopting that head as the sync point before deciding again is
- * what makes the create a recreate (`restore`) instead of a peer's deletion applied to the
- * only copy of the bytes.
+ * what makes the re-decision read the create half as the move it is — a `restore` on the
+ * chain, decided from the delete's source path — instead of a peer's deletion applied to
+ * the only copy of the bytes.
  *
  * `captured` is the version the decision carried, and `minted` the versions the chain's
  * delete record still holds (its newest few). Both are this device's

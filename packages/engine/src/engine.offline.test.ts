@@ -371,8 +371,7 @@ describe("SyncEngine — changes made while the connection is down", () => {
     const fileId = await syncedFileId(api);
 
     api.offline = true;
-    adapter.files.delete("old.md");
-    adapter.files.set("new.md", encoder.encode("v1"));
+    adapter.files.move("old.md", "new.md");
     await expect(engine.handleLocalRename("old.md", "new.md")).rejects.toThrow();
 
     api.offline = false;
@@ -396,8 +395,7 @@ describe("SyncEngine — changes made while the connection is down", () => {
     const fileId = await syncedFileId(api);
 
     api.offline = true;
-    adapter.files.delete("old.md");
-    adapter.files.set("new.md", encoder.encode("v1"));
+    adapter.files.move("old.md", "new.md");
     await expect(engine.handleLocalRename("old.md", "new.md")).rejects.toThrow();
 
     // The move happened on disk, so it has to be in the persisted state even
@@ -430,8 +428,7 @@ describe("SyncEngine — changes made while the connection is down", () => {
 
     // Nothing told the engine about the move at all (the plugin was disabled
     // while the vault was reorganised, or an external tool moved the file).
-    adapter.files.delete("old.md");
-    adapter.files.set("new.md", encoder.encode("v1"));
+    adapter.files.move("old.md", "new.md");
     await engine.initialSync();
 
     // One note, one chain: a tombstone here plus a fresh fileId for the new path
@@ -454,8 +451,7 @@ describe("SyncEngine — changes made while the connection is down", () => {
     await engine.handleLocalChange("b.md");
     const second = api.pushed.find((p) => p.fileId !== first.fileId)!;
 
-    adapter.files.delete("a.md");
-    adapter.files.set("moved.md", encoder.encode("same bytes"));
+    adapter.files.move("a.md", "moved.md");
     await engine.initialSync();
 
     expect(sortedCopy(api.chains.keys())).toEqual(sortedCopy([first.fileId, second.fileId]));
@@ -484,8 +480,7 @@ describe("SyncEngine — a reconcile racing an incremental event", () => {
     // The user moves the note; its push is slow rather than failed. The pass queues
     // behind the rename's job (one job per path), so it sees the settled state and has
     // nothing to push — the duplicate the plugin suite caught cannot be built.
-    adapter.files.delete("old.md");
-    adapter.files.set("new.md", encoder.encode("v1"));
+    adapter.files.move("old.md", "new.md");
     const held = holdFirstPush(api);
     const rename = engine.handleLocalRename("old.md", "new.md");
     await held.reached;
