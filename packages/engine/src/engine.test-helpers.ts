@@ -92,6 +92,22 @@ export class StampedFiles extends Map<string, Uint8Array> {
   }
 
   /**
+   * Move a file the way a real filesystem does: same bytes, same stamp.
+   *
+   * Tests that model a move must keep the mtime, because the engine proves a move by the
+   * stamp as well as the bytes (`SelfEventLog.matchDeletedFile`). Writing the bytes at the
+   * new path instead gives them a fresh stamp and models a copy, not a move.
+   */
+  move(from: string, to: string): void {
+    const bytes = this.get(from);
+    if (!bytes) throw new Error(`move: ${from} does not exist`);
+    const mtime = this.mtimes.get(from);
+    this.delete(from);
+    this.set(to, bytes);
+    if (mtime !== undefined) this.mtimes.set(to, mtime);
+  }
+
+  /**
    * Set a path's modification time explicitly.
    *
    * The fake clock is a small counter, while a remote version's `mtimeMs` in these tests
@@ -179,8 +195,13 @@ export class FakeAdapter implements SyncAdapter {
   async renameFile(from: string, to: string): Promise<void> {
     const b = this.files.get(from);
     if (b) {
+      // A real filesystem move carries the file's modification time with it, and the
+      // engine's move proof leans on that (`SelfEventLog.matchDeletedFile`): a fake that
+      // stamped the destination as new would hide a genuine move behind a "new file".
+      const mtime = this.files.mtimes.get(from);
       this.files.delete(from);
       this.files.set(to, b);
+      if (mtime !== undefined) this.files.mtimes.set(to, mtime);
     }
     await this.onRename?.(from, to);
   }

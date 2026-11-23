@@ -308,8 +308,7 @@ describe("SyncEngine — the vault event caused by its own write", () => {
     // The peer renames it and that push never reaches this engine: the server's
     // live path is still the *old* one, while the vault already reports a file at
     // the new path. Without the content-identity net this forks a second chain.
-    adapter.files.delete("old.md");
-    adapter.files.set("new.md", encoder.encode("renamed by the peer"));
+    adapter.files.move("old.md", "new.md");
 
     await engine.handleLocalChange("new.md");
 

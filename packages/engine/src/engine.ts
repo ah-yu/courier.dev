@@ -126,8 +126,14 @@ interface ReconcilePass {
   fileIds: Set<string>;
   /** plainPath → hash, for the files the pass hashed (or reused a recorded hash for). */
   localHashes: Map<string, string>;
-  /** The scan's files it deliberately did not hash (see {@link LocalScan.untracked}). */
-  untrackedPaths: readonly string[];
+  /**
+   * The scan's files it deliberately did not hash (see {@link LocalScan.untracked}).
+   *
+   * A `recreate` decision appends the path of a file it just retired a tombstone for:
+   * the create phase runs after every per-file job, so it is the one place a new chain can
+   * be minted for a path the scan had seen as tracked.
+   */
+  untrackedPaths: string[];
   /** fileId → its chain, oldest → newest. */
   chainByFileId: Map<string, VersionChainEntry[]>;
   /** What the server holds, as of this pass (see `RemoteIndex`). */
@@ -313,6 +319,15 @@ interface PreparedPush {
    * wire shape has exactly one source of truth (see {@link wireFile}).
    */
   historyKind: HistoryKind;
+  /**
+   * The path the delete half of this `rename` was decided at, when it is this device's own.
+   *
+   * The record itself is consumed by the adoption (`matchDeletedFile`), so a refusal that
+   * re-decides the create half carries the source path on the version to tell "a move whose
+   * delete landed first" (continue the chain) from "a new file at the deleted path" (a new
+   * chain). Null on every other version.
+   */
+  ownDeletePath: string | null;
   /**
    * The tombstone this `rename` took back, when the move's delete half is this device's own.
    *
@@ -1237,6 +1252,7 @@ export class SyncEngine {
       // Set by the caller that decided this version is the other half of a move whose
       // delete this device published (`resolveNewLocalFile`, the pass's create phase).
       ownDeleteVersion: null,
+      ownDeletePath: null,
     };
   }
 
@@ -1527,7 +1543,8 @@ export class SyncEngine {
       deviceName: null,
     });
     // A `delete` has no live path, so it is dropped from the identity index rather than
-    // remembered under one (the state entry above keeps the recreate rule working).
+    // remembered under one (the state entry above lets a later file at the path be
+    // recognised as a recreate and get a chain of its own).
     if (action === "delete") {
       this.remoteIndex.forget(fileId);
       return;
@@ -1823,7 +1840,14 @@ export class SyncEngine {
     // the engine, so neither the tombstone branch nor the untracked branch below
     // mistakes a move for "deleted here, created there".
     for (const [fileId, entry] of Object.entries(this.state)) {
-      await this.repairMovedFile(fileId, entry, scan.hashes, liveFileIds, this.remoteIndex);
+      await this.repairMovedFile(
+        fileId,
+        entry,
+        scan.hashes,
+        scan.stamps,
+        liveFileIds,
+        this.remoteIndex,
+      );
     }
 
     // Every fileId we know about, plus every live chain the server knows. A tracked
@@ -2334,6 +2358,16 @@ export class SyncEngine {
       }
     }
 
+    // A `recreate` is one of two things, and the delete's recorded path tells them apart:
+    // a file written at the deleted path is a new file, while a file at another path that
+    // still carries the chain's sync point is the create half of a move whose delete
+    // landed first — that chain continues as a `restore` on its tombstone.
+    const recreateSource =
+      decision.action === "recreate" ? this.selfEvents.deletedPathFor(fileId) : null;
+    if (decision.action === "recreate" && recreateSource !== null && recreateSource !== plainPath) {
+      decision = { action: "push", pushAction: "restore" };
+    }
+
     switch (decision.action) {
       case "synced": {
         return await this.settleSynced({
@@ -2350,6 +2384,20 @@ export class SyncEngine {
       }
       case "none":
         break;
+      case "recreate": {
+        // A file on disk under this device's own tombstone is a **new** file: its chain
+        // stays deleted (the recycle bin still offers it), and the path is handed to the
+        // create phase, which gives it a chain of its own. The alternative — a `restore` on
+        // the old chain — folded a new note into the deleted note's version history.
+        delete this.state[fileId];
+        if (plainPath !== null && this.pathToFileId.get(plainPath) === fileId) {
+          this.pathToFileId.delete(plainPath);
+        }
+        if (plainPath !== null && localExists && !pass.untrackedPaths.includes(plainPath)) {
+          pass.untrackedPaths.push(plainPath);
+        }
+        break;
+      }
       case "push": {
         // Only a push that names a path can be sent; a decision without one has nothing
         // to write to.
@@ -2432,8 +2480,8 @@ export class SyncEngine {
     // Retiring it keeps the state honest (an entry naming a path with no file) and lets the
     // next note at the freed path become a `create` instead of being decided against a
     // chain this device no longer has. The one exception is the recreate case: a sync point
-    // that IS the tombstone keeps its entry, so a file the user writes there is pushed as a
-    // `restore`.
+    // that IS the tombstone keeps its entry, so a file the user writes there is recognised
+    // as a recreate and gets a chain of its own.
     if (head?.action === "delete" && entry !== undefined && !localExists) {
       if (entry.lastKnownVersionId !== head.versionId) {
         delete this.state[fileId];
@@ -2729,7 +2777,7 @@ export class SyncEngine {
         // (`resolveNewLocalFile`); a rename carries no content, so it is pushed here rather
         // than waiting for the next pass to read the tombstone as a recreate.
         const movedHash = knownHash ?? (await sha256Hex(read.bytes));
-        const deleted = this.selfEvents.matchDeletedFile(movedHash);
+        const deleted = this.selfEvents.matchDeletedFile(movedHash, read.stamp, path);
         if (deleted !== null) {
           const moved = this.state[deleted.fileId];
           if (moved !== undefined) {
@@ -2760,8 +2808,10 @@ export class SyncEngine {
             });
             if (prepared) {
               // This version is the other half of a move whose delete this device published;
-              // a refusal settles that tombstone as its own (see `settleRefusedMove`).
+              // a refusal settles that tombstone as its own (see `settleRefusedMove`), and
+              // the source path tells the re-decision it is a move.
               prepared.ownDeleteVersion = deleted.versionId;
+              prepared.ownDeletePath = deleted.path;
               const outcome = await renames.add(prepared, undefined, { pipelined: true });
               if (outcome === "dropped") break;
             }
@@ -3098,7 +3148,14 @@ export class SyncEngine {
     // server's head is not.
     const versionId = knownVersion ?? generateVersionId();
     if (deletedContentHash !== "") {
-      this.selfEvents.rememberDelete(fileId, deletedContentHash, versionId, baseVersionId);
+      this.selfEvents.rememberDelete(
+        fileId,
+        deletedContentHash,
+        after.stamp ?? null,
+        path,
+        versionId,
+        baseVersionId,
+      );
     }
     return await this.preparePush({
       ...this.tombstoneRequest(fileId, path, baseVersionId, this.deleteMoment(stateEntry)),
@@ -3612,6 +3669,7 @@ export class SyncEngine {
     fileId: string,
     entry: LocalVersionState[string],
     localHashes: Map<string, string>,
+    localStamps: Map<string, FileStamp>,
     liveFileIds: Set<string>,
     remote: RemoteIndex,
   ): Promise<void> {
@@ -3623,13 +3681,24 @@ export class SyncEngine {
     if (localHashes.has(oldPath) || !liveFileIds.has(fileId)) return;
     const syncedHash = entry.lastKnownContentHash;
     if (!syncedHash) return;
+    // The move has to be proved by the file's stamp as well as its bytes: a new file that
+    // merely holds the same content (an empty note, a copy) is not this chain's, and
+    // handing it the chain showed that file's version history under a different name. A
+    // state written before stamps were recorded proves nothing this way, which costs the
+    // move its identity; the excluded-folder rule below still matches those by content
+    // (it looks a file up by its name, not by an ambiguous vault-wide scan).
+    const recordedStamp = entry.stamp;
 
     let candidate: string | null = null;
-    for (const [path, hash] of localHashes) {
-      if (hash !== syncedHash) continue;
-      if (this.pathToFileId.has(path) || remote.fileIdAt(path) !== null) continue;
-      if (candidate !== null) return; // ambiguous — leave both sides alone
-      candidate = path;
+    if (recordedStamp !== undefined) {
+      for (const [path, hash] of localHashes) {
+        if (hash !== syncedHash) continue;
+        if (this.pathToFileId.has(path) || remote.fileIdAt(path) !== null) continue;
+        const stamp = localStamps.get(path);
+        if (!stamp || !sameStamp(stamp, recordedStamp)) continue;
+        if (candidate !== null) return; // ambiguous — leave both sides alone
+        candidate = path;
+      }
     }
     if (candidate === null) {
       const excluded = await this.excludedMoves.find(fileId, oldPath, syncedHash);
@@ -3655,6 +3724,8 @@ export class SyncEngine {
       if (this.pathToFileId.has(candidate) || remote.fileIdAt(candidate) !== null) return;
       const bytes = await this.opts.adapter.readFile(candidate);
       if (!bytes || (await sha256Hex(bytes)) !== syncedHash) return;
+      const stamp = await this.opts.adapter.statFile(candidate);
+      if (!stamp || recordedStamp === undefined || !sameStamp(stamp, recordedStamp)) return;
       this.pathToFileId.delete(oldPath);
       this.pathToFileId.set(candidate, fileId);
       entry.plainPath = candidate;
@@ -3684,7 +3755,8 @@ export class SyncEngine {
    *
    * A **tombstone** head is adopted too, from the refusal a move's create half gets
    * (`settleRefusedMove`): the chain's sync point is then the deletion, and the file on
-   * disk under it is a recreate. The identity index drops it rather than remember a path
+   * disk at the move's destination continues that chain. The identity index drops it
+   * rather than remember a path
    * nobody can pull — the same bookkeeping `applyPushedVersion` does for its own delete.
    */
   private adoptRemoteIdentity(
@@ -3848,9 +3920,11 @@ export class SyncEngine {
    * half of a watcher-split move takes the delete half's record back and re-points the
    * chain, but that delete is a job of its own and the state it writes is applied when its
    * own response arrives, which can be after this refusal. The state is then still the
-   * pre-delete sync point, so the recreate rule ("the tombstone is this device's sync
-   * point") does not fire: `decideFile` would read our own delete as a peer's and apply
-   * it, deleting the very file this move carried in.
+   * pre-delete sync point, so `decideFile` would read our own delete as a peer's and apply
+   * it, deleting the very file this move carried in. The head is adopted as the sync point
+   * first; the re-decision then carries the delete's source path (`ownDeletePath`), which
+   * tells it the create half is a move at another path (a `restore` on the chain) and not
+   * a new file at the deleted path (which would get a chain of its own).
    *
    * `prepared.ownDeleteVersion` names the tombstone this device prepared — set by the
    * decision that took it back, on the version itself, so every sender (a single event, a
@@ -3875,7 +3949,15 @@ export class SyncEngine {
       });
       if (own) this.adoptRemoteIdentity(prepared.fileId, prepared.plainPath, head);
     }
-    await this.decideIncremental(prepared.fileId, prepared.plainPath);
+    // The delete record itself was consumed when this move adopted the chain, so the
+    // version carries the path it was decided at: a refusal re-deciding at another path
+    // must still read it as the move, not as a new file at the deleted path.
+    await this.decideIncremental(
+      prepared.fileId,
+      prepared.plainPath,
+      undefined,
+      prepared.ownDeletePath,
+    );
   }
 
   /**
@@ -4155,7 +4237,8 @@ export class SyncEngine {
         continue;
       }
       const contentHash = this.state[outcome.prepared.fileId]?.lastKnownContentHash ?? "";
-      job.noteTombstone(path, outcome.prepared, contentHash);
+      const stamp = this.state[outcome.prepared.fileId]?.stamp ?? null;
+      job.noteTombstone(path, outcome.prepared, contentHash, stamp);
     }
   }
 
@@ -4246,6 +4329,13 @@ export class SyncEngine {
       }
       if (outcome.kind === "handled") {
         this.persist();
+        continue;
+      }
+      if (outcome.kind === "prepared") {
+        // A recreated path's chain was just minted, so its pending state entry has to reach
+        // the host before the batch sends the create.
+        this.persist();
+        await job.add(outcome.prepared, "create");
         continue;
       }
       const prepared = await this.preparePush(outcome.request);
@@ -4339,7 +4429,9 @@ export class SyncEngine {
     // The delete this file is the other half of, when there is one: the job's own ledger
     // first, then the self-event log (which records the version the tombstone pushed, so a
     // refused `rename` can tell our own tombstone from a peer's — see `settleRefusedMove`).
-    const ownDelete = ledger?.deletedForHash(hash) ?? this.selfEvents.matchDeletedFile(hash);
+    const ownDelete =
+      ledger?.deletedForHash(hash, stamp, path) ??
+      this.selfEvents.matchDeletedFile(hash, stamp, path);
     const deletedFileId = ownDelete?.fileId ?? null;
     const known = this.remoteIndex.fileIdAt(path);
     const knownHead = known ? this.remoteIndex.headOf(known) : undefined;
@@ -4347,7 +4439,7 @@ export class SyncEngine {
       known && knownHead && knownHead.action !== "delete"
         ? { fileId: known, head: knownHead }
         : null;
-    const contentOwner = pathOwner ? null : this.findRemoteFileIdByContent(hash, localPaths);
+    const contentOwner = pathOwner ? null : this.findRemoteFileIdByContent(hash, localPaths, stamp);
     const decision = decideNewLocalFile({
       contentHash: hash,
       deletedFileId,
@@ -4377,7 +4469,10 @@ export class SyncEngine {
         baseVersionId: this.state[fileId].lastKnownVersionId,
         stamp,
       });
-      if (prepared !== null) prepared.ownDeleteVersion = ownDelete?.versionId ?? null;
+      if (prepared !== null) {
+        prepared.ownDeleteVersion = ownDelete?.versionId ?? null;
+        prepared.ownDeletePath = ownDelete?.path ?? null;
+      }
       return prepared === null
         ? { kind: "handled" }
         : { kind: "rename", prepared, ownDeleteVersion: ownDelete?.versionId ?? null };
@@ -4458,6 +4553,7 @@ export class SyncEngine {
     fileId: string,
     path: string,
     prefetched?: { bytes: Uint8Array; stamp: FileStamp | null },
+    moveSource: string | null = null,
   ): Promise<void> {
     let chain: VersionChainEntry[] | null = null;
 
@@ -4470,8 +4566,14 @@ export class SyncEngine {
         path,
         chain,
         attempt === 0 ? prefetched : undefined,
+        undefined,
+        moveSource,
       );
       if (outcome.kind === "handled") return;
+      if (outcome.kind === "prepared") {
+        await this.pushPrepared(outcome.prepared);
+        return;
+      }
       // The file moved while its chain was being read: decide again from disk (which
       // fetches that one chain itself), as this path always has.
       if (outcome.kind === "retry") return await this.decideIncremental(fileId, path);
@@ -4569,11 +4671,13 @@ export class SyncEngine {
    * everything a decision can do to the file (adopt the head as synced, pull the remote
    * version, resolve a conflict) happens here.
    *
-   * Three outcomes: `push` carries the version and its base, `handled` means the decision
-   * already acted on the file or had nothing to do, and `retry` means the bytes moved while
-   * the chain was read — the caller decides again from disk (a prefetched read is only
-   * trusted while its stamp still holds, and a non-push decision must be taken from the
-   * file as it is *now*, because it may overwrite it).
+   * Four outcomes: `push` carries the version and its base, `prepared` is a version the
+   * decision already had to prepare (a recreated path gets a **new** fileId, so its pending
+   * state entry has to be written after `preparePush` succeeds — the create path's rule),
+   * `handled` means the decision already acted on the file or had nothing to do, and
+   * `retry` means the bytes moved while the chain was read — the caller decides again from
+   * disk (a prefetched read is only trusted while its stamp still holds, and a non-push
+   * decision must be taken from the file as it is *now*, because it may overwrite it).
    */
   private async decideTrackedPush(
     fileId: string,
@@ -4581,7 +4685,13 @@ export class SyncEngine {
     chain: VersionChainEntry[],
     prefetched?: { bytes: Uint8Array; stamp: FileStamp | null },
     loadRestoreIndex?: () => Promise<VaultSyncIndexResponse>,
-  ): Promise<{ kind: "push"; request: PushRequest } | { kind: "handled" } | { kind: "retry" }> {
+    moveSource: string | null = null,
+  ): Promise<
+    | { kind: "push"; request: PushRequest }
+    | { kind: "prepared"; prepared: PreparedPush }
+    | { kind: "handled" }
+    | { kind: "retry" }
+  > {
     const head = remoteHead(chain);
     // The caller's read stands only while the file still carries the stamp it was taken
     // at — the same size+mtime hint a pass trusts.
@@ -4625,6 +4735,56 @@ export class SyncEngine {
       bytes = fresh.bytes;
       stamp = fresh.stamp;
       hash = freshHash;
+    }
+
+    if (decision.action === "recreate") {
+      // The delete's recorded path says which of the two this is. A local file at **that**
+      // path is one the user wrote after deleting the file there: a new file with its own
+      // chain, and the tombstone entry is retired (the recycle bin still offers the old
+      // chain). A local file at **another** path carries the deleted file's bytes and
+      // stamp — this is the create half of a move whose delete landed first, so the chain
+      // continues as a `restore` on its tombstone.
+      const deletedPath = moveSource ?? this.selfEvents.deletedPathFor(fileId);
+      if (deletedPath === null || deletedPath === path) {
+        // A live chain a peer created at the path meanwhile wins it, exactly as it would
+        // for any recreate; the in-memory index can be stale, so the server is asked.
+        const other = await this.findLiveChainAtPath(path, fileId, loadRestoreIndex);
+        if (other) {
+          const applied = await this.resolveRecreateAgainstOwner(other, fileId, path, hash, stamp);
+          if (!applied) {
+            // A failed apply must be visible: the pass is the retry, and the local file is
+            // still on disk (the same rule the `restore` branch follows).
+            throw new Error(`Could not read the content of ${path} (${other.head.contentHash})`);
+          }
+          return { kind: "handled" };
+        }
+        delete this.state[fileId];
+        if (this.pathToFileId.get(path) === fileId) this.pathToFileId.delete(path);
+        const newFileId = generateFileId();
+        // Prepared before the state entry, like every create: a path the API cannot carry
+        // must not be left looking tracked with no chain.
+        const prepared = await this.preparePush({
+          fileId: newFileId,
+          plainPath: path,
+          action: "create",
+          bytes,
+          contentHash: hash,
+          baseVersionId: null,
+          stamp,
+        });
+        if (prepared === null) return { kind: "handled" };
+        // Written before the request so an event that lands while the push is in flight
+        // adopts this identity instead of forking a second chain (`dropPendingCreate`
+        // undoes it on a refusal).
+        this.state[newFileId] = {
+          plainPath: path,
+          lastKnownVersionId: null,
+          lastKnownContentHash: null,
+        };
+        this.pathToFileId.set(path, newFileId);
+        return { kind: "prepared", prepared };
+      }
+      decision = { action: "push", pushAction: "restore" };
     }
 
     if (decision.action === "push") {
@@ -4679,6 +4839,12 @@ export class SyncEngine {
       }
     }
     if (decision.action === "synced") {
+      // The bytes on disk are the version the state records, read at `stamp`. Keeping the
+      // stamp current is what lets a later move of this file be proved by it: a move
+      // carries the file's size and mtime, and a match on the bytes alone would hand the
+      // chain to any new file that happened to hold the same content
+      // (see `SelfEventLog.matchDeletedFile`).
+      this.rememberStamp(path, stamp);
       // The head already holds the bytes on disk, while our sync point is behind it:
       // another operation on this path pushed them and this decision fetched the chain
       // before that push's response landed (see `decideFile`). Take the head as the sync
@@ -4765,7 +4931,14 @@ export class SyncEngine {
     const versionId =
       this.selfEvents.pendingDeleteVersion(fileId, deletedContentHash, baseVersionId) ??
       generateVersionId();
-    this.selfEvents.rememberDelete(fileId, deletedContentHash, versionId, baseVersionId);
+    this.selfEvents.rememberDelete(
+      fileId,
+      deletedContentHash,
+      this.state[fileId]?.stamp ?? null,
+      path,
+      versionId,
+      baseVersionId,
+    );
     // Only drop the mapping while it still names this chain: a move can have taken the path
     // in the same job, and the tombstone of the chain that used to be there must not remove
     // the new owner's mapping.
@@ -5289,6 +5462,7 @@ export class SyncEngine {
   private findRemoteFileIdByContent(
     hash: string,
     localPaths: Set<string>,
+    stamp: FileStamp,
   ): { fileId: string; head: VersionChainEntry } | null {
     const fileId = this.remoteIndex.fileIdForHash(hash);
     if (!fileId) return null;
@@ -5300,6 +5474,11 @@ export class SyncEngine {
     if (head.action === "delete") return null;
     const previousPath = this.state[fileId]?.plainPath;
     if (previousPath && localPaths.has(previousPath)) return null;
+    // Bytes are not identity: only the file's own stamp proves this chain's bytes moved
+    // here. A new note that happens to hold the same bytes (every empty one does) gets its
+    // own chain instead of the history of the file this one was copied from.
+    const recorded = this.state[fileId]?.stamp;
+    if (!recorded || !stamp || !sameStamp(recorded, stamp)) return null;
     return { fileId, head };
   }
 

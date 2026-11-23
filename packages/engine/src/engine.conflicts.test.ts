@@ -71,7 +71,7 @@ describe("SyncEngine conflicts", () => {
    * The recreate is pushed as a `restore` on the same chain — under the "remote
    * wins" rule the alternative would be deleting the note the user is typing.
    */
-  it("pushes a restore for a file recreated after this device deleted it", async () => {
+  it("gives a file recreated after this device deleted it a chain of its own", async () => {
     const { engine, adapter, api } = await makeEngine();
     adapter.files.set("reborn.md", encoder.encode("first life"));
     await engine.initialSync();
@@ -81,15 +81,22 @@ describe("SyncEngine conflicts", () => {
     adapter.files.set("reborn.md", encoder.encode("second life"));
     await engine.handleLocalChange("reborn.md");
 
-    expect(api.pushed.at(-1)?.action).toBe("restore");
-    expect(engine.fileIdForPath("reborn.md")).toBe(fileId);
+    // The path was freed by this device's own delete, so the file written there is a new
+    // file: its own chain, and the deleted one stays exactly as it was (the recycle bin
+    // still offers the version it removed).
+    const rebornId = engine.fileIdForPath("reborn.md")!;
+    expect(rebornId).not.toBe(fileId);
+    expect(api.pushed.at(-1)?.action).toBe("create");
     expect(adapter.files.has(conflictFilePath("reborn.md"))).toBe(false);
+    expect(api.chains.get(fileId)!.map((v) => v.action)).toEqual(["create", "delete"]);
+    expect(api.chains.get(rebornId)!.map((v) => v.action)).toEqual(["create"]);
 
-    // The scheduled pass leaves it alone: it is a normal synced file again.
+    // The scheduled pass leaves the new chain alone: it is a normal synced file again.
     await engine.initialSync();
 
     expect(new TextDecoder().decode(adapter.files.get("reborn.md"))).toBe("second life");
-    expect(api.chains.get(fileId)!.map((v) => v.action)).toEqual(["create", "delete", "restore"]);
+    expect(engine.fileIdForPath("reborn.md")).toBe(rebornId);
+    expect(api.chains.get(rebornId)!.map((v) => v.action)).toEqual(["create"]);
   });
 
   it("takes the peer's deletion for an edit made offline, parking that edit", async () => {

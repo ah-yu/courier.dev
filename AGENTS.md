@@ -185,9 +185,10 @@ protocol or a security hole. Read the linked section before changing one.
 3. **A `delete` head is read two ways.** A bind revives only a file this device has **never
    tracked** (it becomes a new chain); a file the state already tracks follows the apply rule on
    every pass, bind included, so a peer's deletion made while this device was paused or closed
-   lands instead of the surviving copy being pushed back. A file under this device's own delete
-   point is a recreate, pushed as `restore`; applying a deletion drops the chain from the
-   identity index. See [sync-engine.md](docs/sync-engine.md#tombstones-and-binding).
+   lands instead of the surviving copy being pushed back. A file written at this device's own
+   delete point is a **new file with its own chain** (the deleted chain stays deleted; only an
+   explicit restore continues it); applying a deletion drops the chain from the identity index.
+   See [sync-engine.md](docs/sync-engine.md#tombstones-and-binding).
 4. **Every push names its base.** `baseVersionId`; the server checks and inserts atomically, so
    two pushes decided from the same head cannot both land. A `stale_base` refusal is re-decided
    from the fresh chain without moving this device's sync point; the same bytes are adopted as

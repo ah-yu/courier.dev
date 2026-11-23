@@ -1596,9 +1596,9 @@ async function runChurn(
       tombstoned: deleted.filter(
         (entry) => byId.get(entry.fileId ?? "")?.versions.at(-1)?.action === "delete",
       ).length,
-      // A local delete keeps the path → chain mapping on purpose: the tombstone is
-      // this device's sync point, so a file created there again is pushed as a
-      // `restore` on the same chain rather than forking a second identity.
+      // A local delete keeps the path → chain mapping on purpose: the tombstone is this
+      // device's sync point, so a file created there again is recognised as a recreate —
+      // it gets a chain of its own, and the deleted chain stays in the recycle bin.
       stillMappedForRecreate: deleted.filter(
         (entry) => a.engine.fileIdForPath(entry.path) !== undefined,
       ).length,

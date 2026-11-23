@@ -1192,26 +1192,32 @@ describe("SyncEngine — a batch of local events", () => {
     expect(engine.serializeState()).not.toContain("big.mp4");
   }, 20_000);
 
-  it("reads the chain index once for a job full of recreates", async () => {
+  it("gives each file recreated at a deleted path a chain of its own", async () => {
     const { engine, adapter, api } = await makeEngine();
     const paths = ["a.md", "b.md", "c.md"];
     for (const path of paths) adapter.files.set(path, encoder.encode(`old ${path}`));
     await engine.initialSync();
+    const oldIds = paths.map((path) => engine.fileIdForPath(path)!);
     for (const path of paths) {
       adapter.files.delete(path);
       await engine.handleLocalDelete(path);
     }
 
-    const realIndex = api.getVaultSyncIndex.bind(api);
-    const indexReads = vi.fn(async (vaultId: string) => realIndex(vaultId));
-    api.getVaultSyncIndex = indexReads;
     for (const path of paths) adapter.files.set(path, encoder.encode(`new ${path}`));
-
     await engine.handleLocalEvents({ changed: paths });
 
-    // Three restores, one owner check for the job: a bulk recreate is a bulk write.
-    expect(indexReads).toHaveBeenCalledTimes(1);
-    expect(api.pushed.filter((push) => push.action === "restore")).toHaveLength(paths.length);
+    // A file written at a deleted path is a new file: one create per path, and no restore
+    // that would fold it into the deleted chain's history.
+    expect(api.pushed.filter((push) => push.action === "restore")).toHaveLength(0);
+    for (const [index, path] of paths.entries()) {
+      const reborn = engine.fileIdForPath(path)!;
+      expect(reborn).not.toBe(oldIds[index]);
+      expect(api.chains.get(reborn)!.map((version) => version.action)).toEqual(["create"]);
+      expect(api.chains.get(oldIds[index]!)!.map((version) => version.action)).toEqual([
+        "create",
+        "delete",
+      ]);
+    }
   });
 
   it("adopts a move whose new path a pass saw before its event", async () => {
@@ -1223,9 +1229,8 @@ describe("SyncEngine — a batch of local events", () => {
     // The delete half is published by a burst, then the file is renamed on disk and a pass
     // lists the vault before the create's event arrives — a scheduled pass inside a bulk
     // move. The pass must adopt the chain the delete left behind, not create a second one.
-    adapter.files.delete("old.md");
+    adapter.files.move("old.md", "new.md");
     await engine.handleLocalEvents({ deleted: ["old.md"] });
-    adapter.files.set("new.md", encoder.encode("moved bytes"));
     await engine.initialSync();
 
     expect(engine.fileIdForPath("new.md")).toBe(fileId);
@@ -1336,8 +1341,7 @@ describe("SyncEngine — a batch of local events", () => {
 
     // The vault was reorganised while nothing watched: no event at all, and the pass finds
     // the chain's recorded path gone and one unclaimed file holding its bytes.
-    adapter.files.delete("old.md");
-    adapter.files.set("new.md", encoder.encode("moved bytes"));
+    adapter.files.move("old.md", "new.md");
     await engine.initialSync();
 
     expect(engine.fileIdForPath("new.md")).toBe(fileId);
@@ -1362,8 +1366,7 @@ describe("SyncEngine — a batch of local events", () => {
       }
     }
 
-    adapter.files.delete("old.md");
-    adapter.files.set("new.md", encoder.encode("moved bytes"));
+    adapter.files.move("old.md", "new.md");
     await engine.initialSync();
 
     expect(api.chains.get(fileId)!.map((version) => version.action)).toEqual(["create", "rename"]);
@@ -1381,8 +1384,7 @@ describe("SyncEngine — a batch of local events", () => {
     // The CLI's `fs.watch` (and an external tool) reports a move as its two halves: the
     // old path gone and a new path created. The chain never left the tree, so the batch
     // must send one content-less rename — not a tombstone the rename then races.
-    adapter.files.delete("old.md");
-    adapter.files.set("new.md", encoder.encode("moved bytes"));
+    adapter.files.move("old.md", "new.md");
     await engine.handleLocalEvents({ changed: ["new.md"], deleted: ["old.md"] });
 
     const pushed = api.pushed.slice(before);
@@ -1702,8 +1704,7 @@ describe("SyncEngine — a move split across two event jobs", () => {
     const fileId = engine.fileIdForPath("old.md")!;
 
     // The vault renames the file; the host reports the two halves to two jobs.
-    adapter.files.delete("old.md");
-    adapter.files.set("new.md", bytes);
+    adapter.files.move("old.md", "new.md");
 
     // Order the jobs the way the race does. The tombstone is decided (its push is held on
     // the wire) while the create is decided and prepared from the same head; only then
@@ -1761,8 +1762,7 @@ describe("SyncEngine — a move split across two event jobs", () => {
     await engine.initialSync();
     const fileId = engine.fileIdForPath("old.md")!;
 
-    adapter.files.delete("old.md");
-    adapter.files.set("new.md", bytes);
+    adapter.files.move("old.md", "new.md");
 
     // The tombstone reaches the server but its **response** is held, so the delete job's
     // `applyPushedVersion` has not run when the create's `rename` is refused: the state is
@@ -1816,8 +1816,7 @@ describe("SyncEngine — a move split across two event jobs", () => {
     await engine.initialSync();
     const fileId = engine.fileIdForPath("old.md")!;
 
-    adapter.files.delete("old.md");
-    adapter.files.set("new.md", bytes);
+    adapter.files.move("old.md", "new.md");
 
     const realPush = api.push.bind(api);
     let releaseTombstone!: () => void;
@@ -1862,8 +1861,7 @@ describe("SyncEngine — a move split across two event jobs", () => {
     await engine.initialSync();
     const fileId = engine.fileIdForPath("old.md")!;
 
-    adapter.files.delete("old.md");
-    adapter.files.set("new.md", bytes);
+    adapter.files.move("old.md", "new.md");
 
     const realPush = api.push.bind(api);
     let releaseTombstone!: () => void;
@@ -1910,6 +1908,7 @@ describe("SyncEngine — a move split across two event jobs", () => {
     await engine.initialSync();
     const fileId = engine.fileIdForPath("old.md")!;
 
+    const oldStamp = adapter.files.mtimes.get("old.md")!;
     adapter.files.delete("old.md");
 
     const realPush = api.push.bind(api);
@@ -1930,7 +1929,9 @@ describe("SyncEngine — a move split across two event jobs", () => {
     // its own and `new.md` is nobody's claim yet.
     const pass = engine.initialSync();
     await tombstoneLanded;
+    // The move carried the file's stamp to its new path; only the bytes are written here.
     adapter.files.set("new.md", bytes);
+    adapter.files.touch("new.md", oldStamp);
     // The create half, decided while the pass's tombstone answer is still outstanding.
     await engine.handleLocalChange("new.md");
 
@@ -1958,6 +1959,7 @@ describe("SyncEngine — a move split across two event jobs", () => {
     adapter.files.set("old.md", bytes);
     await engine.initialSync();
     const fileId = engine.fileIdForPath("old.md")!;
+    const oldStamp = adapter.files.mtimes.get("old.md")!;
 
     const realPush = api.push.bind(api);
     const realPull = api.pull.bind(api);
@@ -2009,6 +2011,7 @@ describe("SyncEngine — a move split across two event jobs", () => {
     // The move's create half then has a record that names this device's head, so the refusal
     // settles as a recreate instead of applying a deletion to the only copy of the bytes.
     adapter.files.set("new.md", bytes);
+    adapter.files.touch("new.md", oldStamp);
     await engine.handleLocalChange("new.md");
     expect(api.chains.get(fileId)!.map((version) => version.action)).toEqual([
       "create",
@@ -2030,6 +2033,7 @@ describe("SyncEngine — a move split across two event jobs", () => {
     adapter.files.set("old.md", bytes);
     await engine.initialSync();
     const fileId = engine.fileIdForPath("old.md")!;
+    const oldStamp = adapter.files.mtimes.get("old.md")!;
 
     const realPush = api.push.bind(api);
     let deletePushes = 0;
@@ -2071,6 +2075,7 @@ describe("SyncEngine — a move split across two event jobs", () => {
 
     // The create half of the move captures the first tombstone's version.
     adapter.files.set("new.md", bytes);
+    adapter.files.touch("new.md", oldStamp);
     const create = engine.handleLocalChange("new.md");
     await renameOnTheWire;
 
@@ -2109,8 +2114,7 @@ describe("SyncEngine — a move split across two event jobs", () => {
     await engine.initialSync();
     const fileId = engine.fileIdForPath("old.md")!;
 
-    adapter.files.delete("old.md");
-    adapter.files.set("new.md", bytes);
+    adapter.files.move("old.md", "new.md");
     api.onPush = async (files) => {
       if (files[0]?.action === "delete") await api.remoteDelete(fileId);
     };

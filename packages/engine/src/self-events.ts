@@ -55,6 +55,25 @@ export const DEFAULT_SELF_WRITE_WINDOW_MS = 10_000;
 export interface PendingDelete {
   fileId: string;
   contentHash: string;
+  /**
+   * The path the deleted file lived at.
+   *
+   * A candidate at this path is never the moved file: the user deleted the file there and
+   * wrote a new one, which gets a chain of its own. Only a candidate at another path that
+   * carries the deleted file's stamp is a move — see {@link stamp}.
+   */
+  path: string;
+  /**
+   * The stamp of the file's last sync point — what proves a later file is its move.
+   *
+   * Content alone is not identity: an empty note (every new note starts empty) and a
+   * copy of any note share a hash without being the same file. A filesystem move carries
+   * the file's size and modification time to its new path, so a candidate that holds the
+   * same bytes **at the same stamp** is the moved file; a new file that merely shares the
+   * bytes has a stamp of its own. Null when the delete was decided for a chain whose stamp
+   * was never recorded, which costs the move its identity and gives the bytes a new chain.
+   */
+  stamp: FileStamp | null;
   deletedAt: number;
   /**
    * The version this device's tombstone pushes, once it has been prepared.
@@ -92,6 +111,12 @@ export interface PendingDelete {
 
 /** How many tombstone versions one chain keeps for that recognition (bounded). */
 export const MAX_DELETE_VERSIONS = 8;
+
+/** Whether two stamps describe the same bytes on disk (a move carries both). */
+function sameStamp(recorded: FileStamp | null, candidate: FileStamp | null): boolean {
+  if (recorded === null || candidate === null) return false;
+  return recorded.sizeBytes === candidate.sizeBytes && recorded.mtimeMs === candidate.mtimeMs;
+}
 
 export interface SelfEventLogOptions {
   /** See {@link DEFAULT_RENAME_WINDOW_MS}. */
@@ -346,6 +371,8 @@ export class SelfEventLog {
   rememberDelete(
     fileId: string,
     contentHash: string,
+    stamp: FileStamp | null,
+    path: string,
     versionId: string | null = null,
     baseVersionId: string | null = null,
   ): void {
@@ -357,6 +384,8 @@ export class SelfEventLog {
       this.pendingDeletes.set(fileId, {
         fileId,
         contentHash,
+        stamp,
+        path,
         deletedAt: this.now(),
         versionId,
         baseVersionId,
@@ -364,6 +393,8 @@ export class SelfEventLog {
       });
     } else {
       entry.contentHash = contentHash;
+      entry.stamp = stamp;
+      entry.path = path;
       entry.deletedAt = this.now();
       // A second deletion of the same chain is a new tombstone, whose version this caller
       // states; the previous one would let a refused rename adopt a tombstone this
@@ -382,6 +413,23 @@ export class SelfEventLog {
       if (oldest.done) break;
       this.pendingDeletes.delete(oldest.value);
     }
+  }
+
+  /**
+   * The path a chain's pending deletion was decided at, while the record is still live.
+   *
+   * A local file at that path is a new file (the user deleted this one and wrote another
+   * there). A local file at **another** path while the chain's state points there is the
+   * create half of a move whose delete landed first, and the chain continues.
+   */
+  deletedPathFor(fileId: string): string | null {
+    const entry = this.pendingDeletes.get(fileId);
+    if (entry === undefined) return null;
+    if (this.now() - entry.deletedAt > this.renameWindowMs) {
+      this.pendingDeletes.delete(fileId);
+      return null;
+    }
+    return entry.path;
   }
 
   /**
@@ -418,20 +466,38 @@ export class SelfEventLog {
   }
 
   /**
-   * The most recent delete inside the rename window whose content matches `contentHash`,
-   * or null. The match is consumed: one delete explains one new file.
+   * The most recent delete inside the rename window whose content matches and whose
+   * **stamp** proves the candidate is that file at another path, or null. The match is
+   * consumed: one delete explains one new file.
+   *
+   * The stamp is the identity half of the proof: a move carries the file's size and
+   * modification time to its new path, so a candidate with the same bytes at the same
+   * stamp is that file; one that merely holds the same bytes — an empty note, a template,
+   * a duplicated line — is a different file and must get its own chain. A file at the
+   * **deleted path** is never a move: the user deleted that file and wrote another one
+   * there, so it is a new file too. Matching on the content hash alone handed a new note
+   * the version history of the note the user had just renamed and deleted, because every
+   * empty note has `sha256("")` as its hash.
    */
-  matchDeletedFile(contentHash: string): PendingDelete | null {
+  matchDeletedFile(
+    contentHash: string,
+    stamp: FileStamp | null,
+    path: string,
+  ): PendingDelete | null {
     const now = this.now();
     for (const [key, pending] of this.pendingDeletes) {
       if (now - pending.deletedAt > this.renameWindowMs) {
         this.pendingDeletes.delete(key);
         continue;
       }
-      if (pending.contentHash && pending.contentHash === contentHash) {
-        this.pendingDeletes.delete(key);
-        return pending;
-      }
+      if (!pending.contentHash || pending.contentHash !== contentHash) continue;
+      // A file at the deleted path is a new file (the path was free and someone wrote
+      // one there); only a candidate at **another** path that carries the file's stamp is
+      // the move the record exists for.
+      if (pending.path === path) continue;
+      if (!sameStamp(pending.stamp, stamp)) continue;
+      this.pendingDeletes.delete(key);
+      return pending;
     }
     return null;
   }

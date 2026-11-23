@@ -7,7 +7,7 @@ import {
   type TestVault,
   type VaultMaterial,
 } from "./harness/vault";
-import { deletedFiles, fileVersions, vaultHistory } from "./harness/api";
+import { deletedFiles, fileVersions, filesAtPath, vaultHistory } from "./harness/api";
 
 /**
  * End-to-end sync across **file path shapes**: root, one level deep, two levels
@@ -69,6 +69,25 @@ const SHAPES: PathShape[] = [
     renamed: "folder/deep/sub/renamed.md",
   },
 ];
+
+/**
+ * Create `未命名.md`, rename it, delete it, and answer the fileId that went away.
+ *
+ * The cycle from the bug report: the next new note Obsidian creates is empty again and
+ * must not inherit this chain's history.
+ */
+async function retireUntitled(client: TestClient, body = ""): Promise<string> {
+  client.write("未命名.md", body);
+  await client.sync();
+  await client.change("未命名.md");
+  const fileId = client.engine.fileIdForPath("未命名.md")!;
+
+  client.move("未命名.md", "named.md");
+  await client.rename("未命名.md", "named.md");
+  client.remove("named.md");
+  await client.removeAndSync("named.md");
+  return fileId;
+}
 
 describe("sync e2e — path shapes across two clients", () => {
   let server: TestServer;
@@ -227,17 +246,13 @@ describe("sync e2e — path shapes across two clients", () => {
 
   describe("a file deleted on one side and recreated on the other", () => {
     /**
-     * Deleting a file and writing new content at the same path leaves the server
-     * chain ending in a tombstone while this device has real content — but the
-     * tombstone is **this device's own sync point**, so the new file is a recreate,
-     * not a conflict: it is pushed as a `restore` on the same chain.
-     *
-     * Regression guard for two defects that met here: the decision used to demand a
-     * remote blob that a `delete` version can never have (so the recreate was
-     * dropped), and an empty remote tombstone could be mistaken for "same content,
-     * nothing to do".
+     * Deleting a file and writing new content at the same path leaves the server chain
+     * ending in a tombstone while this device has real content. The file written there is
+     * a **new file**: the old chain stays deleted (the recycle bin still offers it) and
+     * the new note gets a chain of its own, so its version history cannot show the deleted
+     * note's rows. The path is not contested — nothing remote competed with these bytes.
      */
-    it("pushes the recreated content as a restore under a nested path", async () => {
+    it("starts a new chain for the recreated content under a nested path", async () => {
       const vault = await newVault("paths-recreate-unrecorded");
       const a = await newClient(vault.id, "device-a");
       const b = await newClient(vault.id, "device-b");
@@ -256,14 +271,22 @@ describe("sync e2e — path shapes across two clients", () => {
       a.write(path, "second life");
       await a.sync();
 
-      // Same identity, one more version — and no conflict file, because nothing
-      // remote competed with these bytes.
+      const reborn = a.engine.fileIdForPath(path)!;
+      expect(reborn).not.toBe(fileId);
       expect(a.read(path)).toBe("second life");
-      expect(a.engine.fileIdForPath(path)).toBe(fileId);
-      expect((await fileVersions(server, vault.id, fileId)).at(-1)?.action).toBe("restore");
+      expect((await fileVersions(server, vault.id, reborn)).map((v) => v.action)).toEqual([
+        "create",
+      ]);
+      expect((await fileVersions(server, vault.id, fileId)).map((v) => v.action)).toEqual([
+        "create",
+        "delete",
+      ]);
+      // The deleted chain is still the recycle bin's to offer.
+      expect((await deletedFiles(server, vault.id)).map((file) => file.fileId)).toContain(fileId);
 
       await b.sync();
       expect(b.read(path)).toBe("second life");
+      expect(b.engine.fileIdForPath(path)).toBe(reborn);
     });
 
     /**
@@ -312,6 +335,91 @@ describe("sync e2e — path shapes across two clients", () => {
 
       // And the reviving client keeps its own copy.
       expect(c.read(path)).toBe("first life");
+    });
+  });
+
+  /**
+   * A new file that happens to hold a **deleted** file's bytes is not that file's move.
+   *
+   * This is the ordinary untitled-note cycle: Obsidian names every new note `未命名`, the
+   * user renames or deletes it, and the next new note starts empty again — the same
+   * `sha256("")` the deleted note carried. Matching a move by content alone made the new
+   * note adopt the deleted chain, so its version history showed the other file's create,
+   * rename and delete. A move is proved by the file's **stamp** (size and mtime) travelling
+   * with its bytes, not by the bytes alone.
+   */
+  describe("a new note that holds a deleted note's bytes", () => {
+    it("starts its own chain, with no row from the deleted file (event path)", async () => {
+      const vault = await newVault("paths-untitled-own-chain-event");
+      const a = await newClient(vault.id, "device-a");
+      const retired = await retireUntitled(a);
+
+      a.write("未命名.md", "");
+      await a.change("未命名.md");
+
+      const reborn = a.engine.fileIdForPath("未命名.md")!;
+      expect(reborn).not.toBe(retired);
+      expect(await a.list()).toContain("未命名.md");
+      // The new note's history is its own create — not the renamed, deleted note's chain.
+      expect((await fileVersions(server, vault.id, reborn)).map((v) => v.action)).toEqual([
+        "create",
+      ]);
+      expect(await filesAtPath(server, vault.id, material.key, "未命名.md")).toEqual([reborn]);
+      // The deleted chain is untouched and still offers its version in the recycle bin.
+      expect((await fileVersions(server, vault.id, retired)).map((v) => v.action)).toEqual([
+        "create",
+        "rename",
+        "delete",
+      ]);
+      expect((await deletedFiles(server, vault.id)).map((f) => f.fileId)).toContain(retired);
+    });
+
+    it("starts its own chain when a pass discovers it first (pass path)", async () => {
+      const vault = await newVault("paths-untitled-own-chain-pass");
+      const a = await newClient(vault.id, "device-a");
+      const retired = await retireUntitled(a);
+
+      // No event: the next reconcile lists the vault and gives the new note an identity.
+      a.write("未命名.md", "");
+      await a.sync();
+
+      const reborn = a.engine.fileIdForPath("未命名.md")!;
+      expect(reborn).not.toBe(retired);
+      expect((await fileVersions(server, vault.id, reborn)).map((v) => v.action)).toEqual([
+        "create",
+      ]);
+    });
+
+    it("does not inherit a deleted note's chain just because the bytes match", async () => {
+      const vault = await newVault("paths-untitled-own-chain-bytes");
+      const a = await newClient(vault.id, "device-a");
+      const retired = await retireUntitled(a, "same bytes");
+
+      a.write("another.md", "same bytes");
+      await a.change("another.md");
+
+      const reborn = a.engine.fileIdForPath("another.md")!;
+      expect(reborn).not.toBe(retired);
+      expect((await fileVersions(server, vault.id, reborn)).map((v) => v.action)).toEqual([
+        "create",
+      ]);
+    });
+
+    it("still follows a real move of the note it just created", async () => {
+      const vault = await newVault("paths-untitled-move-still-followed");
+      const a = await newClient(vault.id, "device-a");
+
+      a.write("未命名.md", "");
+      await a.sync();
+      const fileId = a.engine.fileIdForPath("未命名.md")!;
+      a.move("未命名.md", "named.md");
+      await a.rename("未命名.md", "named.md");
+
+      expect(a.engine.fileIdForPath("named.md")).toBe(fileId);
+      expect((await fileVersions(server, vault.id, fileId)).map((v) => v.action)).toEqual([
+        "create",
+        "rename",
+      ]);
     });
   });
 

@@ -20,6 +20,9 @@ function version(fileId: string, size: number, overrides: Partial<JobVersion> = 
   };
 }
 
+/** A stamp a move carries from the deleted path to its new one. */
+const stampOf = (mtimeMs = 7, sizeBytes = 3) => ({ sizeBytes, mtimeMs });
+
 interface JobOptions {
   push?: (batch: readonly JobVersion[]) => Promise<readonly JobPushResult[]>;
   /** Settle a refusal differently (a throwing settle is one of the edges under test). */
@@ -177,28 +180,51 @@ describe("LocalEventJob — settlement", () => {
 });
 
 describe("LocalEventJob — the tombstone ledger", () => {
-  it("finds a prepared tombstone by content hash, and takes it back", async () => {
+  it("finds a prepared tombstone by content hash and stamp, and takes it back", async () => {
     const { job, pushed } = makeJob();
     const tombstone = version("a", 0, { content: null });
-    job.noteTombstone("a.md", tombstone, "h1");
+    job.noteTombstone("a.md", tombstone, "h1", stampOf());
     // The version travels with the match: a refused create half compares it with the fresh
     // head to tell this device's own tombstone from a peer's deletion.
-    expect(job.deletedForHash("h1")).toEqual({ fileId: "a", versionId: tombstone.versionId });
+    expect(job.deletedForHash("h1", stampOf(), "moved.md")).toEqual({
+      fileId: "a",
+      versionId: tombstone.versionId,
+      path: "a.md",
+    });
     expect(job.tombstoneAt("a.md")).toBe("a");
     job.takeBackTombstone("a");
-    expect(job.deletedForHash("h1")).toBeNull();
+    expect(job.deletedForHash("h1", stampOf(), "moved.md")).toBeNull();
     expect(job.tombstoneAt("a.md")).toBeNull();
     await job.drainTombstones();
     await job.complete();
     expect(pushed).toEqual([]);
   });
 
+  it("does not hand a tombstone to a file that only shares its bytes", async () => {
+    // A burst can hold the delete of one note and the creation of another empty one. The
+    // hash matches; the stamp is what tells them apart.
+    const { job } = makeJob();
+    job.noteTombstone("a.md", version("a", 0, { content: null }), "h1", stampOf(100));
+    expect(job.deletedForHash("h1", stampOf(101), "other.md")).toBeNull();
+    expect(job.deletedForHash("h1", stampOf(100, 4), "other.md")).toBeNull();
+    expect(job.deletedForHash("h1", stampOf(100), "other.md")).toEqual({
+      fileId: "a",
+      versionId: "v-a-0",
+      path: "a.md",
+    });
+    // A tombstone without a recorded stamp proves nothing at another path.
+    job.noteTombstone("b.md", version("b", 0, { content: null }), "h2", null);
+    expect(job.deletedForHash("h2", stampOf(), "other.md")).toBeNull();
+    // A file written back at the deleted path is a new file, whatever its stamp.
+    expect(job.deletedForHash("h1", stampOf(999), "a.md")).toBeNull();
+  });
+
   it("sends the tombstones no create consumed, in arrival order", async () => {
     const { job, pushed, refused } = makeJob({
       push: async (batch) => batch.map(() => ({ status: "stale_base" })),
     });
-    job.noteTombstone("a.md", version("a", 0, { content: null }), "ha");
-    job.noteTombstone("b.md", version("b", 0, { content: null }), "hb");
+    job.noteTombstone("a.md", version("a", 0, { content: null }), "ha", stampOf());
+    job.noteTombstone("b.md", version("b", 0, { content: null }), "hb", stampOf());
     await job.drainTombstones();
     await job.complete();
     expect(pushed).toEqual([["a", "b"]]);
@@ -211,7 +237,7 @@ describe("LocalEventJob — the tombstone ledger", () => {
         throw new Error("offline");
       },
     });
-    job.noteTombstone("a.md", version("a", 0, { content: null }), "ha");
+    job.noteTombstone("a.md", version("a", 0, { content: null }), "ha", stampOf());
     await job.drainTombstones();
     await expect(job.complete()).rejects.toThrow("offline");
     expect(forgotten).toEqual(["a"]);
@@ -294,7 +320,7 @@ describe("LocalEventJob — edges of the limiter and a throwing refusal", () => 
     });
     await job.add(version("a", 1), "create");
     await job.flush();
-    job.noteTombstone("t.md", version("t", 0, { content: null }), "ht");
+    job.noteTombstone("t.md", version("t", 0, { content: null }), "ht", stampOf());
     await job.drainTombstones();
     expect(pushed).toEqual([["a"]]);
     // The tombstone is still held: the next event or pass decides it, not a refused request.

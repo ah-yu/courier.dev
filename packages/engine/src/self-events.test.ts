@@ -6,6 +6,7 @@ import {
   MAX_PENDING_DELETES,
   SelfEventLog,
 } from "./self-events";
+import type { FileStamp } from "./adapter";
 
 /**
  * The records that let the engine recognise its own events.
@@ -309,14 +310,61 @@ describe("SelfEventLog — self renames", () => {
   });
 });
 
+/** A move carries the file's stamp, so these cases name one and pair it with its bytes. */
+function stamp(mtimeMs = 7, sizeBytes = 3): FileStamp {
+  return { sizeBytes, mtimeMs };
+}
+
 describe("SelfEventLog — a delete awaiting a rename", () => {
   it("matches a new file with the same content inside the window", () => {
     const log = new SelfEventLog({ now: fakeClock().now });
-    log.rememberDelete("f1", "same-content");
+    log.rememberDelete("f1", "same-content", stamp(), "f1.md");
 
-    expect(log.matchDeletedFile("same-content")).toMatchObject({ fileId: "f1" });
+    // A candidate at another path with the file's stamp is the move the record explains.
+    expect(log.matchDeletedFile("same-content", stamp(), "moved.md")).toMatchObject({
+      fileId: "f1",
+    });
     // Consumed: one delete explains one new file.
-    expect(log.matchDeletedFile("same-content")).toBeNull();
+    expect(log.matchDeletedFile("same-content", stamp(), "moved.md")).toBeNull();
+  });
+
+  it("does not match a different file that merely holds the same bytes", () => {
+    // Every empty note has the same content hash. Only the file's own stamp proves the
+    // bytes moved: a new note written later carries a newer mtime and gets its own chain
+    // instead of the deleted note's history.
+    const log = new SelfEventLog({ now: fakeClock().now });
+    log.rememberDelete("f1", "same-content", stamp(100), "f1.md");
+
+    expect(log.matchDeletedFile("same-content", stamp(101), "other.md")).toBeNull();
+    expect(log.matchDeletedFile("same-content", stamp(100, 4), "other.md")).toBeNull();
+    // The genuine move still matches afterwards, so the record was not consumed.
+    expect(log.matchDeletedFile("same-content", stamp(100), "other.md")).toMatchObject({
+      fileId: "f1",
+    });
+  });
+
+  it("does not match a file whose bytes are not the deleted file's stamp", () => {
+    const log = new SelfEventLog({ now: fakeClock().now });
+    // A chain whose stamp was never recorded costs the move its identity: without proof a
+    // new file must not inherit the history.
+    log.rememberDelete("f1", "same-content", null, "f1.md");
+
+    expect(log.matchDeletedFile("same-content", stamp(), "other.md")).toBeNull();
+    expect(log.matchDeletedFile("same-content", null, "other.md")).toBeNull();
+  });
+
+  it("never hands a chain to a file written back at the deleted path", () => {
+    // A file at the deleted path is a new file, even when its bytes and stamp match: the
+    // user deleted that file and wrote another one there, and it gets its own chain. The
+    // record is left alone (a genuine move of the bytes elsewhere can still match).
+    const log = new SelfEventLog({ now: fakeClock().now });
+    log.rememberDelete("f1", "same-content", stamp(100), "f1.md");
+
+    expect(log.matchDeletedFile("same-content", stamp(100), "f1.md")).toBeNull();
+    expect(log.matchDeletedFile("same-content", stamp(101), "f1.md")).toBeNull();
+    expect(log.matchDeletedFile("same-content", stamp(100), "other.md")).toMatchObject({
+      fileId: "f1",
+    });
   });
 
   it("keeps every tombstone version a chain minted, so a stale capture still recognises a newer head", () => {
@@ -325,8 +373,8 @@ describe("SelfEventLog — a delete awaiting a rename", () => {
     // carries is then not the head it is refused against, so the settlement asks for every
     // version this device minted — never a peer's.
     const log = new SelfEventLog({ now: fakeClock().now });
-    log.rememberDelete("f1", "same-content", "v1", "base-a");
-    log.rememberDelete("f1", "same-content", "v2", "base-b");
+    log.rememberDelete("f1", "same-content", stamp(), "f1.md", "v1", "base-a");
+    log.rememberDelete("f1", "same-content", stamp(), "f1.md", "v2", "base-b");
 
     expect(log.deleteVersionsFor("f1")).toEqual(["v1", "v2"]);
     // The retry rule stays narrow: only the same decision reuses a version.
@@ -339,7 +387,7 @@ describe("SelfEventLog — a delete awaiting a rename", () => {
   it("keeps the newest eight tombstone versions, dropping the oldest", () => {
     const log = new SelfEventLog({ now: fakeClock().now });
     for (let index = 0; index < 9; index += 1) {
-      log.rememberDelete("f1", "same-content", `v${index}`, `base-${index}`);
+      log.rememberDelete("f1", "same-content", stamp(), "f1.md", `v${index}`, `base-${index}`);
     }
 
     const versions = log.deleteVersionsFor("f1");
@@ -356,46 +404,50 @@ describe("SelfEventLog — a delete awaiting a rename", () => {
     // it. A shorter window forked a chain per file here (see `bulk-rename.e2e.test.ts`).
     const clock = fakeClock();
     const log = new SelfEventLog({ now: clock.now });
-    log.rememberDelete("f1", "same-content");
+    log.rememberDelete("f1", "same-content", stamp(), "f1.md");
 
     clock.advance(60_000);
 
-    expect(log.matchDeletedFile("same-content")).toMatchObject({ fileId: "f1" });
+    expect(log.matchDeletedFile("same-content", stamp(), "moved.md")).toMatchObject({
+      fileId: "f1",
+    });
   });
 
   it("does not match outside the window, and sweeps the expired record", () => {
     const clock = fakeClock();
     const log = new SelfEventLog({ now: clock.now });
-    log.rememberDelete("f1", "same-content");
+    log.rememberDelete("f1", "same-content", stamp(), "f1.md");
 
     clock.advance(DEFAULT_RENAME_WINDOW_MS + 1);
 
-    expect(log.matchDeletedFile("same-content")).toBeNull();
+    expect(log.matchDeletedFile("same-content", stamp(), "moved.md")).toBeNull();
   });
 
   it("ignores a file that merely shares content with a delete from long ago", () => {
     const clock = fakeClock();
     const log = new SelfEventLog({ now: clock.now });
-    log.rememberDelete("f1", "shared");
+    log.rememberDelete("f1", "shared", stamp(), "f1.md");
 
     clock.advance(4_000);
-    log.rememberDelete("f2", "other");
+    log.rememberDelete("f2", "other", stamp(), "f2.md");
 
-    expect(log.matchDeletedFile("shared")).toMatchObject({ fileId: "f1" });
-    expect(log.matchDeletedFile("shared")).toBeNull();
+    expect(log.matchDeletedFile("shared", stamp(), "moved.md")).toMatchObject({ fileId: "f1" });
+    expect(log.matchDeletedFile("shared", stamp(), "moved.md")).toBeNull();
   });
 
   it("drops the oldest deletes past its ceiling, keeping the newest adoptable", () => {
     const log = new SelfEventLog({ now: fakeClock().now });
     for (let index = 0; index < MAX_PENDING_DELETES; index += 1) {
-      log.rememberDelete(`f${index}`, `hash-${index}`);
+      log.rememberDelete(`f${index}`, `hash-${index}`, stamp(), `f${index}.md`);
     }
-    log.rememberDelete("newest", "newest-hash");
+    log.rememberDelete("newest", "newest-hash", stamp(), "newest.md");
 
     // The window bounds age, this bounds the burst: a bulk move beyond the ceiling keeps
     // the deletes it made last (its earliest files are the ones that fork).
-    expect(log.matchDeletedFile("hash-0")).toBeNull();
-    expect(log.matchDeletedFile("newest-hash")).toMatchObject({ fileId: "newest" });
+    expect(log.matchDeletedFile("hash-0", stamp(), "f0.md")).toBeNull();
+    expect(log.matchDeletedFile("newest-hash", stamp(), "elsewhere.md")).toMatchObject({
+      fileId: "newest",
+    });
   });
 
   it("sizes the window to one reconcile interval, so the two cannot drift", () => {

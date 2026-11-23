@@ -280,13 +280,13 @@ describe("decideFile", () => {
     });
 
     /**
-     * The tombstone can be **this device's own** sync point — it deleted the file
-     * and the server accepted that. A file on disk under that point is therefore one
-     * the user created afterwards, with no remote content to compete with: a
-     * recreate, pushed as a `restore` on the same chain rather than resolved as a
-     * conflict (which, under "the remote side wins", would delete the new note).
+     * The tombstone can be **this device's own** sync point — it deleted the file and the
+     * server accepted that. A file on disk under that point is one the user created
+     * afterwards: a **new file** with its own chain, not a restore of the deleted one. It
+     * must not be resolved as a conflict either (under "the remote side wins" that would
+     * delete the new note).
      */
-    it("is a restore when the tombstone is this device's own sync point", () => {
+    it("is a new file when the tombstone is this device's own sync point", () => {
       for (const mode of ["bind-merge", "apply-remote-delete"] as const) {
         expect(
           decide({
@@ -297,7 +297,7 @@ describe("decideFile", () => {
             tombstone: mode,
             locallyTracked: true,
           }),
-        ).toEqual({ action: "push", pushAction: "restore" });
+        ).toEqual({ action: "recreate" });
       }
     });
 
