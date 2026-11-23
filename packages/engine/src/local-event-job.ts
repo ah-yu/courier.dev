@@ -1,4 +1,5 @@
 import type { FileStamp } from "./adapter";
+import { sameStamp } from "./stamp";
 import { PushBatch } from "./push-batch";
 import type { BatchPushResult, BatchVersion } from "./push-batch";
 
@@ -29,12 +30,6 @@ import type { BatchPushResult, BatchVersion } from "./push-batch";
 export interface JobFileRead {
   bytes: Uint8Array;
   stamp: FileStamp;
-}
-
-/** Whether two stamps describe the same file on disk. A move carries both. */
-function sameTimestamp(recorded: FileStamp | null, candidate: FileStamp | null): boolean {
-  if (recorded === null || candidate === null) return false;
-  return recorded.sizeBytes === candidate.sizeBytes && recorded.mtimeMs === candidate.mtimeMs;
 }
 
 /** One tracked file's change, waiting for the job's bulk chain read. */
@@ -114,8 +109,8 @@ interface Tombstone<T extends JobVersion> {
 /** The ledger a new-file decision can ask about and take a tombstone back from. */
 export interface TombstoneLedger {
   /**
-   * The chain this job already prepared a delete for, when its bytes match and the
-   * candidate is that file (the same path, or the deleted file's stamp).
+   * The chain this job already prepared a delete for, when the candidate at **another**
+   * path carries that file's bytes and stamp (see `SelfEventLog.matchDeletedFile`).
    */
   deletedForHash(
     contentHash: string,
@@ -317,7 +312,7 @@ export class LocalEventJob<T extends JobVersion> implements TombstoneLedger {
     // A file at the deleted path is a new file, not the move this ledger exists for;
     // another path needs the deleted file's stamp (see `SelfEventLog.matchDeletedFile`).
     if (candidate.path === path) return null;
-    if (!sameTimestamp(candidate.stamp, stamp)) return null;
+    if (!sameStamp(candidate.stamp, stamp)) return null;
     return {
       fileId: candidate.fileId,
       versionId: this.pendingDeletes.get(candidate.fileId)?.prepared.versionId ?? null,

@@ -58,6 +58,7 @@ import {
 } from "./decide";
 import { SelfEventLog } from "./self-events";
 import { RemoteIndex, isNewerHead } from "./remote-index";
+import { sameStamp } from "./stamp";
 import {
   ContentPrefetcher,
   normalizePrefetchLimits,
@@ -394,23 +395,6 @@ const MAX_PUSH_BATCH_BYTES = 8 * 1024 * 1024;
  */
 function isMissingContentError(err: unknown): boolean {
   return typeof err === "object" && err !== null && (err as { status?: unknown }).status === 404;
-}
-
-/**
- * Whether two stamps describe the same file state, as far as a recorded hash may be trusted.
- *
- * The size and the modification time are the whole test: the engine records a hash only
- * together with the stamp it was taken at, and every reuse compares exactly those two
- * fields — a pass's cached hash, a pre-fetched read, the upload cap's "has this file
- * changed since this device synced it?" question. One predicate keeps those sites from
- * drifting on which fields count (a size-only comparison would trust an edit that kept the
- * length; a time-only one would trust a rewritten file written inside the same tick).
- *
- * Local to the engine on purpose: it encodes nothing a host decides with, so it stays off
- * the package surface (`index.ts` wildcard-exports `state.ts`, where it used to live).
- */
-function sameStamp(a: FileStamp, b: FileStamp): boolean {
-  return a.sizeBytes === b.sizeBytes && a.mtimeMs === b.mtimeMs;
 }
 
 /**
@@ -1526,9 +1510,10 @@ export class SyncEngine {
       // `rename`, whose bytes were only proved by that stamp.
       ...(prepared.stamp === null ? {} : { stamp: prepared.stamp }),
     };
-    // A delete keeps the path mapped to this chain so a file written there later is a
-    // restore — unless another chain already owns the path (a move in the same job just
-    // claimed it, and this tombstone must not take it back).
+    // A delete keeps the path mapped to this chain so a file written there later is
+    // recognised as a recreate — its own chain, the deletion left alone — unless another
+    // chain already owns the path (a move in the same job just claimed it, and this
+    // tombstone must not take it back).
     if (action !== "delete" || this.pathToFileId.get(plainPath) === undefined) {
       this.pathToFileId.set(plainPath, fileId);
     }
@@ -2603,9 +2588,12 @@ export class SyncEngine {
         });
         if (prepared) {
           // A refusal here can meet this chain's own tombstone: a delete event answered
-          // while the pass was running. The record names the version that tombstone pushed,
-          // so the settlement can tell it from a peer's deletion.
-          prepared.ownDeleteVersion = this.selfEvents.pendingDeleteVersionFor(fileId);
+          // while the pass was running. The record names the version that tombstone pushed
+          // and the path it was decided at, so the settlement can tell it from a peer's
+          // deletion and still read the re-decision as the move (see `settleRefusedMove`).
+          const ownDelete = this.selfEvents.pendingDeleteFor(fileId);
+          prepared.ownDeleteVersion = ownDelete?.versionId ?? null;
+          prepared.ownDeletePath = ownDelete?.path ?? null;
           pendingRenames.push(prepared);
         }
       }
@@ -2716,8 +2704,10 @@ export class SyncEngine {
     // Both sources are candidates: the hashes the scan took (a file a chain or a state
     // entry claims, or one the move-repair fallback hashed) and the paths the scan only
     // stamped. The latter is the common case on a first bind — the create reads each of
-    // them once, where the scan used to have read it too.
-    const candidates = [...localHashes.keys(), ...untrackedPaths];
+    // them once, where the scan used to have read it too. A path can be in both: a
+    // `recreate` decision re-hands a file the pass just hashed, and the create below must
+    // claim it once.
+    const candidates = [...new Set([...localHashes.keys(), ...untrackedPaths])];
     const ordered = orderByPriority(
       candidates.map((path, position) => ({
         key: path,
@@ -4843,8 +4833,11 @@ export class SyncEngine {
       // stamp current is what lets a later move of this file be proved by it: a move
       // carries the file's size and mtime, and a match on the bytes alone would hand the
       // chain to any new file that happened to hold the same content
-      // (see `SelfEventLog.matchDeletedFile`).
-      this.rememberStamp(path, stamp);
+      // (see `SelfEventLog.matchDeletedFile`). It is recorded on **this** fileId's entry,
+      // not through `pathToFileId`: two chains can name one path for a moment, and the
+      // mapping then answers with the other chain — which must not be handed a stamp for
+      // bytes that are not its own.
+      if (stamp !== null && this.state[fileId] !== undefined) this.state[fileId].stamp = stamp;
       // The head already holds the bytes on disk, while our sync point is behind it:
       // another operation on this path pushed them and this decision fetched the chain
       // before that push's response landed (see `decideFile`). Take the head as the sync

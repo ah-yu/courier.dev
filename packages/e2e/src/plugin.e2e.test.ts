@@ -3156,8 +3156,12 @@ describe("plugin e2e — the real plugin against a real server", () => {
         "the recreated note kept the deleted chain",
       );
       const rebornId = plugin.engine!.fileIdForPath("hero.md")!;
+      // `settle()` only drains the vault's own event queue, so the create can still be on
+      // the wire here — and the versions route answers 404 for a chain the server has not
+      // received yet. Poll the vault list, which has no such answer for a missing chain.
       await waitForAsync(
-        async () => (await fileVersions(server, remote.id, rebornId)).length === 1,
+        async () =>
+          (await vaultHistory(server, remote.id)).some((file) => file.fileId === rebornId),
         "the recreated note's chain never reached the server",
       );
 

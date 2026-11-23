@@ -1204,7 +1204,14 @@ describe("SyncEngine — a batch of local events", () => {
     }
 
     for (const path of paths) adapter.files.set(path, encoder.encode(`new ${path}`));
+    // The recreate consults the server before minting each chain (a peer's live chain at
+    // the path wins it), and a bulk recreate reads the index **once for the job** — the
+    // read that used to be asserted here when a recreate was a `restore`.
+    const realIndex = api.getVaultSyncIndex.bind(api);
+    const indexReads = vi.fn(async (vaultId: string) => realIndex(vaultId));
+    api.getVaultSyncIndex = indexReads;
     await engine.handleLocalEvents({ changed: paths });
+    expect(indexReads).toHaveBeenCalledTimes(1);
 
     // A file written at a deleted path is a new file: one create per path, and no restore
     // that would fold it into the deleted chain's history.
@@ -1691,9 +1698,11 @@ describe("SyncEngine — a batch of local events", () => {
  *
  * The delete half usually wins, and the create half's `rename` is then refused
  * `stale_base`. That refusal is a decision, not a failure (invariant 4): the chain is one
- * this device deleted **at its own sync point**, so deciding again from the fresh chain is
- * a recreate — a `restore` at the new path. Reporting it instead leaves the file unsent
- * until a pass runs, and every peer holds the tombstone in the meantime.
+ * this device deleted **at its own sync point**, so deciding again from the fresh chain
+ * continues it — a `restore` at the new path, because the delete record names the source
+ * path — instead of applying that deletion to the only copy of the bytes. Reporting it
+ * instead leaves the file unsent until a pass runs, and every peer holds the tombstone in
+ * the meantime.
  */
 describe("SyncEngine — a move split across two event jobs", () => {
   it("re-decides the create half when the delete half lands first", async () => {

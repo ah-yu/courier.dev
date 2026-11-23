@@ -68,8 +68,9 @@ describe("SyncEngine conflicts", () => {
    * A local delete followed by a local recreate is not a divergence: the tombstone
    * is **this device's own sync point**, so a file on disk under it can only be one
    * the user just created, and the remote side holds no content to compete with.
-   * The recreate is pushed as a `restore` on the same chain — under the "remote
-   * wins" rule the alternative would be deleting the note the user is typing.
+   * The file gets a chain of its own and the deleted chain keeps its tombstone —
+   * under the "remote wins" rule the alternative would be deleting the note the user
+   * is typing.
    */
   it("gives a file recreated after this device deleted it a chain of its own", async () => {
     const { engine, adapter, api } = await makeEngine();
@@ -362,9 +363,9 @@ describe("SyncEngine conflicts", () => {
    * peer's push).
    *
    * The event's decision is taken from the tracked chain alone, so without a server check it
-   * answers "recreate" and pushes a `restore` onto the dead chain beside the peer's chain —
-   * two live chains at one path. The pass-level rule has to reach the event path too: the
-   * peer's chain owns the path, so the local copy is parked and the peer's head is applied.
+   * creates a second chain beside the peer's chain — two live chains at one path. The
+   * pass-level rule has to reach the event path too: the peer's chain owns the path, so the
+   * local copy is parked and the peer's head is applied.
    */
   it("does not restore on a recreate event when a peer's chain already owns the path", async () => {
     const { engine, adapter, api, key } = await makeEngine();

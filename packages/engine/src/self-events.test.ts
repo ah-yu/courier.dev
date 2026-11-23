@@ -380,7 +380,8 @@ describe("SelfEventLog — a delete awaiting a rename", () => {
     // The retry rule stays narrow: only the same decision reuses a version.
     expect(log.pendingDeleteVersion("f1", "same-content", "base-a")).toBeNull();
     expect(log.pendingDeleteVersion("f1", "same-content", "base-b")).toBe("v2");
-    expect(log.pendingDeleteVersionFor("f1")).toBe("v2");
+    expect(log.pendingDeleteFor("f1")).toEqual({ versionId: "v2", path: "f1.md" });
+    expect(log.pendingDeleteFor("other-chain")).toBeNull();
     expect(log.deleteVersionsFor("other-chain")).toEqual([]);
   });
 

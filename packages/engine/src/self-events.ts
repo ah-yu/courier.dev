@@ -18,6 +18,7 @@
  */
 
 import type { FileStamp } from "./adapter";
+import { sameStamp } from "./stamp";
 
 /**
  * How long a deleted fileId is kept for rename-by-hash matching (ms).
@@ -111,12 +112,6 @@ export interface PendingDelete {
 
 /** How many tombstone versions one chain keeps for that recognition (bounded). */
 export const MAX_DELETE_VERSIONS = 8;
-
-/** Whether two stamps describe the same bytes on disk (a move carries both). */
-function sameStamp(recorded: FileStamp | null, candidate: FileStamp | null): boolean {
-  if (recorded === null || candidate === null) return false;
-  return recorded.sizeBytes === candidate.sizeBytes && recorded.mtimeMs === candidate.mtimeMs;
-}
 
 export interface SelfEventLogOptions {
   /** See {@link DEFAULT_RENAME_WINDOW_MS}. */
@@ -449,9 +444,19 @@ export class SelfEventLog {
     return entry.versionId;
   }
 
-  /** The version of the tombstone this device prepared for `fileId`, whatever its base. */
-  pendingDeleteVersionFor(fileId: string): string | null {
-    return this.pendingDeletes.get(fileId)?.versionId ?? null;
+  /**
+   * The tombstone this device prepared for `fileId`, whatever its base: its version and
+   * the path the deletion was decided at.
+   *
+   * Not swept by the rename window, unlike {@link deletedPathFor}: the move settlement asks
+   * this after a refusal, and deleting the record on the way out would drop the tombstone
+   * versions that settlement recognises as this device's own. The caller that needs the
+   * window (a candidate deciding whether it is the move) asks `matchDeletedFile` instead.
+   */
+  pendingDeleteFor(fileId: string): { versionId: string; path: string } | null {
+    const entry = this.pendingDeletes.get(fileId);
+    if (entry === undefined || entry.versionId === null) return null;
+    return { versionId: entry.versionId, path: entry.path };
   }
 
   /**

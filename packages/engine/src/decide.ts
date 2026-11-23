@@ -346,8 +346,9 @@ export function decideRefusedPush(attempt: number): RefusedPushStep {
  * A move's create half takes the delete half's record back and re-points the chain; when
  * that tombstone's push answered first, the `rename` is refused `stale_base` with the
  * tombstone as the head. Adopting that head as the sync point before deciding again is
- * what makes the create a recreate (`restore`) instead of a peer's deletion applied to the
- * only copy of the bytes.
+ * what makes the re-decision read the create half as the move it is — a `restore` on the
+ * chain, decided from the delete's source path — instead of a peer's deletion applied to
+ * the only copy of the bytes.
  *
  * `captured` is the version the decision carried, and `minted` the versions the chain's
  * delete record still holds (its newest few). Both are this device's
