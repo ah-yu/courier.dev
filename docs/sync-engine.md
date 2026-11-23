@@ -347,9 +347,11 @@ file now lives at.
     A file whose bytes match but whose stamp differs is a new file: a move carries the file's size and
     modification time to its new path, a new note or a copy does not. A file at the **deleted path**
     is never a move: it is a new file too (the delete record matches only another path), and the
-    stamp is what keeps a genuine move apart from a copy. The same proof applies to
-    `repairMovedFile` and the content-identity net, so none of the three paths can hand a chain to a
-    file that merely copied its bytes. The memory is bounded on purpose:
+    stamp is what keeps a genuine move apart from a copy. The same proof gates `repairMovedFile`
+    and the content-identity net, so the scan cannot hand a chain to a file that merely copied
+    its bytes; the excluded-folder fallback still matches by name, size and content, because
+    its destination is a file this device does not list (and the record it re-points is this
+    chain's own). The memory is bounded on purpose:
     the newest 20 000 deletes for at most one pass interval, so a move larger than that keeps the chains
     of its newest files and the earliest ones fork.
 
@@ -467,7 +469,8 @@ file now lives at.
     recognises the head when it is the version the create half **carried** (on the prepared version,
     `ownDeleteVersion` — the record itself is consumed by the decision) or one of the (newest eight)
     tombstone versions the chain's record still holds, which covers a newer mint prepared while the
-    create half was deciding. It then adopts the head and decides again: a recreate, not a peer's
+    create half was deciding. It then adopts the head and decides again: a `restore` on the
+    chain — the delete record's source path is not the destination — not a peer's
     deletion (`settleRefusedMove`; a peer's tombstone is in neither place). That peer rule is also
     what a refused tombstone obeys: only the version this device pushed counts as its deletion having
     landed (`settleStaleBase`), so a peer's tombstone is never adopted as this device's sync point.

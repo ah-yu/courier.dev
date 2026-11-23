@@ -5025,9 +5025,9 @@ export class SyncEngine {
   private async applyLocalRename(oldPath: string, newPath: string): Promise<void> {
     const outcome = await this.resolveLocalRename(oldPath, newPath);
     if (outcome.kind === "change") {
-      // Untracked source: the destination is a plain create. Called directly, because this
-      // job already holds `newPath` — scheduling the event would wait for the job that is
-      // waiting for it.
+      // The source had no live chain (untracked, or this device's own delete point): the
+      // destination is a plain create. Called directly, because this job already holds
+      // `newPath` — scheduling the event would wait for the job that is waiting for it.
       await this.applyLocalChange(newPath);
       return;
     }
@@ -5053,9 +5053,9 @@ export class SyncEngine {
    * The single rename and the burst share this: the chain is re-pointed at the destination
    * (the state records it even when the push fails, because the move is already on disk),
    * the version carries the content hash the sync point already holds (so a move of a large
-   * attachment is one small request, not a second upload), and a source this device never
-   * tracked becomes a `change` at the destination — the batch decides that one with the
-   * rest of its changes, where the single event creates it on the spot.
+   * attachment is one small request, not a second upload), and a source with no live chain
+   * becomes a `change` at the destination — an untracked file, or this device's own delete
+   * point, where the destination is a new file — decided by the batch or on the spot.
    */
   private async resolveLocalRename(
     oldPath: string,
@@ -5072,6 +5072,14 @@ export class SyncEngine {
       if (!this.initialized) return { kind: "handled" };
       return { kind: "change" };
     }
+    // A chain whose sync point is this device's own tombstone has no live file: the file at
+    // the old path was written after that deletion. A host can report a rename of it while
+    // the write itself has not been decided yet (a burst decides its renames before its
+    // changes), and re-pointing the tombstone would resurrect it as a live version and hand
+    // the new file the deleted note's history — the defect the recreate rule exists for. The
+    // destination is a **change** instead: it gets a chain of its own, and the delete record
+    // stays at the old path so a file written there later is a recreate too.
+    if (this.isOwnTombstonePoint(fileId, oldPath)) return { kind: "change" };
     this.pathToFileId.delete(oldPath);
     this.pathToFileId.set(newPath, fileId);
     this.state[fileId] = { ...this.state[fileId], plainPath: newPath };
@@ -5099,6 +5107,20 @@ export class SyncEngine {
       stamp: knownHash === null || stamp === null ? (read?.stamp ?? null) : stamp,
     });
     return prepared === null ? { kind: "handled" } : { kind: "prepared", prepared };
+  }
+
+  /**
+   * Whether `fileId`'s sync point is this device's own deletion of `path`.
+   *
+   * The delete record is the proof: its version is the tombstone this device minted at that
+   * path, and a chain's sync point equals it only while the chain is deleted. A live chain
+   * (a genuine move's source) sits on a different version, so it never matches.
+   */
+  private isOwnTombstonePoint(fileId: string, path: string): boolean {
+    const entry = this.state[fileId];
+    if (!entry || entry.lastKnownVersionId === null) return false;
+    const record = this.selfEvents.pendingDeleteFor(fileId);
+    return record !== null && record.path === path && record.versionId === entry.lastKnownVersionId;
   }
 
   /**

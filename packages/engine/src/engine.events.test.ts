@@ -1227,6 +1227,84 @@ describe("SyncEngine — a batch of local events", () => {
     }
   });
 
+  it("gives a file written at a deleted path its own chain when it is renamed before its create", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("x.md", encoder.encode("old"));
+    await engine.initialSync();
+    const oldId = engine.fileIdForPath("x.md")!;
+    adapter.files.delete("x.md");
+    await engine.handleLocalDelete("x.md");
+
+    // The user writes a new note at the deleted path and renames it inside one burst: a
+    // burst decides its renames before its changes, so the create half is never seen. The
+    // rename must not resurrect the tombstone — it is a new file (the recreate rule).
+    adapter.files.set("y.md", encoder.encode("new"));
+    await engine.handleLocalEvents({ renamed: [{ from: "x.md", to: "y.md" }] });
+
+    const reborn = engine.fileIdForPath("y.md")!;
+    expect(reborn).not.toBe(oldId);
+    expect(api.chains.get(reborn)!.map((version) => version.action)).toEqual(["create"]);
+    expect(api.chains.get(oldId)!.map((version) => version.action)).toEqual(["create", "delete"]);
+  });
+
+  it("does not resurrect a deleted chain when only the rename event reaches the engine", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("x.md", encoder.encode("old"));
+    await engine.initialSync();
+    const oldId = engine.fileIdForPath("x.md")!;
+    adapter.files.delete("x.md");
+    await engine.handleLocalDelete("x.md");
+
+    // The same cycle through the single-event entry point: the destination is a new file.
+    adapter.files.set("y.md", encoder.encode("new"));
+    await engine.handleLocalRename("x.md", "y.md");
+
+    const reborn = engine.fileIdForPath("y.md")!;
+    expect(reborn).not.toBe(oldId);
+    expect(api.chains.get(reborn)!.map((version) => version.action)).toEqual(["create"]);
+    expect(api.chains.get(oldId)!.map((version) => version.action)).toEqual(["create", "delete"]);
+  });
+
+  it("does not hand a live chain to a byte-identical copy with its own stamp", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("a.md", encoder.encode("same bytes"));
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("a.md")!;
+
+    // The original is gone with no event and the bytes reappear at another path at a stamp
+    // of their own (a copy, not a move). The pass's move repair must not re-point the chain
+    // by content alone: the chain is tombstoned and the copy gets a chain of its own.
+    adapter.files.delete("a.md");
+    adapter.files.set("copy.md", encoder.encode("same bytes"));
+
+    await engine.initialSync();
+
+    const copied = engine.fileIdForPath("copy.md")!;
+    expect(copied).not.toBe(fileId);
+    expect(api.chains.get(fileId)!.map((version) => version.action)).toEqual(["create", "delete"]);
+    expect(api.chains.get(copied)!.map((version) => version.action)).toEqual(["create"]);
+  });
+
+  it("does not match a live chain by content alone when the copy's stamp differs", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("a.md", encoder.encode("same bytes"));
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("a.md")!;
+
+    // Same bytes at another path, the original gone with no event: the content-identity net
+    // exists for a lost rename notification, and a copy is not one — only the stamp proves
+    // the chain's own bytes moved.
+    adapter.files.delete("a.md");
+    adapter.files.set("copy.md", encoder.encode("same bytes"));
+
+    await engine.handleLocalChange("copy.md");
+
+    const copied = engine.fileIdForPath("copy.md")!;
+    expect(copied).not.toBe(fileId);
+    expect(api.chains.get(fileId)!.map((version) => version.action)).toEqual(["create"]);
+    expect(api.chains.get(copied)!.map((version) => version.action)).toEqual(["create"]);
+  });
+
   it("adopts a move whose new path a pass saw before its event", async () => {
     const { engine, adapter, api } = await makeEngine();
     adapter.files.set("old.md", encoder.encode("moved bytes"));
@@ -1539,7 +1617,7 @@ describe("SyncEngine — a batch of local events", () => {
     expect(api.chains.get(bId)!.map((version) => version.action)).toEqual(["create", "delete"]);
     expect(engine.fileIdForPath("a.md")).toBe(aId);
     // A tombstone keeps the path mapped to its chain, so a file that appears there later is
-    // a restore of that chain rather than a second one.
+    // recognised as a recreate against it — its own chain, not this one's.
     expect(engine.fileIdForPath("b.md")).toBe(bId);
     await expectConsistent(engine, adapter, api);
   });

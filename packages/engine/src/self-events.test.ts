@@ -444,8 +444,9 @@ describe("SelfEventLog — a delete awaiting a rename", () => {
     log.rememberDelete("newest", "newest-hash", stamp(), "newest.md");
 
     // The window bounds age, this bounds the burst: a bulk move beyond the ceiling keeps
-    // the deletes it made last (its earliest files are the ones that fork).
-    expect(log.matchDeletedFile("hash-0", stamp(), "f0.md")).toBeNull();
+    // the deletes it made last (its earliest files are the ones that fork). The candidate
+    // is at another path, so only the ceiling (not the same-path rule) can answer null.
+    expect(log.matchDeletedFile("hash-0", stamp(), "elsewhere.md")).toBeNull();
     expect(log.matchDeletedFile("newest-hash", stamp(), "elsewhere.md")).toMatchObject({
       fileId: "newest",
     });
