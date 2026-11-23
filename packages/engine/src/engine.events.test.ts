@@ -1265,6 +1265,32 @@ describe("SyncEngine — a batch of local events", () => {
     expect(api.chains.get(oldId)!.map((version) => version.action)).toEqual(["create", "delete"]);
   });
 
+  it("keeps one chain when a move's re-decided restore fails and the next pass retries", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("x.md", encoder.encode("moved bytes"));
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("x.md")!;
+
+    // The move's delete lands as its own job; the create half then takes its record back
+    // (consuming it) and re-points the chain to `y.md`, and its rename push fails. The
+    // tombstone's own path is the proof that survives: the next pass must continue the chain
+    // as a `restore`, not mint a second one from the same bytes.
+    adapter.files.move("x.md", "y.md");
+    await engine.handleLocalDelete("x.md");
+    api.offline = true;
+    await expect(engine.handleLocalChange("y.md")).rejects.toThrow();
+    api.offline = false;
+
+    await engine.initialSync();
+
+    expect(engine.fileIdForPath("y.md")).toBe(fileId);
+    expect(api.chains.get(fileId)!.map((version) => version.action)).toEqual([
+      "create",
+      "delete",
+      "restore",
+    ]);
+  });
+
   it("does not hand a live chain to a byte-identical copy with its own stamp", async () => {
     const { engine, adapter, api } = await makeEngine();
     adapter.files.set("a.md", encoder.encode("same bytes"));

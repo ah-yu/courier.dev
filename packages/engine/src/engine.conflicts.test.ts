@@ -263,10 +263,10 @@ describe("SyncEngine conflicts", () => {
    * claims it.
    *
    * Without that, the next pass read the peer's new note as the file under this device's
-   * delete point and pushed a `restore` on the dead chain: two live chains at one path,
-   * and the note the user deleted back on top of the peer's new one. The state entry is
-   * what the bind pass now keeps across a restart, so the pass itself has to retire it
-   * when the path changes hands.
+   * delete point and minted a second chain beside the peer's: two live chains at one path,
+   * resolved by the ownership rule instead of by the state. The state entry is what the bind
+   * pass now keeps across a restart, so the pass itself has to retire it when the path
+   * changes hands.
    */
   it("does not revive its deleted chain over a peer's new file at the same path", async () => {
     const { engine, adapter, api, key } = await makeEngine();

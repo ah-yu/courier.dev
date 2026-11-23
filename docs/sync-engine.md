@@ -757,8 +757,8 @@ file now lives at.
     after the event (trash and undo), a peer's pull wrote the path, or a move landed on it — the batch
     cannot see those events in order, so the absence is checked on disk at decision time. That is also
     what makes holding a deletion safe (see the delete-sequence bullet below); a tool replacing a file in
-    place reports both halves, and publishing the tombstone only to follow it with a restore tells every
-    peer to delete a note that never went away;
+    place reports both halves, and publishing the tombstone only to follow it with a second chain tells
+    every peer to delete a note that never went away;
   - this is **not a pass**, so it costs the burst, not the vault: there is no vault walk and no
     per-file listing. One listing is read per job (only when it has changes), where the single-event
     path reads one listing per new file for its identity fallback; a restore in the job reads the chain

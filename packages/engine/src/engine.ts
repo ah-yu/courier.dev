@@ -2343,12 +2343,17 @@ export class SyncEngine {
       }
     }
 
-    // A `recreate` is one of two things, and the delete's recorded path tells them apart:
+    // A `recreate` is one of two things, and the path the tombstone records tells them apart:
     // a file written at the deleted path is a new file, while a file at another path that
-    // still carries the chain's sync point is the create half of a move whose delete
-    // landed first — that chain continues as a `restore` on its tombstone.
+    // still carries the chain's sync point is the create half of a move whose delete landed
+    // first — that chain continues as a `restore` on its tombstone. The tombstone's own path
+    // is the proof that survives a failed push; the self-event record (which a create half
+    // consumes when it adopts the chain) is the fallback.
     const recreateSource =
-      decision.action === "recreate" ? this.selfEvents.deletedPathFor(fileId) : null;
+      decision.action === "recreate"
+        ? ((head === undefined ? null : await this.decryptPath(head)) ??
+          this.selfEvents.deletedPathFor(fileId))
+        : null;
     if (decision.action === "recreate" && recreateSource !== null && recreateSource !== plainPath) {
       decision = { action: "push", pushAction: "restore" };
     }
@@ -4733,8 +4738,13 @@ export class SyncEngine {
       // chain, and the tombstone entry is retired (the recycle bin still offers the old
       // chain). A local file at **another** path carries the deleted file's bytes and
       // stamp — this is the create half of a move whose delete landed first, so the chain
-      // continues as a `restore` on its tombstone.
-      const deletedPath = moveSource ?? this.selfEvents.deletedPathFor(fileId);
+      // continues as a `restore` on its tombstone. The tombstone's own path is the proof
+      // that survives a consumed self-event record (a create half takes the record back
+      // when it adopts the chain, and a failed re-decided push is retried by the pass).
+      const deletedPath =
+        moveSource ??
+        (head?.action === "delete" ? await this.decryptPath(head) : null) ??
+        this.selfEvents.deletedPathFor(fileId);
       if (deletedPath === null || deletedPath === path) {
         // A live chain a peer created at the path meanwhile wins it, exactly as it would
         // for any recreate; the in-memory index can be stale, so the server is asked.
@@ -5041,7 +5051,7 @@ export class SyncEngine {
     } catch (err) {
       if (!(err instanceof SyncPushBaseError)) throw err;
       // The same settlement as every other `rename` refusal: a move's create half whose
-      // delete this device published is a recreate, not a peer's deletion.
+      // delete this device published is decided again as the move, not a peer's deletion.
       await this.settleRefusedMove(outcome.prepared, err.chain);
     } finally {
       this.persist();
