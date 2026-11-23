@@ -262,11 +262,12 @@ describe("SyncEngine conflicts", () => {
    * recreate — but a local file at the path is **not** a recreate once another chain
    * claims it.
    *
-   * Without that, the next pass read the peer's new note as the file under this device's
-   * delete point and minted a second chain beside the peer's: two live chains at one path,
-   * resolved by the ownership rule instead of by the state. The state entry is what the bind
-   * pass now keeps across a restart, so the pass itself has to retire it when the path
-   * changes hands.
+   * Without that, the tombstone entry lingered and the pass read the peer's new note as the
+   * file under this device's delete point. Since the `recreate` branch retires the entry and
+   * the create phase skips any path a chain already claims, the retirement here is a fast
+   * path rather than the only defence: the peer chain's own conflict decision parks the
+   * diverged copy either way. The state entry is what the bind pass keeps across a restart,
+   * so the pass retires it when the path changes hands.
    */
   it("does not revive its deleted chain over a peer's new file at the same path", async () => {
     const { engine, adapter, api, key } = await makeEngine();

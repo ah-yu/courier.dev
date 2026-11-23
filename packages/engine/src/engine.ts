@@ -1478,7 +1478,8 @@ export class SyncEngine {
     // pushed from — the tombstone half of a move re-maps the old path when the move's
     // create decided first and the delete landed after — would let a later event for that
     // old path tombstone this chain and delete the moved file on every peer.
-    const previousPath = this.state[fileId]?.plainPath;
+    const previous = this.state[fileId];
+    const previousPath = previous?.plainPath;
     // A version is applied to the point it was decided from. A tombstone whose base has
     // already moved on here — this device re-pointed the chain (the other half of a move),
     // or a pass adopted a newer version, while the request was in flight — must not become
@@ -1509,6 +1510,12 @@ export class SyncEngine {
       // version records the stamp its bytes were read at — including a content-less
       // `rename`, whose bytes were only proved by that stamp.
       ...(prepared.stamp === null ? {} : { stamp: prepared.stamp }),
+      // The deletion's moment survives the accepted tombstone: it is how a later decision
+      // knows this sync point is a delete even after a restart (the state is persisted, the
+      // self-event records are not). Every live apply rewrites the entry without it.
+      ...(action !== "delete" || previous?.deletedAtMs === undefined
+        ? {}
+        : { deletedAtMs: previous.deletedAtMs }),
     };
     // A delete keeps the path mapped to this chain so a file written there later is
     // recognised as a recreate — its own chain, the deletion left alone — unless another
@@ -5122,13 +5129,16 @@ export class SyncEngine {
   /**
    * Whether `fileId`'s sync point is this device's own deletion of `path`.
    *
-   * The delete record is the proof: its version is the tombstone this device minted at that
-   * path, and a chain's sync point equals it only while the chain is deleted. A live chain
-   * (a genuine move's source) sits on a different version, so it never matches.
+   * The entry's deletion moment is the durable proof: it is persisted with the state and
+   * only an accepted tombstone keeps it, so a restart still knows the sync point is a
+   * delete (the self-event record below is memory-only). Its version is the tombstone this
+   * device minted at that path, and a live chain (a genuine move's source) sits on a
+   * different version with the moment cleared, so it never matches.
    */
   private isOwnTombstonePoint(fileId: string, path: string): boolean {
     const entry = this.state[fileId];
     if (!entry || entry.lastKnownVersionId === null) return false;
+    if (entry.deletedAtMs !== undefined && entry.plainPath === path) return true;
     const record = this.selfEvents.pendingDeleteFor(fileId);
     return record !== null && record.path === path && record.versionId === entry.lastKnownVersionId;
   }

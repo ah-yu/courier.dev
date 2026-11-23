@@ -1265,6 +1265,37 @@ describe("SyncEngine — a batch of local events", () => {
     expect(api.chains.get(oldId)!.map((version) => version.action)).toEqual(["create", "delete"]);
   });
 
+  it("recognises this device's delete point after a restart", async () => {
+    const { engine, adapter, api, key } = await makeEngine();
+    adapter.files.set("x.md", encoder.encode("old"));
+    await engine.initialSync();
+    const oldId = engine.fileIdForPath("x.md")!;
+    adapter.files.delete("x.md");
+    await engine.handleLocalDelete("x.md");
+    const persisted = engine.serializeState();
+
+    // A restart keeps the persisted state, not the self-event records: the entry's own
+    // deletion moment is what still proves the path is this device's delete point, so the
+    // burst's rename of a file written there is a new file, not a move of the tombstone.
+    const resumed = new SyncEngine({
+      platform: realPlatform,
+      vaultId: "vault-1",
+      adapter,
+      api,
+      encryptionKey: key,
+    });
+    resumed.loadState(persisted);
+    await resumed.initialSync({ firstBind: true });
+
+    adapter.files.set("y.md", encoder.encode("new"));
+    await resumed.handleLocalEvents({ renamed: [{ from: "x.md", to: "y.md" }] });
+
+    const reborn = resumed.fileIdForPath("y.md")!;
+    expect(reborn).not.toBe(oldId);
+    expect(api.chains.get(reborn)!.map((version) => version.action)).toEqual(["create"]);
+    expect(api.chains.get(oldId)!.map((version) => version.action)).toEqual(["create", "delete"]);
+  });
+
   it("keeps one chain when a move's re-decided restore fails and the next pass retries", async () => {
     const { engine, adapter, api } = await makeEngine();
     adapter.files.set("x.md", encoder.encode("moved bytes"));

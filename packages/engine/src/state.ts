@@ -29,8 +29,12 @@ export interface LocalVersionState {
      * its own file's modification time to settle a config-folder conflict. Recording
      * the moment here — rather than reading the clock again when the push is retried
      * — keeps a deletion made offline from later claiming to be newer than an edit the
-     * peer made after it. Cleared as soon as the server accepts the tombstone (the
-     * sync point is then rewritten to the delete version).
+     * peer made after it.
+     *
+     * It **survives** the accepted tombstone: the state is persisted while the self-event
+     * records are not, so the moment is what tells a restarted engine that this sync
+     * point is a delete (see `SyncEngine.isOwnTombstonePoint`). Every live apply rewrites
+     * the entry without it.
      */
     deletedAtMs?: number;
   };
