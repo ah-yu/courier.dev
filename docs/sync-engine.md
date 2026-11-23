@@ -197,9 +197,10 @@ The rules below are the ones the e2e suites exist to protect.
     a **new file**. It gets a chain of its own, and the deleted chain stays deleted (the recycle bin
     still offers it). Writing a file back at the deleted path does **not** continue the old history;
     an explicit restore (the recycle bin or the version-history view) is the operation that does.
-    That includes a file the app's own trash put back (Obsidian's _Deleted files_, or the OS recycle
-    bin): it reaches the engine as a create at the path, so the restored note starts a new chain and the
-    deleted one stays in Courier's recycle bin.
+    That includes a file the OS recycle bin put back, or one recovered by hand after a permanent
+    delete: it reaches the engine as a create at the path. The app's **own** trash folder is
+    different — a hidden `.trash/` is outside this device's scope, so a deletion there is a move out
+    of scope and moving the file back re-points the same chain.
     Without the "new file" answer the note just typed would be resolved away as "the remote deletion
     won" and only survive as a conflict file.
   - Either way the comparison is against a live version, never a tombstone, because a delete version's

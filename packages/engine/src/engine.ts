@@ -1100,7 +1100,8 @@ export class SyncEngine {
           head.action !== "delete" &&
           head.contentHash === prepared.contentHash;
     if (head && landed) {
-      this.adoptRemoteIdentity(fileId, plainPath, head, prepared.stamp ?? null);
+      // A tombstone that landed was pushed at `plainPath`, which is the path it deletes.
+      this.adoptRemoteIdentity(fileId, plainPath, head, prepared.stamp ?? null, plainPath);
       // The head is this very version (the server stores the client's versionId), so
       // the push did land and only its response was lost. A peer that merely converged
       // on the same bytes has a different versionId and is not reported as this
@@ -1510,12 +1511,11 @@ export class SyncEngine {
       // version records the stamp its bytes were read at — including a content-less
       // `rename`, whose bytes were only proved by that stamp.
       ...(prepared.stamp === null ? {} : { stamp: prepared.stamp }),
-      // The deletion's moment survives the accepted tombstone: it is how a later decision
-      // knows this sync point is a delete even after a restart (the state is persisted, the
-      // self-event records are not). Every live apply rewrites the entry without it.
-      ...(action !== "delete" || previous?.deletedAtMs === undefined
-        ? {}
-        : { deletedAtMs: previous.deletedAtMs }),
+      // The accepted tombstone records the delete version and the path it removed beside
+      // the sync point: that is how a later decision still knows this point is a delete
+      // after a restart (the state is persisted, the self-event records are not). A live
+      // apply rewrites the entry without them.
+      ...(action === "delete" ? { deleteVersionId: versionId, deletePath: plainPath } : {}),
     };
     // A delete keeps the path mapped to this chain so a file written there later is
     // recognised as a recreate — its own chain, the deletion left alone — unless another
@@ -3766,6 +3766,7 @@ export class SyncEngine {
     path: string,
     head: VersionChainEntry,
     stamp: FileStamp | null = null,
+    deletedPath: string | null = null,
   ): void {
     // The mapping to drop is the one this chain was recorded under. The state is the
     // authority on where the local file lives; a chain adopted for the first time has no
@@ -3783,6 +3784,14 @@ export class SyncEngine {
       // an identity for a path nobody has read leaves it absent, which costs the next
       // pass one read and never a wrong hash.
       ...(stamp === null ? {} : { stamp }),
+      // A tombstone adopted as the sync point (the lost-answer retry, or a move's create
+      // half meeting this device's own delete) is a delete point like any other, so it
+      // records its version **and the path it deleted**: the proof has to survive the
+      // restart that drops the self-event records, and it must not claim the move's
+      // destination as a delete point (the file there is this chain's).
+      ...(head.action === "delete"
+        ? { deleteVersionId: head.versionId, deletePath: deletedPath ?? path }
+        : {}),
     };
     if (head.action === "delete") {
       this.remoteIndex.forget(fileId);
@@ -3949,7 +3958,12 @@ export class SyncEngine {
         captured: prepared.ownDeleteVersion,
         minted: this.selfEvents.deleteVersionsFor(prepared.fileId),
       });
-      if (own) this.adoptRemoteIdentity(prepared.fileId, prepared.plainPath, head);
+      if (own) {
+        // The delete record may already be gone (the create half consumed it), so the
+        // deleted path comes from the version or, failing that, from the head itself.
+        const deletedPath = prepared.ownDeletePath ?? (await this.decryptPath(head));
+        this.adoptRemoteIdentity(prepared.fileId, prepared.plainPath, head, null, deletedPath);
+      }
     }
     // The delete record itself was consumed when this move adopted the chain, so the
     // version carries the path it was decided at: a refusal re-deciding at another path
@@ -5129,16 +5143,23 @@ export class SyncEngine {
   /**
    * Whether `fileId`'s sync point is this device's own deletion of `path`.
    *
-   * The entry's deletion moment is the durable proof: it is persisted with the state and
-   * only an accepted tombstone keeps it, so a restart still knows the sync point is a
-   * delete (the self-event record below is memory-only). Its version is the tombstone this
-   * device minted at that path, and a live chain (a genuine move's source) sits on a
-   * different version with the moment cleared, so it never matches.
+   * The entry records the delete version **and the path it deleted** beside the sync point
+   * (`deleteVersionId` / `deletePath`), so the proof is durable and self-checking: a
+   * restart keeps it, a live version later on the same entry replaces both fields, and a
+   * move whose create half adopted the tombstone at another path does not claim that path
+   * as a delete point. The self-event record below covers the same decision before the
+   * server accepted it; it is memory-only, which is why the state carries the durable half.
    */
   private isOwnTombstonePoint(fileId: string, path: string): boolean {
     const entry = this.state[fileId];
     if (!entry || entry.lastKnownVersionId === null) return false;
-    if (entry.deletedAtMs !== undefined && entry.plainPath === path) return true;
+    if (
+      entry.deleteVersionId !== undefined &&
+      entry.deletePath === path &&
+      entry.deleteVersionId === entry.lastKnownVersionId
+    ) {
+      return true;
+    }
     const record = this.selfEvents.pendingDeleteFor(fileId);
     return record !== null && record.path === path && record.versionId === entry.lastKnownVersionId;
   }

@@ -1274,8 +1274,8 @@ describe("SyncEngine — a batch of local events", () => {
     await engine.handleLocalDelete("x.md");
     const persisted = engine.serializeState();
 
-    // A restart keeps the persisted state, not the self-event records: the entry's own
-    // deletion moment is what still proves the path is this device's delete point, so the
+    // A restart keeps the persisted state, not the self-event records: the delete version the
+    // entry records is what still proves the path is this device's delete point, so the
     // burst's rename of a file written there is a new file, not a move of the tombstone.
     const resumed = new SyncEngine({
       platform: realPlatform,
@@ -1319,6 +1319,32 @@ describe("SyncEngine — a batch of local events", () => {
       "create",
       "delete",
       "restore",
+    ]);
+  });
+
+  it("continues the chain when the file at an adopted delete point is renamed again", async () => {
+    const { engine, adapter, api } = await makeEngine();
+    adapter.files.set("x.md", encoder.encode("moved bytes"));
+    await engine.initialSync();
+    const fileId = engine.fileIdForPath("x.md")!;
+
+    // The move's create half fails (as above), leaving the chain's sync point a tombstone
+    // at `y.md` while the file there is this chain's own. The delete point is `x.md`, so a
+    // second move continues the chain instead of forking a new one at `z.md`.
+    adapter.files.move("x.md", "y.md");
+    await engine.handleLocalDelete("x.md");
+    api.offline = true;
+    await expect(engine.handleLocalChange("y.md")).rejects.toThrow();
+    api.offline = false;
+
+    adapter.files.move("y.md", "z.md");
+    await engine.handleLocalRename("y.md", "z.md");
+
+    expect(engine.fileIdForPath("z.md")).toBe(fileId);
+    expect(api.chains.get(fileId)!.map((version) => version.action)).toEqual([
+      "create",
+      "delete",
+      "rename",
     ]);
   });
 

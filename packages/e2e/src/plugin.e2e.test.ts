@@ -2395,6 +2395,15 @@ describe("plugin e2e — the real plugin against a real server", () => {
       const secondId = await trackedFileId(plugin, "未命名.md");
       expect(secondId).not.toBe(firstId);
 
+      // The create can still be on the wire (`settle()` drains the vault's queue, not the
+      // push), and the versions route answers 404 for a chain the server does not hold yet —
+      // so the view's own read waits until the chain is there, then renders its one row.
+      await waitForAsync(
+        async () =>
+          (await vaultHistory(server, remote.id)).some((file) => file.fileId === secondId),
+        "the new note's chain never reached the server",
+      );
+
       const view = await openVersionHistory(plugin, "未命名.md");
       expect(versionActions(view)).toEqual(["创建"]);
       expect((await fileVersions(server, remote.id, secondId)).map((v) => v.action)).toEqual([
